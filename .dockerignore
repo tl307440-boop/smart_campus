@@ -1,0 +1,42 @@
+# Python 虚拟环境（容器内重新安装）
+venv/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 环境变量文件（敏感信息，不进镜像，通过 -v 挂载）
+backend/.env
+
+# ChromaDB 本地数据（通过 docker volume 挂载持久化）
+chroma_db_data/
+backend/chroma_db_data/
+
+# 测试数据（不需要部署）
+test_data/
+
+# 测试脚本
+backend/test_*.py
+backend/main.py
+backend/main01.py
+
+# 音频文件（运行时生成）
+*.mp3
+
+# IDE 配置
+.vscode/
+.idea/
+
+# 部署文档
+*.md
+启动与部署指南.md
+
+# Docker 相关（避免递归）
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Git
+.git/
+.gitignore

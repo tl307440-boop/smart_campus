@@ -1,0 +1,32 @@
+# ==========================================
+# 智悦校园 AI 伴侣 (SmartJoy Campus Agent)
+# 核心依赖环境清单
+# ==========================================
+
+# --- 1. Web前端交互与多模态组件 ---
+streamlit>=1.30.0               # 核心可视化前端框架
+
+
+# --- 2. 大模型接口调用核心库 ---
+openai>=1.12.0                  # 用于兼容调用 DeepSeek 和 Kimi 的 API
+python-dotenv>=1.0.0            # 用于安全读取 .env 文件中的各类 API Key
+
+# --- 3. RAG 知识库与检索组件 ---
+pypdf>=4.0.0                    # 轻量级本地 PDF 解析提取
+chromadb>=0.4.20                # 核心本地向量数据库
+langchain-community>=0.0.20     # 提供 RAG 相关的封装工具类
+langgraph>=0.2.0                # LangGraph 状态图框架 (用于构建 RAG 工作流)
+langgraph-checkpoint-redis>=2.0.0  # Redis 持久化存储 (多轮对话记忆、并发隔离)
+zhipuai>=2.0.0                  # 智谱 AI 官方 SDK (用于文本 Embedding 向量化)
+
+# --- 4. 语音交互与底层通信组件 ---
+websocket-client>=1.7.0         # WebSocket 通信库 (用于连接科大讯飞流式接口)
+pygame>=2.5.0                   # 音频混音器与播放引擎 (用于播放 TTS 生成的语音)
+
+# --- 5. 辅助与调试工具 ---
+colorama>=0.4.6                 # 控制台彩色输出美化 (主要用于后台运行日志追踪)
+
+# --- 6. 核心依赖补丁 (解决 Windows 下 ChromaDB 冲突) ---
+importlib-metadata>=7.0.0
+opentelemetry-api>=1.22.0
+opentelemetry-sdk>=1.22.0

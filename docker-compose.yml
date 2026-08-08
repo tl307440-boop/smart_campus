@@ -1,0 +1,41 @@
+version: "3.8"
+
+services:
+  # ---- Redis Stack（含 RediSearch 模块）----
+  redis:
+    image: redis/redis-stack:latest
+    container_name: smart_campus_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # ---- Streamlit 智悦校园应用 ----
+  app:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: smart_campus_app
+    ports:
+      - "8502:8501"
+    working_dir: /app/backend
+    volumes:
+      - ./backend/.env:/app/backend/.env:ro
+      - chroma-data:/app/backend/chroma_db_data
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  chroma-data:
