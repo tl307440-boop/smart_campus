@@ -12,13 +12,15 @@ import glob
 from env_config import chroma_persist_dir, load_backend_env
 from graph_app import build_graph
 from session_thread import resolve_thread_id
+from ui_theme import apply_theme, render_hero
 
 load_backend_env()
 
 # ============================================================
 # 1. 页面基本配置
 # ============================================================
-st.set_page_config(page_title="智悦校园 · RAG 智能问答系统", page_icon=":robot_face:", layout="centered")
+st.set_page_config(page_title="智悦校园 · 小懒", page_icon=":books:", layout="centered")
+apply_theme()
 
 
 # ============================================================
@@ -175,8 +177,10 @@ STRATEGY_MAP = {
 # 6. 侧边栏
 # ============================================================
 with st.sidebar:
-    st.title("小懒控制台")
+    st.markdown("### 小懒控制台")
+    st.caption("会话与知识库设置")
     st.markdown("---")
+
 
     st.caption(f"会话 ID: `{st.session_state.thread_id[:8]}...`")
     st.caption("刷新页面可保留会话（URL 含 tid）")
@@ -261,13 +265,12 @@ with st.sidebar:
 # ============================================================
 # 7. 聊天交互区
 # ============================================================
-st.title("智悦校园 · RAG 智能问答系统")
-st.markdown("集成了 DeepSeek 认知、Kimi 精读、Zhipu 向量检索与讯飞语音的混合架构。")
+render_hero()
 
 if "chat_active" not in st.session_state:
     st.session_state.chat_active = False
 
-st.markdown("对话控制台")
+st.markdown('<p class="zy-section-label">对话</p>', unsafe_allow_html=True)
 col1, col2 = st.columns(2)
 with col1:
     if not st.session_state.chat_active:
@@ -286,7 +289,6 @@ with col2:
             _safe_tts_speak(goodbye_text)
             st.session_state.messages = []
             st.rerun()
-    st.markdown("---")
 
 
 # ============================================================
@@ -366,4 +368,7 @@ if st.session_state.chat_active:
                 "emotion": json_emotion
             })
 else:
-    st.info("系统已经休眠，请点击左侧按钮开始对话！")
+    st.markdown(
+        '<div class="zy-idle">助手已休眠。点击上方「开始本次对话」，小懒就会醒来。</div>',
+        unsafe_allow_html=True,
+    )

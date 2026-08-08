@@ -16,7 +16,7 @@ pypdf>=4.0.0                    # 轻量级本地 PDF 解析提取
 chromadb>=0.4.20                # 核心本地向量数据库
 langchain-community>=0.0.20     # 提供 RAG 相关的封装工具类
 langgraph>=0.2.0                # LangGraph 状态图框架 (用于构建 RAG 工作流)
-langgraph-checkpoint-redis>=2.0.0  # Redis 持久化存储 (多轮对话记忆、并发隔离)
+langgraph-checkpoint-redis>=0.5.0  # Redis 持久化存储 (多轮对话记忆、并发隔离；PyPI 当前最高 0.5.x)
 zhipuai>=2.0.0                  # 智谱 AI 官方 SDK (用于文本 Embedding 向量化)
 
 # --- 4. 语音交互与底层通信组件 ---
