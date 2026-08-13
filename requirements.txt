@@ -3,8 +3,11 @@
 # 核心依赖环境清单
 # ==========================================
 
-# --- 1. Web前端交互与多模态组件 ---
-streamlit>=1.30.0               # 核心可视化前端框架
+# --- 1. Web 服务与旧版一体化界面 ---
+fastapi>=0.115.0                # 对外 HTTP/SSE 接口层，供独立前端调用
+uvicorn[standard]>=0.30.0       # ASGI 服务器
+python-multipart>=0.0.9         # FastAPI 解析 multipart 文件上传
+streamlit>=1.30.0               # 旧版一体化界面（逐步由 Next.js 前端替代）
 
 
 # --- 2. 大模型接口调用核心库 ---
@@ -30,3 +33,6 @@ colorama>=0.4.6                 # 控制台彩色输出美化 (主要用于后�
 importlib-metadata>=7.0.0
 opentelemetry-api>=1.22.0
 opentelemetry-sdk>=1.22.0
+
+# --- 7. 交叉编码器重排序（BGE Reranker；未安装时自动退回向量 Top-K）---
+sentence-transformers>=3.0.0

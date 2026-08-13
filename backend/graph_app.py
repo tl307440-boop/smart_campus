@@ -310,7 +310,9 @@ def retrieve_node(state: GraphState) -> dict:
         │               │
         │               └── route_strategy == "vectordb" 或 (auto 且文档长)
         │                       └──> VectorRAGService.search(question, top_k=3)
-        │                               └──> 返回 ChromaDB 检索的 top-k 片段
+        │                               ├── 宽召回约 50 个候选 Chunk
+        │                               ├── BGE CrossEncoder 重排序
+        │                               └── 截断 Top-3 后返回拼接上下文
         │
         └──> state["context"] = 检索结果（供 generate_node 使用）
     """

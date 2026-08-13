@@ -39,10 +39,19 @@ html, body, [data-testid="stAppViewContainer"], .stApp {
 
 [data-testid="stHeader"] {
   background: transparent !important;
+  height: 0 !important;
+  min-height: 0 !important;
 }
 
-[data-testid="stToolbar"] {
-  background: transparent !important;
+[data-testid="stToolbar"],
+[data-testid="stDecoration"],
+[data-testid="stStatusWidget"] {
+  display: none !important;
+  visibility: hidden !important;
+}
+
+#MainMenu, footer, header {
+  visibility: hidden !important;
 }
 
 .block-container {

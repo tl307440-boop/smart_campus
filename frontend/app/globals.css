@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink: #0b1218;
+  --color-ink-elevated: #121a22;
+  --color-surface: #18222c;
+  --color-line: rgba(212, 163, 90, 0.18);
+  --color-line-strong: rgba(212, 163, 90, 0.45);
+  --color-parchment: #e8e4dc;
+  --color-muted: #9aa3ad;
+  --color-gold: #d4a35a;
+  --color-gold-soft: rgba(212, 163, 90, 0.14);
+  --color-bubble-user: #243140;
+  --color-bubble-assistant: #152029;
+  --color-danger: #c97b7b;
+
+  --animate-fade-in: fade-in 0.35s ease both;
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
+@theme inline {
+  --font-display: var(--font-noto-serif-sc), "Songti SC", serif;
+  --font-body: var(--font-noto-sans-sc), "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+body {
+  background:
+    radial-gradient(900px 420px at 50% -10%, rgba(212, 163, 90, 0.08), transparent 60%),
+    radial-gradient(700px 500px at 100% 100%, rgba(61, 99, 120, 0.12), transparent 55%),
+    var(--color-ink);
+  color: var(--color-parchment);
+  font-family: var(--font-body);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(212, 163, 90, 0.22);
+  border-radius: 999px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

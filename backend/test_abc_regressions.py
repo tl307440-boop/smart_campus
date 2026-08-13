@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from session_thread import normalize_tid, resolve_thread_id
-from vector_service import VectorRAGService, document_content_hash
+from vector_service import RetrievedChunk, VectorRAGService, document_content_hash
 from graph_app import _append_turn_messages, emotion_node
 
 
@@ -61,6 +61,51 @@ class TestContentHash(unittest.TestCase):
         svc.collection.delete.assert_called_once_with(where={"source": "a.txt"})
         svc.embedding_model.embed_documents.assert_called_once()
         svc.collection.add.assert_called_once()
+
+
+class TestRerankPipeline(unittest.TestCase):
+    def _service_with_candidates(self):
+        svc = VectorRAGService.__new__(VectorRAGService)
+        svc.embedding_model = MagicMock()
+        svc.embedding_model.embed_query.return_value = [0.1, 0.2]
+        svc.collection = MagicMock()
+        svc.collection.count.return_value = 3
+        svc.collection.query.return_value = {
+            "documents": [["门禁22点", "奖学金按绩点", "图书馆开放"]],
+            "metadatas": [[{"source": "a.txt"}, {"source": "b.txt"}, {"source": "c.txt"}]],
+            "distances": [[0.1, 0.4, 0.8]],
+        }
+        return svc
+
+    def test_retrieve_candidates_wide_recall(self):
+        svc = self._service_with_candidates()
+        chunks = svc.retrieve_candidates("宿舍门禁", k=50)
+        self.assertEqual(len(chunks), 3)
+        self.assertEqual(chunks[0].text, "门禁22点")
+        self.assertGreater(chunks[0].vector_score, chunks[2].vector_score)
+
+    @patch("vector_service.get_cross_encoder")
+    def test_rerank_uses_cross_encoder_scores(self, mock_get):
+        reranker = MagicMock()
+        reranker.predict.return_value = [0.1, 0.9, 0.2]
+        mock_get.return_value = reranker
+        svc = VectorRAGService.__new__(VectorRAGService)
+        candidates = [
+            RetrievedChunk("弱相关", {"source": "a.txt"}, vector_score=0.99),
+            RetrievedChunk("最相关", {"source": "b.txt"}, vector_score=0.10),
+            RetrievedChunk("一般", {"source": "c.txt"}, vector_score=0.50),
+        ]
+        top = svc.rerank_candidates("奖学金怎么评", candidates, top_n=2)
+        self.assertEqual([c.text for c in top], ["最相关", "一般"])
+        self.assertEqual(top[0].metadata["rerank_score"], 0.9)
+
+    @patch("vector_service.get_cross_encoder", return_value=None)
+    def test_search_falls_back_to_vector_top_k(self, _mock_get):
+        svc = self._service_with_candidates()
+        context = svc.search("宿舍门禁", top_k=2)
+        self.assertIn("门禁22点", context)
+        self.assertIn("奖学金按绩点", context)
+        self.assertNotIn("图书馆开放", context)
 
 
 class TestEmotionAndMessages(unittest.TestCase):
