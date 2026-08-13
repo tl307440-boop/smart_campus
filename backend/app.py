@@ -16,6 +16,11 @@ from ui_theme import apply_theme, render_hero
 
 load_backend_env()
 
+WELCOME_TEXT = "同学，你好！我是你的校园助手小懒。请问有什么可以帮你？"
+GOODBYE_TEXT = "同学，再见！祝你学习愉快！"
+ROUTE_STRATEGY = "auto"
+LONG_DOC_CHARS = 20000
+
 # ============================================================
 # 1. 页面基本配置
 # ============================================================
@@ -67,10 +72,9 @@ def _sync_thread_id_to_url(thread_id: str):
 # 3. Session State 状态管理
 # ============================================================
 if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant",
-         "content": "同学，你好！我是你的校园助手小懒。请问有什么可以帮你？"}
-    ]
+    st.session_state.messages = []
+if "chat_active" not in st.session_state:
+    st.session_state.chat_active = False
 
 if "current_doc_content" not in st.session_state:
     st.session_state.current_doc_content = ""
@@ -113,6 +117,7 @@ if st.session_state.pop("pending_history_restore", False):
                 for m in stored
                 if m.get("role") in ("user", "assistant") and m.get("content")
             ]
+            st.session_state.chat_active = True
             print(f"[Session] 已从 Redis 恢复 {len(st.session_state.messages)} 条 UI 消息")
     except Exception as e:
         st.error(f"无法从 Redis 恢复会话（请确认 Redis Stack 已启动）: {e}")
@@ -152,7 +157,7 @@ if "has_autoloaded" not in st.session_state:
                     continue
 
                 st.session_state.processed_files.add(file_name)
-                if len(content) < 20000:
+                if len(content) < LONG_DOC_CHARS:
                     st.session_state.current_doc_content += (
                         f"\n\n--- 文档来源: {file_name} ---\n\n" + content
                     )
@@ -161,16 +166,6 @@ if "has_autoloaded" not in st.session_state:
                 except Exception as e:
                     print(f"自动加载文件 '{file_name}' 时建立索引失败: {e}")
         print(f"自动加载完成！共登记 {len(st.session_state.processed_files)} 个文件")
-
-
-# ============================================================
-# 5. 路由策略映射：中文 → 英文（graph_app 使用英文策略名）
-# ============================================================
-STRATEGY_MAP = {
-    "自动路由 (按长度判定)": "auto",
-    "Kimi 精读 (全文理解)": "kimi",
-    "智谱向量检索 (海量片段)": "vectordb",
-}
 
 
 # ============================================================
@@ -199,15 +194,6 @@ with st.sidebar:
     )
     st.markdown("---")
 
-    st.subheader("路由策略设置")
-    route_strategy = st.radio(
-        "选择文档阅读引擎：",
-        options=["自动路由 (按长度判定)", "Kimi 精读 (全文理解)", "智谱向量检索 (海量片段)"],
-        index=0,
-        help="短文建议用 Kimi 把握全局，超长文件建议用智谱向量检索提取核心。"
-    )
-    st.markdown("---")
-
     st.subheader("知识库上传")
     uploaded_files = st.file_uploader("上传文档（支持 txt、pdf）", type=["txt", "pdf"], accept_multiple_files=True)
 
@@ -227,14 +213,13 @@ with st.sidebar:
                 st.session_state.processed_files.add(uploaded_file.name)
                 st.success(f"文件 '{uploaded_file.name}' 加载成功！ 文档长度: {len(content)} 字")
 
-                strategy_en = STRATEGY_MAP.get(route_strategy, "auto")
-                if strategy_en == "vectordb" or (strategy_en == "auto" and len(content) >= 20000):
+                if len(content) >= LONG_DOC_CHARS:
                     with st.spinner(f"正在构建{uploaded_file.name}的向量索引..."):
                         if vector_db is not None:
                             vector_db.index_document(content, uploaded_file.name)
                             st.success(f"文件 '{uploaded_file.name}' 已存入向量数据库！")
-                elif strategy_en == "kimi":
-                    st.info(f"文件 '{uploaded_file.name}' 将使用 Kimi 精读引擎。")
+                else:
+                    st.info(f"文件 '{uploaded_file.name}' 较短，将直接精读全文。")
             else:
                 st.error("文件读取失败！")
 
@@ -267,9 +252,6 @@ with st.sidebar:
 # ============================================================
 render_hero()
 
-if "chat_active" not in st.session_state:
-    st.session_state.chat_active = False
-
 st.markdown('<p class="zy-section-label">对话</p>', unsafe_allow_html=True)
 col1, col2 = st.columns(2)
 with col1:
@@ -277,32 +259,42 @@ with col1:
         if st.button("开始本次对话", type="primary", use_container_width=True):
             st.session_state.chat_active = True
             _safe_tts_stop()
-            welcome_text = "同学，你好！我是你的校园助手小懒。请问有什么可以帮你？"
-            st.session_state.messages.append({"role": "assistant", "content": welcome_text, "context": ""})
-            _safe_tts_speak(welcome_text)
+            if not st.session_state.messages:
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": WELCOME_TEXT, "context": ""}
+                )
+                _safe_tts_speak(WELCOME_TEXT)
+            st.rerun()
 with col2:
     if st.session_state.chat_active:
         if st.button("结束本次对话", type="secondary", use_container_width=True):
             st.session_state.chat_active = False
             _safe_tts_stop()
-            goodbye_text = "同学，再见！祝你学习愉快！"
-            _safe_tts_speak(goodbye_text)
+            _safe_tts_speak(GOODBYE_TEXT)
             st.session_state.messages = []
             st.rerun()
 
 
 # ============================================================
-# 8. 渲染历史聊天记录
+# 8. 渲染历史聊天记录（仅对话进行中展示，避免休眠态再画出欢迎气泡）
 # ============================================================
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-        if msg.get("context"):
-            with st.expander("查看知识库来源片段"):
-                st.info(msg["context"])
-        if msg.get("emotion"):
-            with st.expander("情感分析结果"):
-                st.json(msg["emotion"])
+if st.session_state.chat_active:
+    _seen_welcome = False
+    for msg in st.session_state.messages:
+        content = msg.get("content", "")
+        # 连续/重复的同一条欢迎语只渲染一次
+        if msg.get("role") == "assistant" and content == WELCOME_TEXT:
+            if _seen_welcome:
+                continue
+            _seen_welcome = True
+        with st.chat_message(msg["role"]):
+            st.markdown(content)
+            if msg.get("context"):
+                with st.expander("查看知识库来源片段"):
+                    st.info(msg["context"])
+            if msg.get("emotion"):
+                with st.expander("情感分析结果"):
+                    st.json(msg["emotion"])
 
 
 # ============================================================
@@ -318,11 +310,9 @@ if st.session_state.chat_active:
             st.markdown(user_question)
 
         with st.chat_message("assistant"):
-            strategy_en = STRATEGY_MAP.get(route_strategy, "auto")
-
             input_state = {
                 "user_question": user_question,
-                "route_strategy": strategy_en,
+                "route_strategy": ROUTE_STRATEGY,
             }
             if st.session_state.current_doc_content:
                 input_state["current_doc_content"] = st.session_state.current_doc_content
@@ -338,7 +328,7 @@ if st.session_state.chat_active:
             final_answer = result.get("final_answer", "抱歉，未能生成回答。")
             json_emotion = result.get("emotion_data") or {}
 
-            st.toast(f"意图判定: {intent} | 路由: {strategy_en}")
+            st.toast(f"意图判定: {intent}")
 
             if st.session_state.typing_effect:
                 placeholder = st.empty()

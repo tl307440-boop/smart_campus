@@ -8,3 +8,14 @@ font = "sans serif"
 
 [browser]
 gatherUsageStats = false
+
+[client]
+# 隐藏 Stop / Rerun / Deploy 开发者工具栏，避免每次改代码都顶出一条栏
+toolbarMode = "viewer"
+
+[server]
+# 源码变更后自动重跑，不必手动刷新浏览器
+runOnSave = true
+# Windows / Docker Desktop 下 watchdog 经常收不到文件事件，用轮询更稳
+fileWatcherType = "poll"
+headless = true

@@ -51,12 +51,24 @@ EOF
 
 ## 三、一键启动
 
+前端在构建期会把 API 地址内联进产物，先把 `docker-compose.yml` 里 `web.build.args.NEXT_PUBLIC_API_BASE`
+改成用户浏览器能访问到的地址（如 `http://你的服务器IP:8001` 或 `https://你的域名.com/api-host`），
+并把同一地址加进 `api` 服务的 `FRONTEND_ORIGINS`。
+
 ```bash
 cd /opt/smart_campus
 docker-compose up -d
 ```
 
-**首次启动**需要构建镜像（下载 Python 依赖），约 5-10 分钟。
+**首次启动**需要构建镜像（下载 Python 依赖 + 前端依赖），约 5-15 分钟。
+
+会起三个服务：
+
+| 服务 | 端口 | 说明 |
+|---|---|---|
+| `web` | 3000 | Next.js 前端 |
+| `api` | 8001 | FastAPI 接口层 |
+| `redis` | 6380 | Redis Stack |
 
 ## 四、验证
 
@@ -64,14 +76,17 @@ docker-compose up -d
 # 查看容器状态
 docker-compose ps
 
-# 查看应用日志
-docker-compose logs -f app
+# 查看日志
+docker-compose logs -f api
+docker-compose logs -f web
 
-# 测试访问
-curl http://localhost:8502
+# 测试接口
+curl.exe http://localhost:8001/api/health
 ```
 
-浏览器打开：`http://你的服务器IP:8502`
+浏览器打开：`http://你的服务器IP:3000`
+
+需要旧版 Streamlit 界面时：`docker-compose --profile legacy up -d app`（8502）。
 
 ## 五、常用运维命令
 
@@ -83,7 +98,8 @@ curl http://localhost:8502
 | 重新构建并启动 | `docker-compose up -d --build` |
 | 查看状态 | `docker-compose ps` |
 | 查看日志 | `docker-compose logs -f` |
-| 只看应用日志 | `docker-compose logs -f app` |
+| 只看接口日志 | `docker-compose logs -f api` |
+| 只看前端日志 | `docker-compose logs -f web` |
 | 只看 Redis 日志 | `docker-compose logs -f redis` |
 | 进入应用容器 | `docker-compose exec app bash` |
 | 进入 Redis 容器 | `docker-compose exec redis bash` |
@@ -107,8 +123,9 @@ docker-compose up -d --build
 ## 七、防火墙
 
 ```bash
-# 开放 8502 端口
-sudo ufw allow 8502
+# 前端与接口端口
+sudo ufw allow 3000
+sudo ufw allow 8001
 ```
 
 ## 八、配置 HTTPS（可选）
@@ -122,8 +139,18 @@ server {
     listen 80;
     server_name 你的域名.com;
 
+    # 接口层：SSE 必须关缓冲，否则回答会攒到最后一次性吐出
+    location /api/ {
+        proxy_pass http://localhost:8001;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+    }
+
     location / {
-        proxy_pass http://localhost:8502;
+        proxy_pass http://localhost:3000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -139,4 +166,14 @@ nginx -t && systemctl reload nginx
 # 申请 SSL 证书
 sudo apt install certbot python3-certbot-nginx -y
 sudo certbot --nginx -d 你的域名.com
+```
+
+前后端同域时，把 `web.build.args.NEXT_PUBLIC_API_BASE` 置为空字符串，前端会以相对路径 `/api/...`
+请求，不再需要跨域配置：
+
+```yaml
+web:
+  build:
+    args:
+      NEXT_PUBLIC_API_BASE: ""
 ```

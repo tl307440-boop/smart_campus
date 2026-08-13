@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   # ---- Redis Stack（含 RediSearch 模块）----
   redis:
@@ -18,20 +16,80 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # ---- Streamlit 智悦校园应用 ----
+  # ---- FastAPI 接口服务 ----
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: smart_campus_api
+    command:
+      ["python", "-m", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      # 8001：避开本机已被占用的 8000
+      - "8001:8000"
+    working_dir: /app/backend
+    volumes:
+      - ./backend:/app/backend
+      - ./data:/app/data
+      - chroma-data:/app/backend/chroma_db_data
+      - huggingface-cache:/root/.cache/huggingface
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - HF_HOME=/root/.cache/huggingface
+      - HF_ENDPOINT=https://huggingface.co
+      - FRONTEND_ORIGINS=http://localhost:3000
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---- Next.js 前端 ----
+  web:
+    build:
+      context: ./frontend
+      args:
+        # 浏览器直连 API，这里填用户可访问的地址（部署到服务器时换成公网域名）
+        NEXT_PUBLIC_API_BASE: http://localhost:8001
+    container_name: smart_campus_web
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # ---- 旧版 Streamlit 一体化界面（docker compose --profile legacy up）----
   app:
+    profiles: ["legacy"]
     build:
       context: .
       dockerfile: backend/Dockerfile
     container_name: smart_campus_app
+    command:
+      [
+        "python",
+        "-m",
+        "streamlit",
+        "run",
+        "app.py",
+        "--server.headless=true",
+        "--server.address=0.0.0.0",
+        "--server.port=8501",
+      ]
     ports:
       - "8502:8501"
     working_dir: /app/backend
     volumes:
-      - ./backend/.env:/app/backend/.env:ro
+      - ./backend:/app/backend
+      - ./data:/app/data
       - chroma-data:/app/backend/chroma_db_data
+      - huggingface-cache:/root/.cache/huggingface
     environment:
       - REDIS_URL=redis://redis:6379
+      - HF_HOME=/root/.cache/huggingface
+      - HF_ENDPOINT=https://huggingface.co
+      - STREAMLIT_SERVER_RUN_ON_SAVE=true
+      - STREAMLIT_SERVER_FILE_WATCHER_TYPE=poll
+      - STREAMLIT_CLIENT_TOOLBAR_MODE=viewer
     depends_on:
       redis:
         condition: service_healthy
@@ -40,3 +98,4 @@ services:
 volumes:
   redis-data:
   chroma-data:
+  huggingface-cache:
