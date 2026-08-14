@@ -135,5 +135,36 @@ class TestEmotionAndMessages(unittest.TestCase):
         self.assertEqual(out["messages"][-1]["emotion"]["reply_text"], "我在听")
 
 
+class TestUploadFilename(unittest.TestCase):
+    def test_strips_path_traversal(self):
+        from knowledge import _safe_filename
+
+        self.assertEqual(_safe_filename("../etc/passwd.txt"), "passwd.txt")
+        self.assertEqual(_safe_filename("奖学金 手册.PDF"), "奖学金_手册.pdf")
+        self.assertEqual(_safe_filename("要点.md"), "要点.md")
+
+    def test_rejects_unsupported_ext(self):
+        from knowledge import _safe_filename
+
+        with self.assertRaises(ValueError):
+            _safe_filename("hack.exe")
+
+
+class TestWikiHelpers(unittest.TestCase):
+    def test_strip_frontmatter(self):
+        from knowledge import _strip_frontmatter
+
+        raw = "---\ntitle: 测\nstatus: current\n---\n\n# 正文\n金额 10000\n"
+        self.assertEqual(_strip_frontmatter(raw), "# 正文\n金额 10000\n")
+        self.assertEqual(_strip_frontmatter("# 无头\n"), "# 无头\n")
+
+    def test_wiki_dir_helpers(self):
+        from knowledge import _wiki_dir, _WIKI_SKIP_NAMES
+
+        self.assertTrue(_wiki_dir().replace("\\", "/").endswith("/wiki"))
+        self.assertIn("agents.md", _WIKI_SKIP_NAMES)
+        self.assertIn("log.md", _WIKI_SKIP_NAMES)
+
+
 if __name__ == "__main__":
     unittest.main()

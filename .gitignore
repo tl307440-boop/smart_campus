@@ -32,6 +32,9 @@ backend/chroma_db_data/
 *.mp3
 *.wav
 
+# Wiki PDF text extracts (rebuildable from data/)
+wiki/_raw_extract/
+
 # IDE / OS
 .vscode/
 .idea/
