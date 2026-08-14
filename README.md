@@ -2,7 +2,7 @@
 
 面向校园场景的 AI 问答伴侣：基于校规 / 手册等文档做 RAG 检索，用 LangGraph 做意图路由与多轮对话，前后端分离部署。
 
-仓库描述：Smart Campus (智悦校园) Streamlit app —— 旧版为 Streamlit 一体界面，当前主路径为 **Next.js + FastAPI**。
+仓库描述：Smart Campus (智悦校园)  —— 旧版为 Streamlit 一体界面，当前主路径为 **Next.js + FastAPI**。
 
 ## 架构
 
