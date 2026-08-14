@@ -23,15 +23,15 @@ class FileService:
 
         try:
             content = ""
-            if file_ext == '.txt':
+            if file_ext in {'.txt', '.md', '.markdown'}:
                 with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read() 
+                    content = f.read()
             elif file_ext == '.pdf':
                 reader = PdfReader(file_path)
                 for page in reader.pages:
                     content += page.extract_text() + "\n"
             else:
-                return "不支持的文件格式，仅支持 PDF 和 TXT 文件。"
+                return "不支持的文件格式，仅支持 PDF、TXT 和 Markdown 文件。"
             return content.strip() 
 
 
