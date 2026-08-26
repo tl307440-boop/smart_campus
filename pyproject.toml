@@ -1,0 +1,40 @@
+# 工具配置。依赖仍由 requirements.txt / requirements.lock 管理，
+# 这里只放 pytest 与 ruff 的设置。
+
+[tool.pytest.ini_options]
+testpaths = ["backend"]
+# test_graph.py / test_memory.py 是需要真 Redis 与真 API Key 的手工脚本，
+# 不是自动化测试。裸跑 pytest 时把它们排除，免得一上来就红。
+addopts = "-q --ignore=backend/test_graph.py --ignore=backend/test_memory.py"
+pythonpath = ["backend"]
+filterwarnings = [
+    "ignore::DeprecationWarning:langchain_community.*",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = [
+    "backend/chroma_db_data",
+    "frontend",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes：未使用的导入/变量、未定义名字
+    "I",   # isort：导入顺序
+    "UP",  # pyupgrade
+    "B",   # bugbear：常见陷阱
+]
+ignore = [
+    "E501",  # 行宽交给 formatter，注释里的中文按字符数算会误伤
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 旧版脚本保留原样，不在本次整改范围内
+"backend/main.py" = ["F401", "F841", "E402"]
+"backend/main01.py" = ["F401", "F841", "E402"]
+"backend/app.py" = ["E402"]
+"backend/graph_app.py" = ["E402"]  # sys.path 注入必须在 import 之前
+"backend/voice_service.py" = ["F811", "UP031", "B025"]  # 讯飞 TTS 旧模块，未纳入整改

@@ -1,4 +1,27 @@
 services:
+  # ---- Postgres：账号与租户数据（Prisma）----
+  postgres:
+    image: postgres:17-alpine
+    container_name: smart_campus_postgres
+    environment:
+      # 与本地开发时 frontend/.env.local 的连接串保持一致，便于复用同一个数据卷
+      POSTGRES_USER: campus
+      POSTGRES_DB: smart_campus
+      # 未设置时 compose 直接报错退出，不允许空密码起库
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在根目录 .env 中设置 POSTGRES_PASSWORD}
+    ports:
+      # 5433：避免与本机已装的 Postgres 冲突；容器内仍是 5432
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U campus -d smart_campus"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
   # ---- Redis Stack（含 RediSearch 模块）----
   redis:
     image: redis/redis-stack:latest
@@ -31,6 +54,8 @@ services:
     volumes:
       - ./backend:/app/backend
       - ./data:/app/data
+      # 规章维基只读挂载，改 markdown 后重启容器即可重新索引
+      - ./wiki:/app/wiki:ro
       - chroma-data:/app/backend/chroma_db_data
       - huggingface-cache:/root/.cache/huggingface
     environment:
@@ -38,10 +63,25 @@ services:
       - HF_HOME=/root/.cache/huggingface
       - HF_ENDPOINT=https://huggingface.co
       - FRONTEND_ORIGINS=http://localhost:3000
+      # 与 web 同源，两端验签密钥不可能对不上。大模型 API Key 仍读 backend/.env
+      - AUTH_JWT_SECRET=${AUTH_JWT_SECRET:?请在根目录 .env 中设置 AUTH_JWT_SECRET}
     depends_on:
       redis:
         condition: service_healthy
     restart: unless-stopped
+
+  # ---- 建表：一次性任务，跑完退出，web 等它成功后再起 ----
+  migrate:
+    build:
+      context: ./frontend
+      target: migrator
+    container_name: smart_campus_migrate
+    environment:
+      DATABASE_URL: postgresql://campus:${POSTGRES_PASSWORD:?请在根目录 .env 中设置 POSTGRES_PASSWORD}@postgres:5432/smart_campus
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
 
   # ---- Next.js 前端 ----
   web:
@@ -53,8 +93,14 @@ services:
     container_name: smart_campus_web
     ports:
       - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://campus:${POSTGRES_PASSWORD:?请在根目录 .env 中设置 POSTGRES_PASSWORD}@postgres:5432/smart_campus
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?请在根目录 .env 中设置 AUTH_JWT_SECRET}
     depends_on:
-      - api
+      api:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   # ---- 旧版 Streamlit 一体化界面（docker compose --profile legacy up）----
@@ -81,6 +127,7 @@ services:
     volumes:
       - ./backend:/app/backend
       - ./data:/app/data
+      - ./wiki:/app/wiki:ro
       - chroma-data:/app/backend/chroma_db_data
       - huggingface-cache:/root/.cache/huggingface
     environment:
@@ -96,6 +143,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  postgres-data:
   redis-data:
   chroma-data:
   huggingface-cache:

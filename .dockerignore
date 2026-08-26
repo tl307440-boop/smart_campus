@@ -16,6 +16,9 @@ backend/chroma_db_data/
 # 测试数据（不需要部署）
 test_data/
 
+# wiki 的 PDF 抽取缓存，可从 data/ 重建，不进镜像
+wiki/_raw_extract/
+
 # 前端有独立构建上下文（frontend/Dockerfile）
 frontend/
 

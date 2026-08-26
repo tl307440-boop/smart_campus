@@ -1,35 +1,61 @@
 # ==========================================
-# 智悦校园 · Streamlit 应用 Docker 镜像
+# 智悦校园 · 后端镜像（FastAPI，legacy profile 下跑 Streamlit）
 # ==========================================
 
-# 基础镜像：Python 3.12 轻量版
-FROM python:3.12-slim
+# ---- 构建阶段：装依赖，编译工具链只留在这一层 ----
+FROM python:3.12-slim AS builder
 
-# 设置工作目录
-WORKDIR /app
-
-# 安装系统依赖（pypdf 需要）
+# 部分包没有现成 wheel，需要现场编译
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# 先复制依赖文件，利用 Docker 缓存层（代码变了不用重装依赖）
-COPY requirements.txt .
-# CPU 版 PyTorch：容器无 GPU，避免 pip 默认拉 CUDA 大包
-RUN pip install --no-cache-dir --timeout 120 torch --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir --timeout 120 -r requirements.txt
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-# 复制后端代码（所有 .py 文件）
+WORKDIR /app
+COPY requirements.lock .
+# 装全量锁定版本，保证每次构建装到的是同一组包。
+# 锁里 torch 是 +cpu 变体（容器无 GPU，避免拉进几 GB 的 CUDA 包），
+# 这个变体只在 PyTorch 官方索引上有，所以要多给一个 index。
+# 改依赖请编辑 requirements.txt 后重新生成：
+#   uv pip compile requirements.txt --python-platform linux --python-version 3.12 \
+#       --torch-backend cpu --output-file requirements.lock
+RUN pip install --no-cache-dir --timeout 120 \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    -r requirements.lock
+
+# ---- 运行阶段：只带虚拟环境和代码，不带编译工具链 ----
+FROM python:3.12-slim AS runtime
+
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+COPY --from=builder /opt/venv /opt/venv
+
+WORKDIR /app
 COPY backend/ ./backend/
-
-# 复制知识库 PDF 文件
 COPY data/ ./data/
+# 规章维基（knowledge.py 按 backend/../wiki 定位，必须落在 /app/wiki）
+COPY wiki/ ./wiki/
 
-# 创建 ChromaDB 持久化目录
-RUN mkdir -p /app/backend/chroma_db_data
+# 非 root 运行：上传接口 + pypdf 解析是真实攻击面，出事时限制影响范围。
+# 注意：compose 把 ./data 以 bind mount 挂进来，宿主机上该目录需要
+# 对 uid 10001 可写，否则上传会失败（Linux 服务器执行一次
+# `sudo chown -R 10001:10001 data` 即可；Docker Desktop 无此问题）。
+RUN useradd --create-home --uid 10001 campus \
+    && mkdir -p /app/backend/chroma_db_data /app/data/uploads \
+    && chown -R campus:campus /app
+
+USER campus
 
 # 8000 给 FastAPI，8501 给旧版 Streamlit 界面
 EXPOSE 8000 8501
+
+# 首次启动要把维基与预置文档跑一遍向量化，start-period 给够
+HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+    CMD python -c "import urllib.request as u, sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)"
 
 # 默认工作目录与 compose 一致；直接 docker run 时也从 backend 启动
 WORKDIR /app/backend

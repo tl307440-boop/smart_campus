@@ -50,15 +50,25 @@ FastAPI (backend/api.py, :8001)     ← 会话 / 聊天 / 文档
 ## 快速开始（Docker）
 
 1. 配置 `backend/.env`（可参考 `backend/.env.example`），填入 DeepSeek / Kimi / 智谱等密钥。
-2. 按需修改 `docker-compose.yml` 中 `web.build.args.NEXT_PUBLIC_API_BASE`（浏览器能访问到的 API 地址），并同步 `api` 的 `FRONTEND_ORIGINS`。
-3. 启动：
+2. 配置根目录 `.env`（可参考 `.env.example`），填入 `POSTGRES_PASSWORD` 与 `AUTH_JWT_SECRET`。
+   这两个变量未设置时 compose 会直接报错退出，`AUTH_JWT_SECRET` 由 `api` 与 `web` 共用，不会出现两端对不上的情况。
+3. 按需修改 `docker-compose.yml` 中 `web.build.args.NEXT_PUBLIC_API_BASE`（浏览器能访问到的 API 地址），并同步 `api` 的 `FRONTEND_ORIGINS`。
+4. 启动（`migrate` 会先建表，成功后 `web` 才起）：
 
 ```bash
 docker compose up -d --build
 ```
 
+5. 首次部署需要创建学校与管理员账号。Postgres 已映射到本机 5433，在 `frontend/` 下执行：
+
+```bash
+npm run db:seed
+```
+
 - 前端：http://localhost:3000  
 - 健康检查：http://localhost:8001/api/health  
+
+除健康检查外，所有 API 都要求登录；上传与清空知识库还需要 STAFF 或 ADMIN 角色。
 
 完整上云步骤（打包、Nginx、HTTPS）见 [DEPLOY.md](./DEPLOY.md)。
 
