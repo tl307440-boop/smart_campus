@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 import uuid
-from typing import Optional, Tuple, Union
 
 
-def normalize_tid(tid: Union[str, list, None]) -> Optional[str]:
+def normalize_tid(tid: str | list | None) -> str | None:
     if tid is None:
         return None
     if isinstance(tid, list):
@@ -17,9 +16,9 @@ def normalize_tid(tid: Union[str, list, None]) -> Optional[str]:
 
 
 def resolve_thread_id(
-    current: Optional[str],
-    url_tid: Union[str, list, None],
-) -> Tuple[str, bool, bool]:
+    current: str | None,
+    url_tid: str | list | None,
+) -> tuple[str, bool, bool]:
     """
     返回 (thread_id, should_restore_from_redis, should_sync_to_url)。
 

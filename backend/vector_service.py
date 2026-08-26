@@ -4,9 +4,18 @@ import uuid
 from dataclasses import dataclass, field
 
 import chromadb
-from langchain_community.embeddings import ZhipuAIEmbeddings
-
 from env_config import load_backend_env
+from langchain_community.embeddings import ZhipuAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from logging_config import get_logger
+from tenancy import (
+    chunk_metadata,
+    owner_filter,
+    source_filter,
+    visibility_filter,
+)
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -47,18 +56,45 @@ def get_cross_encoder():
         from sentence_transformers import CrossEncoder
 
         model_name = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-large")
-        print(f"[Rerank] 正在加载交叉编码器: {model_name}")
+        logger.info(f"[Rerank] 正在加载交叉编码器: {model_name}")
         _cross_encoder = CrossEncoder(model_name)
-        print("[Rerank] 交叉编码器加载成功")
+        logger.info("[Rerank] 交叉编码器加载成功")
     except Exception as e:
-        print(f"[Rerank] 交叉编码器不可用，将使用向量相似度截断: {e}")
+        logger.warning(f"[Rerank] 交叉编码器不可用，将使用向量相似度截断: {e}")
         _cross_encoder = None
     return _cross_encoder
 
 
+# 切片参数变更后必须让已有索引失效。内容没变时 content_hash 不变，
+# 只改切片逻辑的话旧片段会一直留着，检索质量的改进等于没生效。
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 80
+CHUNK_SCHEME = f"recursive-v1:{CHUNK_SIZE}:{CHUNK_OVERLAP}"
+
+_splitter_cache: dict[tuple[int, int], RecursiveCharacterTextSplitter] = {}
+
+
+def _splitter(chunk_size: int, chunk_overlap: int) -> RecursiveCharacterTextSplitter:
+    key = (chunk_size, chunk_overlap)
+    if key not in _splitter_cache:
+        _splitter_cache[key] = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            # 默认分隔符只认英文标点，中文规章基本切不开，会一路退化成按字符硬切
+            separators=["\n\n", "\n", "。", "；", "！", "？", "、", "，", " ", ""],
+            keep_separator=True,
+            length_function=len,
+        )
+    return _splitter_cache[key]
+
+
 def document_content_hash(content: str) -> str:
-    """文档内容指纹，用于判断是否需要重新向量化。"""
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    """文档指纹，用于判断是否需要重新向量化。
+
+    把切片方案一起算进去：只改切分方式、内容不变时，也要触发重建。
+    """
+    payload = f"{CHUNK_SCHEME}\n{content}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 # // AI辅助生成：智谱AI (embedding-3) & DeepSeek-chat (Web), 2026-04
 # 实现批量嵌入类以解决长文档 API 请求超限问题
@@ -94,16 +130,16 @@ class VectorRAGService:
         load_backend_env()
 
         # 初始化智谱AI向量模型
-        print(" [VectorDB] 正在初始化智谱AI向量模型...")
+        logger.info(" [VectorDB] 正在初始化智谱AI向量模型...")
         try:
             self.embedding_model = BatchedZhipuEmbeddings(
                 model="embedding-3",
                 api_key=os.getenv("zhi_pu_API_KEY"),
                 batch_size=64
             )
-            print("[VectorDB] 智谱AI向量模型加载成功！")
+            logger.info("[VectorDB] 智谱AI向量模型加载成功！")
         except Exception as e:
-            print(f"[VectorDB] 连接智谱AI失败: {e}")
+            logger.error(f"[VectorDB] 连接智谱AI失败: {e}")
             raise
         
         # 初始化持久化向量数据库
@@ -116,30 +152,33 @@ class VectorRAGService:
 
 # // AI辅助生成：DeepSeek-chat (Web), 2026-04
 # 包含文本切片算法、UUID 生成及余弦相似度检索逻辑
-    def split_text(self, text: str, chunk_size: int = 500, chunk_overlap: int = 50) -> list:
+    def split_text(
+        self,
+        text: str,
+        chunk_size: int = CHUNK_SIZE,
+        chunk_overlap: int = CHUNK_OVERLAP,
+    ) -> list:
         """
-        简单的文本切片工具。
-        将长文章切成每段 500 字的小块，支持重叠以保持上下文连贯。
+        按语义边界递归切片：优先在段落分隔处断开，其次是中文句号、分号等，
+        实在断不开才按字符硬切。
+
+        原来是纯按字符数切，条款和表格经常被从中间截断，
+        召回的片段读起来缺头少尾，重排和生成都受影响。
         """
-        chunks = []
-        for i in range(0, len(text), chunk_size - chunk_overlap):
-            chunk = text[i : i + chunk_size]
-            if chunk:  # 避免空片段
-                chunks.append(chunk)
-        return chunks
+        return _splitter(chunk_size, chunk_overlap).split_text(text)
     
-    def is_file_exists(self, file_path: str) -> bool:
-        """检查其中一个文件是否已经建立过索引"""
+    def is_file_exists(self, file_path: str, tenant_id: str) -> bool:
+        """检查某租户下的这个文件是否已经建立过索引"""
         result = self.collection.get(
-            where={"source": file_path},
+            where=source_filter(file_path, tenant_id),
             limit=1
         )
         return len(result['ids']) > 0
 
-    def get_indexed_content_hash(self, file_path: str) -> str | None:
+    def get_indexed_content_hash(self, file_path: str, tenant_id: str) -> str | None:
         """读取已索引文档的 content_hash；无记录则返回 None。"""
         result = self.collection.get(
-            where={"source": file_path},
+            where=source_filter(file_path, tenant_id),
             limit=1,
             include=["metadatas"],
         )
@@ -148,29 +187,29 @@ class VectorRAGService:
         meta = result["metadatas"][0] or {}
         return meta.get("content_hash")
 
-    def index_document(self, content: str, file_path: str):
+    def index_document(self, content: str, file_path: str, tenant_id: str):
         """
         【写入】将文档切片并向量化后存入向量库。
-        若同 source 且 content_hash 未变，则跳过 embedding；内容变更则删除旧片段后重建。
+        若同租户同 source 且 content_hash 未变，则跳过 embedding；内容变更则删除旧片段后重建。
         """
         content_hash = document_content_hash(content)
-        existing_hash = self.get_indexed_content_hash(file_path)
+        existing_hash = self.get_indexed_content_hash(file_path, tenant_id)
         if existing_hash is not None and existing_hash == content_hash:
-            print(f" [VectorDB] 文件 '{file_path}' 内容未变，跳过 API 向量化...")
+            logger.warning(f" [VectorDB] 文件 '{file_path}' 内容未变，跳过 API 向量化...")
             return
 
         if existing_hash is not None:
-            print(f" [VectorDB] 文件 '{file_path}' 内容已变更，删除旧索引后重建...")
-            self.collection.delete(where={"source": file_path})
+            logger.warning(f" [VectorDB] 文件 '{file_path}' 内容已变更，删除旧索引后重建...")
+            self.collection.delete(where=source_filter(file_path, tenant_id))
 
         chunks = self.split_text(content)
-        print(f" [VectorDB] 正在将文档切分为 {len(chunks)} 个片段并建立索引...")
+        logger.info(f" [VectorDB] 正在将文档切分为 {len(chunks)} 个片段并建立索引...")
 
         ids = [str(uuid.uuid4()) for _ in range(len(chunks))]
-        metadata = [{"source": file_path, "content_hash": content_hash} for _ in range(len(chunks))]
+        metadata = [chunk_metadata(file_path, content_hash, tenant_id) for _ in range(len(chunks))]
 
         try:
-            print(f"[VectorDB] 正在请求智谱 API (消耗 Token)...")
+            logger.info("[VectorDB] 正在请求智谱 API (消耗 Token)...")
             embeddings = self.embedding_model.embed_documents(chunks)
 
             self.collection.add(
@@ -179,15 +218,17 @@ class VectorRAGService:
                 ids=ids,
                 metadatas=metadata
             )
-            print(f"[VectorDB] 成功索引 {len(chunks)} 个文档片段")
+            logger.info(f"[VectorDB] 成功索引 {len(chunks)} 个文档片段")
         except Exception as e:
-            print(f" [VectorDB] 索引失败: {e}")
+            logger.error(f" [VectorDB] 索引失败: {e}")
             raise
     
-    def retrieve_candidates(self, query: str, k: int = 50) -> list[RetrievedChunk]:
+    def retrieve_candidates(self, query: str, tenant_id: str, k: int = 50) -> list[RetrievedChunk]:
         """
         第一阶段：宽召回。用智谱 embedding + Chroma 余弦检索捞一批候选 Chunk。
         当前仓库没有独立 BM25/hybrid_retriever，因此用向量宽召回承担「大网捞鱼」。
+
+        where 过滤把候选限制在「全局文档 + 本租户文档」，跨校资料不会进入召回。
         """
         total = self.collection.count()
         if total <= 0:
@@ -198,6 +239,7 @@ class VectorRAGService:
         results = self.collection.query(
             query_embeddings=[query_embedding],
             n_results=n_results,
+            where=visibility_filter(tenant_id),
             include=["documents", "metadatas", "distances"],
         )
         docs = (results.get("documents") or [[]])[0]
@@ -217,7 +259,7 @@ class VectorRAGService:
                     vector_score=1.0 - distance,
                 )
             )
-        print(f"[VectorDB] 宽召回 {len(candidates)} 个候选片段 (请求 k={k})")
+        logger.info(f"[VectorDB] 宽召回 {len(candidates)} 个候选片段 (请求 k={k})")
         return candidates
 
     def rerank_candidates(
@@ -236,7 +278,7 @@ class VectorRAGService:
         reranker = get_cross_encoder()
         if reranker is None:
             ranked = sorted(candidates, key=lambda x: x.vector_score, reverse=True)
-            print(f"[Rerank] 未启用交叉编码器，按向量分截断 Top {top_n}")
+            logger.info(f"[Rerank] 未启用交叉编码器，按向量分截断 Top {top_n}")
             return ranked[:top_n]
 
         pairs = [[query, chunk.text] for chunk in candidates]
@@ -249,7 +291,7 @@ class VectorRAGService:
             key=lambda x: x.metadata.get("rerank_score", 0.0),
             reverse=True,
         )[:top_n]
-        print(f"[Rerank] 交叉编码器重排完成，保留 Top {len(reranked)}")
+        logger.info(f"[Rerank] 交叉编码器重排完成，保留 Top {len(reranked)}")
         return reranked
 
     def _format_context(self, chunks: list[RetrievedChunk]) -> str:
@@ -268,42 +310,35 @@ class VectorRAGService:
         retrieved_context += f"\n\n 本次回答共参考了以下文件：{', '.join(source_names)}"
         return retrieved_context
 
-    def search(self, query: str, top_k: int = 3) -> str:
+    def search(self, query: str, tenant_id: str, top_k: int = 3) -> str:
         """
         【读取】三阶段 RAG 检索：
-        1. 宽召回 candidate_k 个候选（默认 50）
+        1. 宽召回 candidate_k 个候选（默认 50，仅限该租户可见的文档）
         2. BGE CrossEncoder 重排序
         3. 截断 Top-K 后拼接 Prompt 上下文
         """
-        print(f" [VectorDB] 正在检索与 '{query}' 最相关的片段...")
+        logger.info(f" [VectorDB] 正在检索与 '{query}' 最相关的片段...")
         candidate_k = _env_int("RERANK_CANDIDATE_K", 50)
 
         try:
-            candidates = self.retrieve_candidates(query, k=candidate_k)
+            candidates = self.retrieve_candidates(query, tenant_id, k=candidate_k)
             reranked_top = self.rerank_candidates(query, candidates, top_n=top_k)
             retrieved_context = self._format_context(reranked_top)
-            print(f" [VectorDB] 检索到 {len(reranked_top)} 个相关片段")
+            logger.info(f" [VectorDB] 检索到 {len(reranked_top)} 个相关片段")
             return retrieved_context
         except Exception as e:
-            print(f" [VectorDB] 检索失败: {e}")
+            logger.error(f" [VectorDB] 检索失败: {e}")
             return ""
     
-    def clear_database(self):
-        """清空向量数据库"""
-        try:
-            print("[VectorDB] 正在清空数据库...")
-            self.client.delete_collection(name="campus_knowledge")
-            self.collection = self.client.get_or_create_collection(
-                name="campus_knowledge",
-                metadata={"hnsw:space": "cosine"}
-            )
-            print(" [VectorDB] 数据库已清空")
-        except Exception as e:
-            print(f" [VectorDB] 清空数据库出错: {e}")
-            self.collection = self.client.get_or_create_collection(
-                name="campus_knowledge",
-                metadata={"hnsw:space": "cosine"}
-            )
+    def clear_tenant(self, tenant_id: str) -> None:
+        """只删除某个租户写入的片段。
+
+        不能整库删除：维基与预置文档挂在全局归属下，被清掉后要重启进程
+        才会重新索引，而且会白白重跑一遍 embedding。
+        """
+        logger.info(f"[VectorDB] 正在清空租户 {tenant_id} 的索引...")
+        self.collection.delete(where=owner_filter(tenant_id))
+        logger.info(f"[VectorDB] 租户 {tenant_id} 的索引已清空")
 
 
 # 使用示例

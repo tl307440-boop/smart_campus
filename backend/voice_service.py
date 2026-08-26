@@ -1,22 +1,19 @@
-from re import S
-import pygame
-import websocket
+import _thread as thread
+import base64
 import datetime
-from datetime import datetime
 import hashlib
 import hmac
-import base64
 import json
-from urllib.parse import urlencode
-import time
+import os
 import ssl
 import time
-from wsgiref.handlers import format_date_time
-from openai import OpenAI
+from datetime import datetime
 from time import mktime
-import _thread as thread
-import os
-import wave
+from urllib.parse import urlencode
+from wsgiref.handlers import format_date_time
+
+import pygame
+import websocket
 from env_config import load_backend_env
 
 load_backend_env()
@@ -192,7 +189,7 @@ class SparkTTSService:
                 time.sleep(0.1)  # 等待音频播放完成
                 pygame.time.Clock().tick(10)  # 控制播放速度
             pygame.mixer.music.unload()
-        except Exception as e:
+        except Exception:
             #如果没有安装pygame,尝试使用系统默认播放器
             if os.name == 'nt': # Windows
                 os.system(f'start {self.output_file}')

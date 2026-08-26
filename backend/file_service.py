@@ -1,5 +1,7 @@
-import os 
+import os
+
 from pypdf import PdfReader
+
 
 class FileService:
     """
@@ -24,7 +26,7 @@ class FileService:
         try:
             content = ""
             if file_ext in {'.txt', '.md', '.markdown'}:
-                with open(file_path, 'r', encoding='utf-8') as f:
+                with open(file_path, encoding='utf-8') as f:
                     content = f.read()
             elif file_ext == '.pdf':
                 reader = PdfReader(file_path)

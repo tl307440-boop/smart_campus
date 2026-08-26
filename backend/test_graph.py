@@ -22,7 +22,7 @@ import time
 # 将 backend 目录加入 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from graph_app import ask_question, build_graph, GraphState
+from graph_app import ask_question, build_graph
 
 
 def test_graph_structure():
@@ -67,8 +67,8 @@ def test_direct_intent():
     result = ask_question(question="你是谁？")
     elapsed = time.time() - start
 
-    print(f"\n--- 结果 ---")
-    print(f"问题: 你是谁？")
+    print("\n--- 结果 ---")
+    print("问题: 你是谁？")
     print(f"意图: {result['intent']}")
     print(f"上下文: {'(空)' if not result['context'] else result['context'][:50] + '...'}")
     print(f"回答: {result['final_answer']}")
@@ -97,8 +97,8 @@ def test_rag_intent():
     )
     elapsed = time.time() - start
 
-    print(f"\n--- 结果 ---")
-    print(f"问题: 奖学金怎么评？")
+    print("\n--- 结果 ---")
+    print("问题: 奖学金怎么评？")
     print(f"意图: {result['intent']}")
     print(f"上下文长度: {len(result['context'])} 字")
     print(f"回答: {result['final_answer']}")
@@ -136,8 +136,8 @@ def test_kimi_path():
     )
     elapsed = time.time() - start
 
-    print(f"\n--- 结果 ---")
-    print(f"问题: 图书馆周末几点开门？")
+    print("\n--- 结果 ---")
+    print("问题: 图书馆周末几点开门？")
     print(f"文档长度: {len(small_doc)} 字")
     print(f"意图: {result['intent']}")
     print(f"Kimi 提取的上下文: {result['context'][:80]}...")
@@ -171,8 +171,8 @@ def test_auto_route():
     )
     elapsed = time.time() - start
 
-    print(f"\n--- 结果 ---")
-    print(f"问题: 宿舍门禁是几点？")
+    print("\n--- 结果 ---")
+    print("问题: 宿舍门禁是几点？")
     print(f"文档长度: {len(short_doc)} 字 (应 < 20000，走 Kimi)")
     print(f"意图: {result['intent']}")
     print(f"回答: {result['final_answer']}")

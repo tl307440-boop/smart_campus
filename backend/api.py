@@ -5,33 +5,38 @@
 """
 from __future__ import annotations
 
-import json
 import os
-import time
 import uuid
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Iterator, Optional
+from typing import Annotated, Any
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from auth import CurrentUserDep, KnowledgeManagerDep, jwt_secret, scoped_thread_id
+from chat_stream import sse, sse_from_graph_stream
+from env_config import load_backend_env
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
-
-from env_config import load_backend_env
 from graph_app import build_graph
 from knowledge import knowledge_base
+from logging_config import setup_logging
+from pydantic import BaseModel, Field
+from rate_limit import enforce_chat_quota
 
 load_backend_env()
 
 # 检索子路由交给 graph_app 按文档长度自动判定
 ROUTE_STRATEGY = "auto"
 
-# 服务端把整段回答切片下发，前端据此做打字机效果
-STREAM_CHUNK_CHARS = 4
-STREAM_CHUNK_DELAY = 0.012
+# 上传体积上限。校规手册这类文档远小于此，超出的多半是误传或恶意请求。
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "20")) * 1024 * 1024
+_UPLOAD_READ_CHUNK = 1024 * 1024
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    setup_logging()
+    # 密钥缺失时宁可起不来，也不要让所有接口裸奔
+    jwt_secret()
     knowledge_base.autoload()
     yield
 
@@ -46,8 +51,11 @@ app.add_middleware(
         if origin.strip()
     ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # 收敛到实际用到的方法与请求头。配合 allow_credentials 时，
+    # 通配会把任意跨站页面能发的请求面放到最大。
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+    max_age=600,
 )
 
 
@@ -64,7 +72,7 @@ class Message(BaseModel):
     role: str
     content: str
     context: str = ""
-    emotion: Optional[dict[str, Any]] = None
+    emotion: dict[str, Any] | None = None
 
 
 class SessionResponse(BaseModel):
@@ -80,6 +88,7 @@ class DocumentResponse(BaseModel):
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
+    """探活接口，容器 healthcheck 会调，故不要求令牌。"""
     return {"status": "ok"}
 
 
@@ -88,16 +97,18 @@ def health() -> dict[str, str]:
 # ============================================================
 
 @app.post("/api/sessions", response_model=SessionResponse)
-def create_session() -> SessionResponse:
+def create_session(_: CurrentUserDep) -> SessionResponse:
     return SessionResponse(thread_id=str(uuid.uuid4()))
 
 
 @app.get("/api/sessions/{thread_id}/messages", response_model=list[Message])
-def get_messages(thread_id: str) -> list[Message]:
+def get_messages(thread_id: str, user: CurrentUserDep) -> list[Message]:
     """从 Redis 快照恢复该会话的历史消息。"""
     try:
         graph = build_graph()
-        snapshot = graph.get_state({"configurable": {"thread_id": thread_id}})
+        snapshot = graph.get_state(
+            {"configurable": {"thread_id": scoped_thread_id(user, thread_id)}}
+        )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"无法读取会话历史（检查 Redis）: {exc}") from exc
 
@@ -121,67 +132,37 @@ def get_messages(thread_id: str) -> list[Message]:
 # 对话（SSE）
 # ============================================================
 
-def _sse(event: str, payload: dict[str, Any]) -> str:
-    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-
-def _chat_events(thread_id: str, question: str) -> Iterator[str]:
-    """按图节点推进逐段下发进度，生成节点完成后再切片吐出回答。"""
+def _chat_events(thread_id: str, question: str, tenant_id: str) -> Iterator[str]:
+    """把图的流事件转成 SSE。custom 是生成中的 token，updates 是节点产出。"""
     input_state: dict[str, Any] = {
         "user_question": question,
         "route_strategy": ROUTE_STRATEGY,
+        "tenant_id": tenant_id,
     }
-    corpus = knowledge_base.short_corpus()
+    corpus = knowledge_base.short_corpus(tenant_id)
     if corpus:
         input_state["current_doc_content"] = corpus
 
     config = {"configurable": {"thread_id": thread_id}}
 
-    intent = ""
-    context = ""
-    answer = ""
-    emotion: Optional[dict[str, Any]] = None
-
     try:
         graph = build_graph()
-        for update in graph.stream(input_state, config=config, stream_mode="updates"):
-            for node, patch in update.items():
-                if not isinstance(patch, dict):
-                    continue
-
-                if node == "intent":
-                    intent = patch.get("intent", "")
-                    yield _sse("status", {"stage": "intent", "intent": intent})
-                elif node == "retrieve":
-                    context = patch.get("context", "") or ""
-                    yield _sse("status", {"stage": "retrieved", "chars": len(context)})
-                elif node == "generate":
-                    answer = patch.get("final_answer", "") or ""
-                    yield _sse("status", {"stage": "generating"})
-                    for i in range(0, len(answer), STREAM_CHUNK_CHARS):
-                        yield _sse("delta", {"text": answer[i:i + STREAM_CHUNK_CHARS]})
-                        time.sleep(STREAM_CHUNK_DELAY)
-                elif node == "emotion":
-                    emotion = patch.get("emotion_data")
+        yield from sse_from_graph_stream(
+            graph.stream(input_state, config=config, stream_mode=["updates", "custom"])
+        )
     except Exception as exc:
-        yield _sse("error", {"message": f"回答生成失败: {exc}"})
-        return
-
-    yield _sse(
-        "done",
-        {
-            "answer": answer,
-            "intent": intent,
-            "context": context,
-            "emotion": emotion,
-        },
-    )
+        yield sse("error", {"message": f"回答生成失败: {exc}"})
 
 
 @app.post("/api/chat")
-def chat(payload: ChatRequest) -> StreamingResponse:
+def chat(payload: ChatRequest, user: CurrentUserDep) -> StreamingResponse:
+    enforce_chat_quota(user.id)
     return StreamingResponse(
-        _chat_events(payload.thread_id, payload.question),
+        _chat_events(
+            scoped_thread_id(user, payload.thread_id),
+            payload.question,
+            user.tenant_id,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -197,23 +178,56 @@ def chat(payload: ChatRequest) -> StreamingResponse:
 # ============================================================
 
 @app.get("/api/documents", response_model=list[DocumentResponse])
-def list_documents() -> list[DocumentResponse]:
-    return [DocumentResponse(**doc.__dict__) for doc in knowledge_base.documents()]
+def list_documents(user: CurrentUserDep) -> list[DocumentResponse]:
+    return [
+        DocumentResponse(name=doc.name, chars=doc.chars, indexed=doc.indexed, source=doc.source)
+        for doc in knowledge_base.documents(user.tenant_id)
+    ]
+
+
+async def _read_capped(file: UploadFile) -> bytes:
+    """分块读取并在超限时立刻中断。
+
+    一次性 await file.read() 会把整个请求体读进内存，
+    传一个几 GB 的文件就能把进程撑爆。
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_READ_CHUNK)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"文件超过 {MAX_UPLOAD_BYTES // (1024 * 1024)} MB 上限",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 @app.post("/api/documents", response_model=DocumentResponse)
-async def upload_document(file: UploadFile = File(...)) -> DocumentResponse:
-    data = await file.read()
+async def upload_document(
+    user: KnowledgeManagerDep,
+    file: Annotated[UploadFile, File()],
+) -> DocumentResponse:
+    data = await _read_capped(file)
     if not data:
         raise HTTPException(status_code=400, detail="文件内容为空")
     try:
-        info = knowledge_base.add_upload(file.filename or "未命名文件", data)
+        info = knowledge_base.add_upload(
+            file.filename or "未命名文件", data, user.tenant_id
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return DocumentResponse(**info.__dict__)
+    return DocumentResponse(
+        name=info.name, chars=info.chars, indexed=info.indexed, source=info.source
+    )
 
 
 @app.delete("/api/documents")
-def clear_documents() -> dict[str, str]:
-    knowledge_base.clear()
+def clear_documents(user: KnowledgeManagerDep) -> dict[str, str]:
+    """只清本校上传的资料；维基与预置文档属于全局，不受影响。"""
+    knowledge_base.clear(user.tenant_id)
     return {"status": "cleared"}

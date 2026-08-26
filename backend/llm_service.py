@@ -1,12 +1,27 @@
-import os 
 import json
-import re
-from openai import OpenAI,OpenAIError
-from typing import Dict,Any
+import os
+from typing import Any
 
 from env_config import load_backend_env
+from logging_config import get_logger
+from openai import OpenAI, OpenAIError
+
+logger = get_logger(__name__)
 
 load_backend_env()
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return max(1.0, float(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+# 不设超时的话，上游卡住会一直占着连接和线程池名额
+LLM_TIMEOUT_SECONDS = _env_float("LLM_TIMEOUT_SECONDS", 60.0)
+LLM_MAX_RETRIES = int(_env_float("LLM_MAX_RETRIES", 2))
+
 
 class DeepSeekService:
     """
@@ -28,17 +43,19 @@ class DeepSeekService:
 
         if self.api_key and not use_mock:
             self.client = OpenAI(api_key=self.api_key,
-                                 base_url = self.url)
+                                 base_url = self.url,
+                                 timeout = LLM_TIMEOUT_SECONDS,
+                                 max_retries = LLM_MAX_RETRIES)
         else:
             self.client = None
             if not use_mock:
-                print("未检测到API KEY ，强制切换为mock模式")
+                logger.warning("未检测到API KEY ，强制切换为mock模式")
                 self.use_mock = True
 
 
  # // AI辅助生成：DeepSeek-chat (API), 2026-04
 # 辅助设计系统提示词，实现严格 JSON 格式的情感分析输出   
-    def analyze_emotion_and_reply(self,user_text:str) -> Dict[str,Any]:
+    def analyze_emotion_and_reply(self,user_text:str) -> dict[str,Any]:
         """
         analyze_emotion_and_reply 的 Docstring
         情感生成 NLP回复
@@ -60,7 +77,7 @@ class DeepSeekService:
 
         #2.模拟返回
         if self.use_mock:
-            print("[Mock]正在模拟DeepSeek思考过程...")
+            logger.info("[Mock]正在模拟DeepSeek思考过程...")
 
             #模拟挂科 返回JSON格式
             if "挂科" in user_text or "考试" in user_text :
@@ -83,7 +100,7 @@ class DeepSeekService:
         #3.真实API调用
         """messages (列表) -> 发送给 API -> reponse (对象) -> 提取出 content (JSON 字符串) -> 转换为 Python 字典返回。"""
         try :
-            print("[真实API] 正在请求DeepSeek...")
+            logger.info("[真实API] 正在请求DeepSeek...")
             reponse = self.client.chat.completions.create(
                 model = "deepseek-chat",
                 messages = [
@@ -98,10 +115,10 @@ class DeepSeekService:
             content = reponse.choices[0].message.content
             return json.loads(content)
         except OpenAIError as e:
-            print(f" API请求失败：{e}")
+            logger.error(f" API请求失败：{e}")
             return {"error" :str(e)}
         except json.JSONDecodeError as er:
-            print("模型未返回合法的JSON格式")
+            logger.info("模型未返回合法的JSON格式")
             return {"error": str(er)}
         
     def chat_with_context(self,context:str,user_question:str) -> str:

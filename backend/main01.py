@@ -1,14 +1,16 @@
-from ast import If
-from json import load
 import threading
 import time
+from ast import If
+from json import load
 from typing import final
+
 from colorama import Fore, init
 from env_config import load_backend_env
-from sympy import ask
-from llm_service import DeepSeekService
-from kimi_extract_service import KimiExtractService
 from file_service import FileService
+from kimi_extract_service import KimiExtractService
+from llm_service import DeepSeekService
+from sympy import ask
+from tenancy import LEGACY_TENANT
 from vector_service import VectorRAGService
 from voice_service import SparkTTSService
 
@@ -75,11 +77,11 @@ def main():
             # 2.决定是否存入向量数据库
             if doc_len >= router_key:
                 print(Fore.BLUE + f" 文档长度 {doc_len} 字 >= {router_key} 字，正在存入向量数据库...")
-                print(Fore.BLUE +f"->使用模型 zhipuAIembeding-3 进行向量化...")
+                print(Fore.BLUE +"->使用模型 zhipuAIembeding-3 进行向量化...")
                 print(Fore.BLUE + "->存储位置 ：本地 Chroma DB...")
 
                 try:
-                    vector_db.index_document(content, file_path)
+                    vector_db.index_document(content, file_path, LEGACY_TENANT)
                     is_using_vector_db = True
                     print(Fore.GREEN + " 向量构建完成 文档成功存入向量数据库！后续提问将走向量检索流程。")
                 except Exception as e:
@@ -104,17 +106,17 @@ def main():
 
             #--- 分支一：走向量检索 (ZhipuAI + Chroma) ---
             if is_using_vector_db:
-                print(Fore.MAGENTA + f"[方案 B] 正在使用智谱向量模型检索 ChromaDB...")
+                print(Fore.MAGENTA + "[方案 B] 正在使用智谱向量模型检索 ChromaDB...")
                 # 1. 向量检索(vector_service.py 中的 search)
-                context = vector_db.search(question, top_k=3)
-                print(Fore.MAGENTA + f"检索到的相关上下文片段，准备喂给deepseek")
+                context = vector_db.search(question, LEGACY_TENANT, top_k=3)
+                print(Fore.MAGENTA + "检索到的相关上下文片段，准备喂给deepseek")
 
             #--- 分支二：走 Kimi 小文档流程 ---
             else:
-                print(Fore.MAGENTA + f"[方案 A] 正在使用 Kimi 小文档模型提取知识...")
+                print(Fore.MAGENTA + "[方案 A] 正在使用 Kimi 小文档模型提取知识...")
                 # 1. Kimi 提取知识(kimi_extract_service.py 中的 extract_knowledge)
                 context = kimi_eye.extract_knowledge(current_doc_content, question)
-                print(Fore.MAGENTA + f"Kimi 提取的上下文，准备为给deepseek")
+                print(Fore.MAGENTA + "Kimi 提取的上下文，准备为给deepseek")
 
             # --- 最终生成：DeepSeek ---
 
@@ -132,7 +134,7 @@ def main():
         
         #/clear 命令：清空向量数据库
         if user_input.startswith("/clear"):
-            vector_db.clear_database()
+            vector_db.clear_tenant(LEGACY_TENANT)
             current_doc_content = ""
             is_using_vector_db = False
             print(Fore.GREEN + "系统已重置，向量数据库已清空，当前文档内容已清除。")

@@ -1,9 +1,18 @@
 import os
-from openai import OpenAI
 
 from env_config import load_backend_env
+from logging_config import get_logger
+from openai import OpenAI
+
+logger = get_logger(__name__)
 
 load_backend_env()
+
+try:
+    # 精读长文档比普通对话慢，超时给得比 DeepSeek 宽一些
+    KIMI_TIMEOUT_SECONDS = max(1.0, float(os.getenv("KIMI_TIMEOUT_SECONDS", "120")))
+except (TypeError, ValueError):
+    KIMI_TIMEOUT_SECONDS = 120.0
 
 class KimiExtractService:
     """
@@ -20,12 +29,13 @@ class KimiExtractService:
 
         if self.api_key and not use_mock:
             self.client = OpenAI(api_key=self.api_key,
-                                 
-                                 base_url = self.url)
+                                 base_url = self.url,
+                                 timeout = KIMI_TIMEOUT_SECONDS,
+                                 max_retries = 1)
         else:
             self.client = None
             if not use_mock:
-                print("未检测到API KEY ，强制切换为mock模式")
+                logger.warning("未检测到API KEY ，强制切换为mock模式")
                 self.use_mock = True
             
 
@@ -50,7 +60,7 @@ class KimiExtractService:
         """
 
         if self.use_mock:
-            print("[模拟API] 正在请求Kimi知识引擎...")
+            logger.info("[模拟API] 正在请求Kimi知识引擎...")
             #模拟返回
             return f"(Kimi 提取的知识）文档第3章提到：{query} 的核心定义是......"
         

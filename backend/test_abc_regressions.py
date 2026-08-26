@@ -2,9 +2,18 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+from graph_app import (
+    MAX_STORED_TURNS,
+    _append_turn_messages,
+    emotion_node,
+    finalize_node,
+    recent_history,
+)
 from session_thread import normalize_tid, resolve_thread_id
+from tenancy import GLOBAL_TENANT, source_filter, visibility_filter
 from vector_service import RetrievedChunk, VectorRAGService, document_content_hash
-from graph_app import _append_turn_messages, emotion_node
+
+TENANT = "tenantaaa111"
 
 
 class TestThreadIdResolve(unittest.TestCase):
@@ -44,7 +53,7 @@ class TestContentHash(unittest.TestCase):
             "ids": ["id1"],
             "metadatas": [{"source": "a.txt", "content_hash": document_content_hash(content)}],
         }
-        svc.index_document(content, "a.txt")
+        svc.index_document(content, "a.txt", TENANT)
         svc.embedding_model.embed_documents.assert_not_called()
         svc.collection.add.assert_not_called()
 
@@ -57,10 +66,29 @@ class TestContentHash(unittest.TestCase):
             "ids": ["id1"],
             "metadatas": [{"source": "a.txt", "content_hash": document_content_hash("旧内容")}],
         }
-        svc.index_document("新内容", "a.txt")
-        svc.collection.delete.assert_called_once_with(where={"source": "a.txt"})
+        svc.index_document("新内容", "a.txt", TENANT)
+        svc.collection.delete.assert_called_once_with(where=source_filter("a.txt", TENANT))
         svc.embedding_model.embed_documents.assert_called_once()
         svc.collection.add.assert_called_once()
+
+    def test_indexed_chunks_carry_owner(self):
+        """写入的每个片段都要带归属，否则检索期的可见性过滤会漏掉它。"""
+        svc = VectorRAGService.__new__(VectorRAGService)
+        svc.collection = MagicMock()
+        svc.embedding_model = MagicMock()
+        svc.embedding_model.embed_documents.return_value = [[0.1, 0.2]]
+        svc.collection.get.return_value = {"ids": [], "metadatas": []}
+
+        svc.index_document("一些内容", "a.txt", TENANT)
+
+        metadatas = svc.collection.add.call_args.kwargs["metadatas"]
+        self.assertTrue(all(m["tenant_id"] == TENANT for m in metadatas))
+
+    def test_same_name_in_different_tenants_does_not_collide(self):
+        """两校上传同名文件时，查已有索引的条件必须互不相同。"""
+        self.assertNotEqual(
+            source_filter("手册.pdf", TENANT), source_filter("手册.pdf", "tenantbbb222")
+        )
 
 
 class TestRerankPipeline(unittest.TestCase):
@@ -79,10 +107,19 @@ class TestRerankPipeline(unittest.TestCase):
 
     def test_retrieve_candidates_wide_recall(self):
         svc = self._service_with_candidates()
-        chunks = svc.retrieve_candidates("宿舍门禁", k=50)
+        chunks = svc.retrieve_candidates("宿舍门禁", TENANT, k=50)
         self.assertEqual(len(chunks), 3)
         self.assertEqual(chunks[0].text, "门禁22点")
         self.assertGreater(chunks[0].vector_score, chunks[2].vector_score)
+
+    def test_recall_is_restricted_to_visible_tenants(self):
+        """召回必须带 where 过滤，否则别校上传的资料会被检索出来。"""
+        svc = self._service_with_candidates()
+        svc.retrieve_candidates("宿舍门禁", TENANT, k=50)
+
+        where = svc.collection.query.call_args.kwargs["where"]
+        self.assertEqual(where, visibility_filter(TENANT))
+        self.assertEqual(set(where["tenant_id"]["$in"]), {GLOBAL_TENANT, TENANT})
 
     @patch("vector_service.get_cross_encoder")
     def test_rerank_uses_cross_encoder_scores(self, mock_get):
@@ -102,7 +139,7 @@ class TestRerankPipeline(unittest.TestCase):
     @patch("vector_service.get_cross_encoder", return_value=None)
     def test_search_falls_back_to_vector_top_k(self, _mock_get):
         svc = self._service_with_candidates()
-        context = svc.search("宿舍门禁", top_k=2)
+        context = svc.search("宿舍门禁", TENANT, top_k=2)
         self.assertIn("门禁22点", context)
         self.assertIn("奖学金按绩点", context)
         self.assertNotIn("图书馆开放", context)
@@ -116,23 +153,53 @@ class TestEmotionAndMessages(unittest.TestCase):
         self.assertEqual(msgs[-1]["context"], "来源片段A")
 
     @patch("graph_app.get_deepseek")
-    def test_emotion_node_attaches_to_last_assistant(self, mock_get):
+    def test_emotion_node_only_returns_data(self, mock_get):
+        """情感节点与生成并行跑，那时 assistant 消息还没写进去，不能碰 messages。"""
         mock_ds = MagicMock()
-        mock_ds.analyze_emotion_and_reply.return_value = {
-            "core_emotion": "平静",
-            "reply_text": "我在听",
-        }
+        mock_ds.analyze_emotion_and_reply.return_value = {"core_emotion": "平静"}
         mock_get.return_value = mock_ds
+
+        out = emotion_node({"user_question": "你好", "messages": []})
+
+        self.assertEqual(out["emotion_data"]["core_emotion"], "平静")
+        self.assertNotIn("messages", out)
+
+    def test_finalize_attaches_emotion_to_last_assistant(self):
         state = {
-            "user_question": "你好",
+            "emotion_data": {"core_emotion": "平静", "reply_text": "我在听"},
             "messages": [
                 {"role": "user", "content": "你好"},
                 {"role": "assistant", "content": "嗨", "context": ""},
             ],
         }
-        out = emotion_node(state)
-        self.assertEqual(out["emotion_data"]["core_emotion"], "平静")
+        out = finalize_node(state)
         self.assertEqual(out["messages"][-1]["emotion"]["reply_text"], "我在听")
+
+    def test_finalize_is_noop_without_emotion(self):
+        state = {"messages": [{"role": "assistant", "content": "嗨"}]}
+        self.assertEqual(finalize_node(state), {})
+
+    def test_history_sent_to_model_is_capped(self):
+        """全量历史发出去会让 token 成本随轮次线性上涨。"""
+        messages = []
+        for i in range(50):
+            messages.append({"role": "user", "content": f"问题{i}"})
+            messages.append({"role": "assistant", "content": f"回答{i}", "context": ""})
+
+        trimmed = recent_history(messages, max_turns=3)
+
+        self.assertEqual(len(trimmed), 6)
+        self.assertEqual(trimmed[-1]["content"], "回答49")
+        # 只保留 role/content，context 与 emotion 不该塞进提示词
+        self.assertEqual(set(trimmed[0]), {"role", "content"})
+
+    def test_stored_history_is_capped(self):
+        """存进 Redis 的快照也要裁剪，否则 state 随会话无限膨胀。"""
+        state = {"messages": [{"role": "user", "content": "x"} for _ in range(500)]}
+        msgs = _append_turn_messages(state, "新问题", "新回答")
+
+        self.assertLessEqual(len(msgs), MAX_STORED_TURNS * 2)
+        self.assertEqual(msgs[-1]["content"], "新回答")
 
 
 class TestUploadFilename(unittest.TestCase):
@@ -159,7 +226,7 @@ class TestWikiHelpers(unittest.TestCase):
         self.assertEqual(_strip_frontmatter("# 无头\n"), "# 无头\n")
 
     def test_wiki_dir_helpers(self):
-        from knowledge import _wiki_dir, _WIKI_SKIP_NAMES
+        from knowledge import _WIKI_SKIP_NAMES, _wiki_dir
 
         self.assertTrue(_wiki_dir().replace("\\", "/").endswith("/wiki"))
         self.assertIn("agents.md", _WIKI_SKIP_NAMES)

@@ -1,10 +1,11 @@
 import time
+
 from colorama import Fore, Style, init
+from file_service import FileService
+from kimi_extract_service import KimiExtractService
+from llm_service import DeepSeekService
 from regex import F
 from sympy import content
-from llm_service import DeepSeekService
-from kimi_extract_service import KimiExtractService
-from file_service import FileService
 
 # 初始化颜色输出
 init(autoreset = True)

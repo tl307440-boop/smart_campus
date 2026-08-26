@@ -13,14 +13,21 @@ import os
 import re
 import threading
 from dataclasses import dataclass
-from typing import Optional
 
 from env_config import backend_dir, chroma_persist_dir
 from file_service import FileService
+from logging_config import get_logger
+from tenancy import GLOBAL_TENANT, is_visible_to, normalize_tenant
 from vector_service import VectorRAGService
 
-# 超过这个长度的文档只进向量库，不再整篇塞给 Kimi
+logger = get_logger(__name__)
+
+# 单篇超过这个长度的文档只进向量库，不再整篇塞给 Kimi
 LONG_DOC_CHARS = 20000
+
+# 拼给 Kimi 的短文合集上限。这是一个与 LONG_DOC_CHARS 无关的独立预算：
+# 短文再多，合起来超过预算就整体改走向量检索，而不是硬塞。
+KIMI_CORPUS_BUDGET = 20000
 
 SUPPORTED_EXTENSIONS = (".txt", ".pdf", ".md", ".markdown")
 _UPLOAD_EXTENSIONS = (".txt", ".pdf", ".md", ".markdown")
@@ -44,8 +51,13 @@ def _wiki_dir() -> str:
     return os.path.abspath(os.path.join(backend_dir(), "..", "wiki"))
 
 
-def _uploads_dir() -> str:
+def _uploads_root() -> str:
     return os.path.join(_data_dir(), "uploads")
+
+
+def _uploads_dir(tenant_id: str) -> str:
+    """每个租户一个子目录：两所学校上传同名文件时不会互相覆盖。"""
+    return os.path.join(_uploads_root(), normalize_tenant(tenant_id))
 
 
 def _safe_filename(filename: str) -> str:
@@ -65,74 +77,99 @@ class DocumentInfo:
     chars: int
     indexed: bool
     source: str  # "preloaded" | "uploaded" | "wiki"
+    tenant_id: str = GLOBAL_TENANT
 
 
 class KnowledgeBase:
-    """向量库 + 短文全文的统一入口，供 API 层调用。"""
+    """向量库 + 短文全文的统一入口，供 API 层调用。
+
+    所有读取都要带调用方的租户 id：预置文档与维基对所有学校可见，
+    上传资料只对本校可见，与向量库的 where 过滤保持一致。
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._vector_db: Optional[VectorRAGService] = None
+        self._vector_db: VectorRAGService | None = None
         self._vector_db_failed = False
-        self._documents: dict[str, DocumentInfo] = {}
-        self._short_texts: dict[str, str] = {}
+        # 键是 (租户, 文档名)：不同学校可以有同名文档
+        self._documents: dict[tuple[str, str], DocumentInfo] = {}
+        self._short_texts: dict[tuple[str, str], str] = {}
         self._autoloaded = False
 
     # ---------- 向量库 ----------
 
     @property
-    def vector_db(self) -> Optional[VectorRAGService]:
+    def vector_db(self) -> VectorRAGService | None:
         """首次访问时才连接 Chroma；失败后不再重试，避免每次请求都卡住。"""
         if self._vector_db is None and not self._vector_db_failed:
             try:
                 self._vector_db = VectorRAGService(persist_directory=chroma_persist_dir())
             except Exception as exc:
                 self._vector_db_failed = True
-                print(f"[Knowledge] 向量库初始化失败: {exc}")
+                logger.error(f"[Knowledge] 向量库初始化失败: {exc}")
         return self._vector_db
 
     # ---------- 查询 ----------
 
-    def documents(self) -> list[DocumentInfo]:
+    def documents(self, tenant_id: str) -> list[DocumentInfo]:
         with self._lock:
-            return sorted(self._documents.values(), key=lambda d: d.name)
-
-    def short_corpus(self) -> str:
-        """拼接所有短文全文，作为 Kimi 精读路径的输入。"""
-        with self._lock:
-            parts = [
-                f"\n\n--- 文档来源: {name} ---\n\n{text}"
-                for name, text in sorted(self._short_texts.items())
+            visible = [
+                doc for (owner, _), doc in self._documents.items()
+                if is_visible_to(owner, tenant_id)
             ]
-        return "".join(parts)
+        return sorted(visible, key=lambda d: d.name)
+
+    def short_corpus(self, tenant_id: str, budget: int = KIMI_CORPUS_BUDGET) -> str:
+        """拼接该租户可见的短文全文，作为 Kimi 精读路径的输入。
+
+        超出预算直接返回空串，让调用方走向量检索。
+
+        这里先算总长再决定是否拼接，是因为旧实现总是拼出完整字符串，
+        再由 retrieve_node 拿「拼接结果 < 20000」去判路由——维基页一多就必然超标，
+        于是每次请求白白拼一个十万字的串，然后原样丢弃。
+        """
+        with self._lock:
+            items = sorted(
+                (name, text)
+                for (owner, name), text in self._short_texts.items()
+                if is_visible_to(owner, tenant_id)
+            )
+
+        total = sum(len(text) for _, text in items)
+        if total == 0 or total > budget:
+            return ""
+
+        return "".join(
+            f"\n\n--- 文档来源: {name} ---\n\n{text}" for name, text in items
+        )
 
     # ---------- 写入 ----------
 
     def autoload(self) -> int:
-        """预载 wiki/、data/ 预置文档和 data/uploads/。重复调用只生效一次。"""
+        """预载 wiki/、data/ 预置文档和各租户的上传目录。重复调用只生效一次。"""
         with self._lock:
             if self._autoloaded:
                 return len(self._documents)
             self._autoloaded = True
 
         data_dir = _data_dir()
-        uploads_dir = _uploads_dir()
+        uploads_root = _uploads_root()
         wiki_dir = _wiki_dir()
         os.makedirs(data_dir, exist_ok=True)
-        os.makedirs(uploads_dir, exist_ok=True)
+        os.makedirs(uploads_root, exist_ok=True)
 
         # 先载 wiki（编译后的高密度页），再载原始 PDF/上传，检索时两者并存
         self._load_wiki(wiki_dir)
-        self._load_dir(data_dir, source="preloaded")
-        self._load_dir(uploads_dir, source="uploaded")
+        self._load_dir(data_dir, source="preloaded", tenant_id=GLOBAL_TENANT)
+        self._load_uploads(uploads_root)
 
-        print(f"[Knowledge] 预载完成，共 {len(self._documents)} 个文档")
+        logger.info(f"[Knowledge] 预载完成，共 {len(self._documents)} 个文档")
         return len(self._documents)
 
-    def add_upload(self, filename: str, data: bytes) -> DocumentInfo:
-        """把上传文件落到 data/uploads/，解析文本后再登记进知识库。"""
+    def add_upload(self, filename: str, data: bytes, tenant_id: str) -> DocumentInfo:
+        """把上传文件落到该租户的 uploads 子目录，解析文本后再登记进知识库。"""
         safe_name = _safe_filename(filename)
-        uploads_dir = _uploads_dir()
+        uploads_dir = _uploads_dir(tenant_id)
         os.makedirs(uploads_dir, exist_ok=True)
         dest = os.path.join(uploads_dir, safe_name)
         with open(dest, "wb") as handle:
@@ -148,24 +185,47 @@ class KnowledgeBase:
             os.remove(dest)
             raise ValueError(content)
 
-        return self._register(safe_name, content, source="uploaded")
+        return self._register(safe_name, content, source="uploaded", tenant_id=tenant_id)
 
-    def clear(self) -> None:
+    def clear(self, tenant_id: str) -> None:
+        """清空该租户上传的文档。
+
+        预置 PDF 与维基属于全局归属，不在清空范围内——它们被删掉后
+        要重启进程才会重新索引，还会白白重跑一遍 embedding。
+        """
+        tenant = normalize_tenant(tenant_id)
         vdb = self.vector_db
         if vdb is not None:
-            vdb.clear_database()
-        uploads_dir = _uploads_dir()
+            vdb.clear_tenant(tenant)
+
+        uploads_dir = _uploads_dir(tenant)
         if os.path.isdir(uploads_dir):
             for name in os.listdir(uploads_dir):
                 path = os.path.join(uploads_dir, name)
                 if os.path.isfile(path):
                     os.remove(path)
-        with self._lock:
-            self._documents.clear()
-            self._short_texts.clear()
-            self._autoloaded = False
 
-    def _load_dir(self, directory: str, source: str) -> None:
+        with self._lock:
+            for key in [k for k in self._documents if k[0] == tenant]:
+                self._documents.pop(key, None)
+                self._short_texts.pop(key, None)
+
+    def _load_uploads(self, uploads_root: str) -> None:
+        """uploads/ 下每个子目录是一个租户。"""
+        if not os.path.isdir(uploads_root):
+            return
+        for entry in sorted(os.listdir(uploads_root)):
+            tenant_dir = os.path.join(uploads_root, entry)
+            if not os.path.isdir(tenant_dir):
+                continue
+            try:
+                tenant = normalize_tenant(entry)
+            except ValueError as exc:
+                logger.warning(f"[Knowledge] 跳过非法租户目录 {entry}: {exc}")
+                continue
+            self._load_dir(tenant_dir, source="uploaded", tenant_id=tenant)
+
+    def _load_dir(self, directory: str, source: str, tenant_id: str) -> None:
         paths: list[str] = []
         for ext in SUPPORTED_EXTENSIONS:
             paths.extend(glob.glob(os.path.join(directory, f"*{ext}")))
@@ -174,17 +234,17 @@ class KnowledgeBase:
             try:
                 content = FileService.read_file(path)
             except Exception as exc:
-                print(f"[Knowledge] 读取失败 {name}: {exc}")
+                logger.error(f"[Knowledge] 读取失败 {name}: {exc}")
                 continue
             if content.startswith("Error") or content.startswith("不支持"):
-                print(f"[Knowledge] 读取失败 {name}: {content[:60]}")
+                logger.error(f"[Knowledge] 读取失败 {name}: {content[:60]}")
                 continue
-            self._register(name, content, source=source)
+            self._register(name, content, source=source, tenant_id=tenant_id)
 
     def _load_wiki(self, wiki_dir: str) -> None:
         """递归载入 wiki 下的 markdown；跳过 schema、日志与抽取缓存。"""
         if not os.path.isdir(wiki_dir):
-            print(f"[Knowledge] wiki 目录不存在，跳过: {wiki_dir}")
+            logger.warning(f"[Knowledge] wiki 目录不存在，跳过: {wiki_dir}")
             return
 
         loaded = 0
@@ -204,37 +264,43 @@ class KnowledgeBase:
                 try:
                     content = FileService.read_file(path)
                 except Exception as exc:
-                    print(f"[Knowledge] wiki 读取失败 {doc_name}: {exc}")
+                    logger.error(f"[Knowledge] wiki 读取失败 {doc_name}: {exc}")
                     continue
                 if not content or content.startswith("Error") or content.startswith("不支持"):
-                    print(f"[Knowledge] wiki 读取失败 {doc_name}: {(content or '')[:60]}")
+                    logger.error(f"[Knowledge] wiki 读取失败 {doc_name}: {(content or '')[:60]}")
                     continue
                 content = _strip_frontmatter(content)
                 if not content.strip():
                     continue
-                self._register(doc_name, content, source="wiki")
+                self._register(doc_name, content, source="wiki", tenant_id=GLOBAL_TENANT)
                 loaded += 1
-        print(f"[Knowledge] wiki 预载 {loaded} 页")
+        logger.info(f"[Knowledge] wiki 预载 {loaded} 页")
 
     # ---------- 内部 ----------
 
-    def _register(self, name: str, content: str, source: str) -> DocumentInfo:
+    def _register(
+        self, name: str, content: str, source: str, tenant_id: str
+    ) -> DocumentInfo:
+        tenant = normalize_tenant(tenant_id)
         indexed = False
         vdb = self.vector_db
         if vdb is not None:
             try:
-                vdb.index_document(content, name)
+                vdb.index_document(content, name, tenant)
                 indexed = True
             except Exception as exc:
-                print(f"[Knowledge] 建立索引失败 {name}: {exc}")
+                logger.error(f"[Knowledge] 建立索引失败 {name}: {exc}")
 
-        info = DocumentInfo(name=name, chars=len(content), indexed=indexed, source=source)
+        info = DocumentInfo(
+            name=name, chars=len(content), indexed=indexed, source=source, tenant_id=tenant
+        )
+        key = (tenant, name)
         with self._lock:
-            self._documents[name] = info
+            self._documents[key] = info
             if len(content) < LONG_DOC_CHARS:
-                self._short_texts[name] = content
+                self._short_texts[key] = content
             else:
-                self._short_texts.pop(name, None)
+                self._short_texts.pop(key, None)
         return info
 
 

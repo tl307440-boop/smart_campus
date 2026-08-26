@@ -38,9 +38,11 @@ graph_app.py - 智悦校园 LangGraph 版本（含意图路由）
 
 import os
 import sys
-from typing import TypedDict, Literal, List, Dict, Any, Optional
-from langgraph.graph import StateGraph, START, END
+from typing import Any, Literal, TypedDict
+
 from langgraph.checkpoint.redis import RedisSaver
+from langgraph.config import get_stream_writer
+from langgraph.graph import END, START, StateGraph
 
 # ============================================================
 # 第一步：导入已有的服务类（不修改它们，只使用它们）
@@ -49,11 +51,23 @@ from langgraph.checkpoint.redis import RedisSaver
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from env_config import chroma_persist_dir, load_backend_env
-from llm_service import DeepSeekService
 from kimi_extract_service import KimiExtractService
+from knowledge import KIMI_CORPUS_BUDGET
+from llm_service import DeepSeekService
+from logging_config import get_logger
+from tenancy import GLOBAL_TENANT
 from vector_service import VectorRAGService
 
+logger = get_logger(__name__)
+
 load_backend_env()
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
 
 
 # ============================================================
@@ -79,7 +93,7 @@ class GraphState(TypedDict):
         emotion_data       -- 情感分析结果（后续扩展用）
     """
     # ---- 对话历史（可含 context / emotion，供 UI 从 Redis 恢复）----
-    messages: List[Dict[str, Any]]
+    messages: list[dict[str, Any]]
 
     # ---- 当前用户问题 ----
     user_question: str
@@ -96,11 +110,14 @@ class GraphState(TypedDict):
     # ---- 检索子路由策略 ----
     route_strategy: Literal["auto", "kimi", "vectordb"]
 
+    # ---- 提问者所属学校，检索只在「全局文档 + 本校文档」里进行 ----
+    tenant_id: str
+
     # ---- 最终回答（generate_node 的输出）----
     final_answer: str
 
     # ---- 情感分析结果（后续扩展）----
-    emotion_data: Optional[Dict[str, Any]]
+    emotion_data: dict[str, Any] | None
 
 
 # ============================================================
@@ -115,14 +132,38 @@ _vector_db = None
 _checkpointer = None
 _compiled_graph = None
 
+# 会话里保留的对话轮数（一轮 = user + assistant 两条）
+MAX_STORED_TURNS = _env_int("MAX_STORED_TURNS", 30)
+# 每次请求实际发给模型的轮数，比存储的更少，用来压 token 成本
+MAX_PROMPT_TURNS = _env_int("MAX_PROMPT_TURNS", 10)
+
+
+def _delta_emitter():
+    """返回一个把生成中的文本片段推给调用方的函数。
+
+    走 graph.stream(stream_mode=["updates", "custom"]) 时片段会实时到达前端；
+    走 graph.invoke() 时 LangGraph 给的是空写入器，片段被丢弃，不影响返回值。
+    """
+    writer = get_stream_writer()
+
+    def emit(text: str) -> None:
+        if text:
+            writer({"delta": text})
+
+    return emit
+
 
 def _append_turn_messages(
     state: GraphState,
     question: str,
     final_answer: str,
     context: str = "",
-) -> List[Dict[str, Any]]:
-    """将本轮 user/assistant 写入 messages；assistant 附带 context 便于 UI 恢复。"""
+) -> list[dict[str, Any]]:
+    """将本轮 user/assistant 写入 messages；assistant 附带 context 便于 UI 恢复。
+
+    只保留最近 MAX_STORED_TURNS 轮：不裁剪的话 Redis 里的 state 会随会话
+    无限膨胀，每轮读写的快照也越来越大。
+    """
     updated_messages = list(state.get("messages", []))
     updated_messages.append({"role": "user", "content": question})
     updated_messages.append({
@@ -130,7 +171,21 @@ def _append_turn_messages(
         "content": final_answer,
         "context": context or "",
     })
-    return updated_messages
+    return updated_messages[-(MAX_STORED_TURNS * 2):]
+
+
+def recent_history(messages: list[dict[str, Any]], max_turns: int) -> list[dict[str, Any]]:
+    """取最近若干轮的纯对话内容，作为发给模型的上下文。
+
+    历史全量发出去的话，token 成本随轮次线性上涨，聊够久还会撑破上下文窗口。
+    """
+    trimmed: list[dict[str, Any]] = []
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role in ("user", "assistant") and content:
+            trimmed.append({"role": role, "content": content})
+    return trimmed[-(max_turns * 2):]
 
 
 def get_deepseek() -> DeepSeekService:
@@ -156,7 +211,7 @@ def get_vector_db() -> VectorRAGService:
         try:
             _vector_db = VectorRAGService(persist_directory=chroma_persist_dir())
         except Exception as e:
-            print(f"[VectorDB] 初始化失败: {e}")
+            logger.error(f"[VectorDB] 初始化失败: {e}")
             return None
     return _vector_db
 
@@ -177,11 +232,11 @@ def get_checkpointer() -> RedisSaver:
     global _checkpointer
     if _checkpointer is None:
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-        print(f"[Redis] 正在连接 Redis: {redis_url}")
+        logger.info(f"[Redis] 正在连接 Redis: {redis_url}")
         _checkpointer = RedisSaver(redis_url)
         # setup() 会在 Redis 中创建必要的索引结构（首次必须调用）
         _checkpointer.setup()
-        print("[Redis] 连接成功，Checkpointer 就绪！")
+        logger.info("[Redis] 连接成功，Checkpointer 就绪！")
     return _checkpointer
 
 
@@ -206,8 +261,8 @@ def intent_node(state: GraphState) -> dict:
                                                           └──> state["intent"]
     """
     question = state["user_question"]
-    print(f"\n{'='*50}")
-    print(f"[意图判定] 当前问题: \"{question}\"")
+    logger.info(f"\n{'='*50}")
+    logger.info(f"[意图判定] 当前问题: \"{question}\"")
 
     # --- 使用 DeepSeek 做极速意图分类 ---
     # 非流式调用（不带 stream=True），直接获取完整响应，速度快
@@ -223,7 +278,7 @@ def intent_node(state: GraphState) -> dict:
 
     # --- Mock 模式：用关键词规则做快速分类，不调用 API ---
     if get_deepseek().use_mock:
-        print("[意图判定] Mock 模式，使用关键词规则分类")
+        logger.info("[意图判定] Mock 模式，使用关键词规则分类")
         # 定义教务相关的关键词列表
         rag_keywords = [
             "奖学金", "助学金", "学籍", "学分", "绩点", "考试", "挂科", "补考",
@@ -254,11 +309,10 @@ def intent_node(state: GraphState) -> dict:
 
         except Exception as e:
             # API 调用失败时，默认走 RAG 路径（保守策略）
-            print(f"[意图判定] API 调用失败: {e}，默认走 RAG 路径")
+            logger.error(f"[意图判定] API 调用失败: {e}，默认走 RAG 路径")
             intent = "RAG"
 
-    print(f"[意图判定] 判定意图为: {intent}")
-    print(f"{'='*50}")
+    logger.info(f"[意图判定] 判定意图为: {intent}")
 
     return {"intent": intent}
 
@@ -285,8 +339,7 @@ def route_query(state: GraphState) -> str:
     else:
         target = "generate"
 
-    print(f"[路由决策] 意图={intent} → 即将走向: {target}_node")
-    print(f"{'='*50}\n")
+    logger.info(f"[路由决策] 意图={intent} → 即将走向: {target}_node")
 
     return target
 
@@ -319,31 +372,36 @@ def retrieve_node(state: GraphState) -> dict:
     question = state["user_question"]
     strategy = state.get("route_strategy", "auto")
     doc_content = state.get("current_doc_content", "")
+    tenant_id = state.get("tenant_id") or GLOBAL_TENANT
 
-    print(f"[检索节点] 开始检索，路由策略: {strategy}")
+    logger.info(f"[检索节点] 开始检索，路由策略: {strategy}，租户: {tenant_id}")
 
     context = ""
 
     try:
-        if strategy == "kimi" or (strategy == "auto" and 0 < len(doc_content) < 20000):
+        # 预算判定在 knowledge.short_corpus 里已经做过一次（超预算会返回空串），
+        # 这里再兜一道，防止 ask_question 直接传进来的超长 doc_content。
+        if strategy == "kimi" or (
+            strategy == "auto" and 0 < len(doc_content) <= KIMI_CORPUS_BUDGET
+        ):
             # --- Kimi 小文档路径 ---
             # 直接将全文交给 Kimi 阅读，让它摘录与问题相关的段落
-            print(f"[检索节点] 走 Kimi 精读路径 (文档长度: {len(doc_content)} 字)")
+            logger.info(f"[检索节点] 走 Kimi 精读路径 (文档长度: {len(doc_content)} 字)")
             context = get_kimi().extract_knowledge(doc_content, question)
         else:
             # --- 向量数据库路径 ---
             # 使用智谱 embedding-3 向量化问题，在 ChromaDB 中检索最相似的片段
-            print(f"[检索节点] 走向量数据库检索路径 (ChromaDB)")
+            logger.info("[检索节点] 走向量数据库检索路径 (ChromaDB)")
             vdb = get_vector_db()
             if vdb is not None:
-                context = vdb.search(question, top_k=3)
+                context = vdb.search(question, tenant_id, top_k=3)
             else:
-                print("[检索节点] VectorDB 不可用，跳过检索")
+                logger.warning("[检索节点] VectorDB 不可用，跳过检索")
     except Exception as e:
-        print(f"[检索节点] 检索失败: {e}")
+        logger.error(f"[检索节点] 检索失败: {e}")
         context = ""
 
-    print(f"[检索节点] 检索完成，上下文长度: {len(context)} 字")
+    logger.info(f"[检索节点] 检索完成，上下文长度: {len(context)} 字")
 
     return {"context": context}
 
@@ -380,18 +438,21 @@ def generate_node(state: GraphState) -> dict:
     question = state["user_question"]
     intent = state.get("intent", "RAG")
 
-    print(f"[生成节点] 意图={intent}，上下文长度={len(context)} 字")
+    logger.info(f"[生成节点] 意图={intent}，上下文长度={len(context)} 字")
+
+    emit = _delta_emitter()
 
     # --- 场景一：DIRECT 路径（无上下文，直接对话）---
     if not context or intent == "DIRECT":
-        print("[生成节点] 无上下文，走拟人化对话模式")
+        logger.info("[生成节点] 无上下文，走拟人化对话模式")
 
         # Mock 模式：返回模拟回答
         if get_deepseek().use_mock:
             final_answer = f"【小懒】你好呀！我是智悦校园的智能助手小懒～ 你问的「{question}」是一个有趣的问题呢！不过如果你想了解学校的具体政策或规定，可以试试加载相关文档后提问哦。"
-            print(f"[生成节点] Mock 模式，返回模拟回答")
+            emit(final_answer)
+            logger.info("[生成节点] Mock 模式，返回模拟回答")
             updated_messages = _append_turn_messages(state, question, final_answer, context="")
-            print(f"[生成节点] 回答生成完成，长度: {len(final_answer)} 字，messages 共 {len(updated_messages)} 条")
+            logger.info(f"[生成节点] 回答生成完成，长度: {len(final_answer)} 字，messages 共 {len(updated_messages)} 条")
             return {"final_answer": final_answer, "messages": updated_messages}
 
         # 真实 API 模式：调用 DeepSeek 以校园助手身份直接回答
@@ -403,14 +464,9 @@ def generate_node(state: GraphState) -> dict:
 如果用户问的是校园相关问题但你没有具体资料，请礼貌地建议他们使用 /read 命令加载相关文档。
 请根据对话历史理解用户的上下文，比如用户之前告诉过你他的名字，你应该记住并使用。
 """
-            # 【关键修复】从 Redis 恢复的历史消息中提取对话记录，构建完整上下文
-            # 这样 LLM 就能看到之前的对话，比如用户说过"我是唐亮"
-            history_messages = []
-            for msg in state.get("messages", []):
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-                if role in ("user", "assistant") and content:
-                    history_messages.append({"role": role, "content": content})
+            # 从 Redis 恢复的历史里取最近几轮，LLM 才能记住「我是唐亮」这类上文。
+            # 只取最近几轮而非全量：否则 token 成本随会话长度线性上涨。
+            history_messages = recent_history(state.get("messages", []), MAX_PROMPT_TURNS)
 
             # 将 system prompt + 历史消息 + 当前问题 组装为完整对话
             api_messages = [{"role": "system", "content": system_prompt}] + history_messages + [{"role": "user", "content": question}]
@@ -419,44 +475,67 @@ def generate_node(state: GraphState) -> dict:
                 model="deepseek-chat",
                 messages=api_messages,
                 temperature=0.8,
-                stream=False,  # 非流式，直接获取完整回答
+                stream=True,  # 边生成边下发，首字延迟不再等整段写完
             )
-            final_answer = response.choices[0].message.content
+            parts: list[str] = []
+            for chunk in response:
+                piece = chunk.choices[0].delta.content
+                if piece:
+                    parts.append(piece)
+                    emit(piece)
+            final_answer = "".join(parts)
         except Exception as e:
             final_answer = f"抱歉，我暂时无法回答这个问题。错误信息: {str(e)}"
 
         updated_messages = _append_turn_messages(state, question, final_answer, context="")
-        print(f"[生成节点] 回答生成完成，长度: {len(final_answer)} 字，messages 共 {len(updated_messages)} 条")
+        logger.info(f"[生成节点] 回答生成完成，长度: {len(final_answer)} 字，messages 共 {len(updated_messages)} 条")
         return {"final_answer": final_answer, "messages": updated_messages}
 
     # --- 场景二：RAG 路径（有上下文，基于知识回答）---
-    print("[生成节点] 有上下文，走 RAG 知识问答模式")
+    logger.info("[生成节点] 有上下文，走 RAG 知识问答模式")
 
-    # chat_with_context 是 generator，需要逐块消费并拼接
-    full_answer = ""
+    # chat_with_context 是 generator，逐块消费：一边拼完整答案，一边下发给前端
+    parts: list[str] = []
     for chunk in get_deepseek().chat_with_context(context, question):
-        full_answer += chunk
+        parts.append(chunk)
+        emit(chunk)
+    full_answer = "".join(parts)
 
     updated_messages = _append_turn_messages(state, question, full_answer, context=context)
-    print(f"[生成节点] 回答生成完成，长度: {len(full_answer)} 字，messages 共 {len(updated_messages)} 条")
+    logger.info(f"[生成节点] 回答生成完成，长度: {len(full_answer)} 字，messages 共 {len(updated_messages)} 条")
     return {"final_answer": full_answer, "messages": updated_messages}
 
 
 def emotion_node(state: GraphState) -> dict:
     """
-    【情感分析节点】- 在回答生成后分析用户情绪，结果写入 emotion_data，
-    并挂到本轮 assistant 消息上，便于 Redis → UI 完整恢复。
+    【情感分析节点】- 分析用户情绪。
+
+    它只读 user_question，与检索、生成没有数据依赖，所以从 START 起就与
+    主链路并行跑。串在 generate 后面的话，这次 API 往返会整个加在
+    「最后一个 token 吐完」到「回答结束」之间，用户干等。
+
+    只返回 emotion_data，挂到消息上的事交给 finalize_node——
+    那时候 generate 才刚把 assistant 消息写进去。
     """
     question = state.get("user_question", "")
-    print(f"[情感节点] 分析用户问题: \"{question[:40]}\"")
-    emotion_data = get_deepseek().analyze_emotion_and_reply(question)
-    updated_messages = list(state.get("messages", []))
-    if updated_messages and updated_messages[-1].get("role") == "assistant":
-        last = dict(updated_messages[-1])
-        last["emotion"] = emotion_data
-        updated_messages[-1] = last
-        return {"emotion_data": emotion_data, "messages": updated_messages}
-    return {"emotion_data": emotion_data}
+    logger.info(f"[情感节点] 分析用户问题: \"{question[:40]}\"")
+    return {"emotion_data": get_deepseek().analyze_emotion_and_reply(question)}
+
+
+def finalize_node(state: GraphState) -> dict:
+    """
+    【收尾节点】- 等生成与情感两条分支都完成后，把情绪挂到本轮 assistant 消息上，
+    便于 Redis → UI 完整恢复。
+    """
+    emotion_data = state.get("emotion_data")
+    messages = list(state.get("messages", []))
+    if not emotion_data or not messages or messages[-1].get("role") != "assistant":
+        return {}
+
+    last = dict(messages[-1])
+    last["emotion"] = emotion_data
+    messages[-1] = last
+    return {"messages": messages}
 
 
 # ============================================================
@@ -469,8 +548,12 @@ def build_graph():
 
     图结构（含意图路由）:
         START ──> intent_node ──┬── RAG ──> retrieve_node ──┐
-                               │                            ├──> generate_node ──> emotion_node ──> END
-                               └── DIRECT ─────────────────┘
+                 │             └── DIRECT ─────────────────┴──> generate_node ──┐
+                 │                                                               ├──> finalize ──> END
+                 └──> emotion_node ─────────────────────────────────────────────┘
+
+    情感分析与主链路并行：它只依赖 user_question，串在生成后面只会平白拉长
+    「最后一个 token」到「回答结束」之间的等待。finalize 等两条分支都到齐。
     """
     global _compiled_graph
     if _compiled_graph is not None:
@@ -482,8 +565,10 @@ def build_graph():
     graph.add_node("retrieve", retrieve_node)
     graph.add_node("generate", generate_node)
     graph.add_node("emotion", emotion_node)
+    graph.add_node("finalize", finalize_node)
 
     graph.add_edge(START, "intent")
+    graph.add_edge(START, "emotion")
     graph.add_conditional_edges(
         "intent",
         route_query,
@@ -493,8 +578,9 @@ def build_graph():
         }
     )
     graph.add_edge("retrieve", "generate")
-    graph.add_edge("generate", "emotion")
-    graph.add_edge("emotion", END)
+    graph.add_edge("generate", "finalize")
+    graph.add_edge("emotion", "finalize")
+    graph.add_edge("finalize", END)
 
     checkpointer = get_checkpointer()
     _compiled_graph = graph.compile(checkpointer=checkpointer)
@@ -510,7 +596,8 @@ def ask_question(
     doc_content: str = "",
     strategy: str = "auto",
     history: list = None,
-    thread_id: str = "default"
+    thread_id: str = "default",
+    tenant_id: str = GLOBAL_TENANT,
 ) -> dict:
     """
     一站式提问函数：封装 Graph 的调用流程。
@@ -537,6 +624,7 @@ def ask_question(
     input_state = {
         "user_question": question,          # 当前问题（必填）
         "route_strategy": strategy,         # 检索子路由策略
+        "tenant_id": tenant_id,             # 决定检索可见范围
     }
 
     # 如果显式传入了 history，才覆盖 messages（首次调用或重置场景）

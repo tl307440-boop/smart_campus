@@ -1,18 +1,19 @@
+import glob
 import os
-import uuid
-import time
-import streamlit as st
-from file_service import FileService
-from vector_service import VectorRAGService
-from voice_service import SparkTTSService
 import tempfile
 import threading
-import glob
+import time
+import uuid
 
+import streamlit as st
 from env_config import chroma_persist_dir, load_backend_env
+from file_service import FileService
 from graph_app import build_graph
 from session_thread import resolve_thread_id
+from tenancy import LEGACY_TENANT
 from ui_theme import apply_theme, render_hero
+from vector_service import VectorRAGService
+from voice_service import SparkTTSService
 
 load_backend_env()
 
@@ -162,7 +163,7 @@ if "has_autoloaded" not in st.session_state:
                         f"\n\n--- 文档来源: {file_name} ---\n\n" + content
                     )
                 try:
-                    vector_db.index_document(content, file_name)
+                    vector_db.index_document(content, file_name, LEGACY_TENANT)
                 except Exception as e:
                     print(f"自动加载文件 '{file_name}' 时建立索引失败: {e}")
         print(f"自动加载完成！共登记 {len(st.session_state.processed_files)} 个文件")
@@ -216,7 +217,9 @@ with st.sidebar:
                 if len(content) >= LONG_DOC_CHARS:
                     with st.spinner(f"正在构建{uploaded_file.name}的向量索引..."):
                         if vector_db is not None:
-                            vector_db.index_document(content, uploaded_file.name)
+                            vector_db.index_document(
+                                content, uploaded_file.name, LEGACY_TENANT
+                            )
                             st.success(f"文件 '{uploaded_file.name}' 已存入向量数据库！")
                 else:
                     st.info(f"文件 '{uploaded_file.name}' 较短，将直接精读全文。")
@@ -237,7 +240,8 @@ with st.sidebar:
 
     if st.button("格式化向量库 (Clear DB)"):
         if vector_db is not None:
-            vector_db.clear_database()
+            # 只清旧版界面自己写入的片段，维基与预置文档不受影响
+            vector_db.clear_tenant(LEGACY_TENANT)
         st.session_state.current_doc_content = ""
         st.session_state.current_file_name = ""
         st.session_state.processed_files = set()

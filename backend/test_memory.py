@@ -23,7 +23,7 @@ import time
 # 将 backend 目录加入 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from graph_app import ask_question, build_graph
+from graph_app import ask_question
 
 
 def test_multi_turn_memory():
@@ -60,7 +60,7 @@ def test_multi_turn_memory():
     )
     elapsed1 = time.time() - start
 
-    print(f"\n--- 第一轮结果 ---")
+    print("\n--- 第一轮结果 ---")
     print(f"意图: {result1['intent']}")
     print(f"回答: {result1['final_answer']}")
     print(f"messages 数量: {len(result1.get('messages', []))}")
@@ -87,7 +87,7 @@ def test_multi_turn_memory():
     )
     elapsed2 = time.time() - start
 
-    print(f"\n--- 第二轮结果 ---")
+    print("\n--- 第二轮结果 ---")
     print(f"意图: {result2['intent']}")
     print(f"回答: {result2['final_answer']}")
     print(f"messages 数量: {len(result2.get('messages', []))}")
@@ -107,8 +107,8 @@ def test_multi_turn_memory():
     # 注意：mock 模式下 generate_node 返回固定模板，不会读取历史生成回答。
     # 切换到真实 API（use_mock=False）后，LLM 会读取 messages 历史，
     # 就能回答"你叫唐亮"了。这里只验证 Redis 持久化是否工作。
-    print(f"\n[PASS] 第二轮对话通过! Redis 成功恢复了第一轮的记忆!")
-    print(f"  messages 中包含'唐亮': 第一轮历史已被 Redis 持久化并恢复")
+    print("\n[PASS] 第二轮对话通过! Redis 成功恢复了第一轮的记忆!")
+    print("  messages 中包含'唐亮': 第一轮历史已被 Redis 持久化并恢复")
     print(f"  messages 数量: {len(messages)} (包含两轮对话的完整历史)")
 
     return result1, result2
