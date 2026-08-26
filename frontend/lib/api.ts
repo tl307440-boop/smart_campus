@@ -1,4 +1,12 @@
+import { readStoredToken } from "@/lib/auth/session";
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8001";
+
+/** FastAPI 侧用 HTTPBearer 校验同一个令牌，未登录时让请求带空头并由后端返回 401。 */
+function authHeaders(): Record<string, string> {
+  const token = readStoredToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
 
 export type Role = "user" | "assistant";
 
@@ -14,11 +22,14 @@ export interface ChatMessage {
   emotion?: EmotionData | null;
 }
 
+/** 取值与后端 knowledge.py 的 DocumentInfo.source 一一对应 */
+export type DocumentSource = "preloaded" | "uploaded" | "wiki";
+
 export interface DocumentInfo {
   name: string;
   chars: number;
   indexed: boolean;
-  source: "preloaded" | "uploaded";
+  source: DocumentSource;
 }
 
 export interface ChatDone {
@@ -42,7 +53,10 @@ export interface ChatHandlers {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, init);
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: { ...authHeaders(), ...init?.headers },
+  });
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
     throw new Error(detail || `请求失败（${response.status}）`);
@@ -85,7 +99,7 @@ export async function streamChat(
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/api/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ thread_id: threadId, question }),
     signal,
   });

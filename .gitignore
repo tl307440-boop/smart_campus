@@ -7,6 +7,14 @@ backend/.env
 backend/.env.*
 !backend/.env.example
 
+# 部署产出的凭据（管理员密钥、SSH key、云厂商证书等）
+deploy/**/.admin-key
+deploy/**/*.key
+deploy/**/*.pem
+*.key
+*.pem
+!**/*.pub
+
 # Python
 venv/
 .venv/
@@ -23,6 +31,9 @@ node_modules/
 frontend/.next/
 frontend/out/
 frontend/next-env.d.ts
+
+# Prisma 生成的客户端（由 npm run db:generate 重建）
+frontend/app/generated/
 
 # Local runtime / vector DB
 chroma_db_data/
