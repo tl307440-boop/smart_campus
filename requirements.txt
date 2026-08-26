@@ -1,12 +1,18 @@
 # ==========================================
 # 智悦校园 AI 伴侣 (SmartJoy Campus Agent)
-# 核心依赖环境清单
+# 核心依赖环境清单（人工维护的直接依赖）
+#
+# 镜像构建装的是 requirements.lock（全量固定版本，含传递依赖）。
+# 改完本文件后必须重新生成锁文件，否则容器里装的还是旧版本：
+#   uv pip compile requirements.txt --python-platform linux --python-version 3.12 \
+#       --torch-backend cpu --output-file requirements.lock
 # ==========================================
 
 # --- 1. Web 服务与旧版一体化界面 ---
 fastapi>=0.115.0                # 对外 HTTP/SSE 接口层，供独立前端调用
 uvicorn[standard]>=0.30.0       # ASGI 服务器
 python-multipart>=0.0.9         # FastAPI 解析 multipart 文件上传
+pyjwt>=2.8.0,<3                 # 验签前端 jose 签发的 HS256 访问令牌；上界 2.9 是 zhipuai 的约束
 streamlit>=1.30.0               # 旧版一体化界面（逐步由 Next.js 前端替代）
 
 
@@ -18,8 +24,10 @@ python-dotenv>=1.0.0            # 用于安全读取 .env 文件中的各类 API
 pypdf>=4.0.0                    # 轻量级本地 PDF 解析提取
 chromadb>=0.4.20                # 核心本地向量数据库
 langchain-community>=0.0.20     # 提供 RAG 相关的封装工具类
-langgraph>=0.2.0                # LangGraph 状态图框架 (用于构建 RAG 工作流)
+langchain-text-splitters>=0.3.0 # 递归切片，按段落/中文标点断开而非按字符硬切
+langgraph>=0.3.1                # LangGraph 状态图框架；0.3.1 起有 langgraph.config.get_stream_writer（真流式依赖它）
 langgraph-checkpoint-redis>=0.5.0  # Redis 持久化存储 (多轮对话记忆、并发隔离；PyPI 当前最高 0.5.x)
+redis>=5.0.0                    # rate_limit.py 直接用它做按用户限流计数
 zhipuai>=2.0.0                  # 智谱 AI 官方 SDK (用于文本 Embedding 向量化)
 
 # --- 4. 语音交互与底层通信组件 ---
