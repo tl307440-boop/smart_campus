@@ -1,0 +1,100 @@
+# 智悦校园 · 阿里云 ECS（iZbp1itw2z8awdfxlendepZ / 47.111.163.151）
+# 2 核 2G：不发布数据库端口，API 镜像不装 torch，重排序关闭。
+# 密钥只放服务器上的 .env 和 backend/.env，不要提交。
+
+name: smart_campus
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: campus
+      POSTGRES_DB: smart_campus
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 /opt/smart_campus/.env 设置 POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U campus -d smart_campus"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis/redis-stack:latest
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+  api:
+    image: smart_campus-api:latest
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        REQUIREMENTS_FILE: requirements.aliyun.txt
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
+        APT_MIRROR: mirrors.aliyun.com
+    # 命名卷首次创建属主是 root，镜像里的 campus 用户写不了向量库
+    user: "0:0"
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./backend/.env:/app/backend/.env:ro
+      - ./data:/app/data
+      - ./wiki:/app/wiki:ro
+      - chroma-data:/app/backend/chroma_db_data
+    environment:
+      REDIS_URL: redis://redis:6379
+      FRONTEND_ORIGINS: ${PUBLIC_WEB_ORIGIN:?请在 .env 设置 PUBLIC_WEB_ORIGIN}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?请在 .env 设置 AUTH_JWT_SECRET}
+      RERANK_ENABLED: "false"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  migrate:
+    image: smart_campus-migrate:latest
+    build:
+      context: ./frontend
+      target: migrator
+      args:
+        NPM_REGISTRY: https://registry.npmmirror.com
+    environment:
+      DATABASE_URL: postgresql://campus:${POSTGRES_PASSWORD:?请在 .env 设置 POSTGRES_PASSWORD}@postgres:5432/smart_campus
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    image: smart_campus-web:latest
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_BASE: ${PUBLIC_API_BASE:?请在 .env 设置 PUBLIC_API_BASE}
+        NPM_REGISTRY: https://registry.npmmirror.com
+    ports:
+      - "80:3000"
+    environment:
+      DATABASE_URL: postgresql://campus:${POSTGRES_PASSWORD:?请在 .env 设置 POSTGRES_PASSWORD}@postgres:5432/smart_campus
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?请在 .env 设置 AUTH_JWT_SECRET}
+    depends_on:
+      api:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  chroma-data:

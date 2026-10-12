@@ -3,9 +3,10 @@
 # ==========================================
 
 FROM node:22-alpine AS deps
+ARG NPM_REGISTRY=https://registry.npmjs.org
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN npm ci --registry="${NPM_REGISTRY}"
 
 FROM node:22-alpine AS builder
 WORKDIR /app
