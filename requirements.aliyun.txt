@@ -1,0 +1,29 @@
+# 2 核 2G 阿里云 ECS 用的依赖。
+# 去掉 streamlit / pygame / sentence-transformers（后者会拉进约 2GB 的 torch）。
+# 重排序在这台机器上关闭，RERANK_ENABLED=false，代码会退回向量 Top-K。
+# 本地和完整镜像仍用 requirements.lock。
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+pyjwt>=2.8.0,<3
+
+openai>=1.12.0
+python-dotenv>=1.0.0
+
+pypdf>=4.0.0
+chromadb>=0.4.20
+langchain-community>=0.0.20
+langchain-text-splitters>=0.3.0
+langgraph>=0.3.1
+langgraph-checkpoint-redis>=0.5.0
+redis>=5.0.0
+zhipuai>=2.0.0
+
+websocket-client>=1.7.0
+
+colorama>=0.4.6
+
+importlib-metadata>=7.0.0
+opentelemetry-api>=1.22.0
+opentelemetry-sdk>=1.22.0

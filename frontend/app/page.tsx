@@ -4,11 +4,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Composer } from "@/components/Composer";
 import { ConsolePanel } from "@/components/ConsolePanel";
 import { MessageBubble } from "@/components/MessageBubble";
+import { useAuth } from "@/lib/auth/context";
 import { useChat } from "@/hooks/useChat";
 
 const WELCOME = "同学，你好！我是你的校园助手小懒。请问有什么可以帮你？";
 
 export default function ChatPage() {
+  const { user, logout } = useAuth();
   const [ttsEnabled, setTtsEnabled] = useState(false);
 
   const speak = useCallback(
@@ -42,6 +44,11 @@ export default function ChatPage() {
     void startNewSession();
   }
 
+  function handleLogout() {
+    window.speechSynthesis?.cancel();
+    logout();
+  }
+
   return (
     <div className="flex h-dvh">
       <ConsolePanel
@@ -52,13 +59,32 @@ export default function ChatPage() {
       />
 
       <main className="flex min-w-0 flex-1 flex-col">
-        <header className="border-b border-line px-6 py-5 text-center">
-          <h1 className="font-display text-2xl font-bold tracking-[0.08em]">
-            智悦校园 · <span className="text-gold">小懒</span>
-          </h1>
-          <p className="mt-1 text-sm text-muted">
-            校园问答助手。问规章、查资助、解疑惑——像在灯下和同学聊聊。
-          </p>
+        <header className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 border-b border-line px-6 py-4">
+          <div />
+          <div className="text-center">
+            <h1 className="font-display text-2xl font-bold tracking-[0.08em]">
+              智悦校园 · <span className="text-gold">小懒</span>
+            </h1>
+            <p className="mt-1 text-sm text-muted">
+              校园问答助手。问规章、查资助、解疑惑——像在灯下和同学聊聊。
+            </p>
+          </div>
+          <div className="justify-self-end text-right">
+            {user && (
+              <>
+                <p className="truncate text-xs text-muted" title={user.studentNo}>
+                  {user.name}
+                </p>
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="mt-1 text-sm text-gold transition hover:underline"
+                >
+                  退出登录
+                </button>
+              </>
+            )}
+          </div>
         </header>
 
         <div className="flex-1 overflow-y-auto px-6 py-6">

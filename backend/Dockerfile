@@ -5,8 +5,11 @@
 # ---- 构建阶段：装依赖，编译工具链只留在这一层 ----
 FROM python:3.12-slim AS builder
 
-# 部分包没有现成 wheel，需要现场编译
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 部分包没有现成 wheel，需要现场编译。
+# 在阿里云上构建时传入 APT_MIRROR=mirrors.aliyun.com，避免 deb.debian.org 卡住。
+ARG APT_MIRROR=deb.debian.org
+RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
@@ -14,16 +17,20 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
-COPY requirements.lock .
+# 默认用锁文件。2 核 2G 的阿里云机器走 requirements.aliyun.txt，不装 torch。
+ARG REQUIREMENTS_FILE=requirements.lock
+ARG PIP_INDEX_URL=https://pypi.org/simple
+COPY ${REQUIREMENTS_FILE} /tmp/reqs.txt
 # 装全量锁定版本，保证每次构建装到的是同一组包。
 # 锁里 torch 是 +cpu 变体（容器无 GPU，避免拉进几 GB 的 CUDA 包），
 # 这个变体只在 PyTorch 官方索引上有，所以要多给一个 index。
 # 改依赖请编辑 requirements.txt 后重新生成：
 #   uv pip compile requirements.txt --python-platform linux --python-version 3.12 \
 #       --torch-backend cpu --output-file requirements.lock
-RUN pip install --no-cache-dir --timeout 120 \
+RUN pip install --no-cache-dir --timeout 300 \
+    --index-url "${PIP_INDEX_URL}" \
     --extra-index-url https://download.pytorch.org/whl/cpu \
-    -r requirements.lock
+    -r /tmp/reqs.txt
 
 # ---- 运行阶段：只带虚拟环境和代码，不带编译工具链 ----
 FROM python:3.12-slim AS runtime
