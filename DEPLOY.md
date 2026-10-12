@@ -122,7 +122,7 @@ docker-compose up -d --build
 
 ### 小内存服务器（阿里云 2 核 2G）
 
-不要在服务器上 `--build`：编译前端会内存溢出，构建缓存也会撑满磁盘。改为 push 到 `master`（或在 Actions 页手动触发 `deploy-aliyun`），由 `.github/workflows/deploy-aliyun.yml` 在 GitHub 构建机上构建三个镜像，流式 `docker load` 到服务器，再 `docker-compose -f docker-compose.aliyun.yml up -d --no-build`，并清理旧镜像和构建缓存。
+不要在服务器上 `--build`：编译前端会内存溢出，构建缓存也会撑满磁盘。改为 push 到 `master`（或在 Actions 页手动触发 `deploy-aliyun`），由 `.github/workflows/deploy-aliyun.yml` 在 GitHub 构建机上构建三个镜像，先清理服务器上的旧镜像和构建缓存腾出磁盘，再流式 `docker load` 到服务器，然后 `docker-compose -f docker-compose.aliyun.yml up -d --no-build`（有 `docker compose` 插件时优先用插件）。
 
 - 仓库 Secrets：`ECS_HOST`（如 `root@服务器IP`）、`ECS_SSH_KEY`（私钥）
 - 服务器 `/opt/smart_campus/.env` 必须有 `PUBLIC_API_BASE`，构建前端时从这里读取

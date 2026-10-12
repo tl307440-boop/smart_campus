@@ -16,6 +16,7 @@ jobs:
   deploy:
     name: 部署到阿里云
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     env:
       ECS_HOST: ${{ secrets.ECS_HOST }}
       IMAGES: smart_campus-api:latest smart_campus-migrate:latest smart_campus-web:latest
@@ -58,12 +59,18 @@ jobs:
             -t smart_campus-web:latest frontend
           docker image ls smart_campus-*
 
+      # docker load 时新旧镜像同时在盘上，峰值约 8GB，先清掉旧构建缓存和悬空镜像腾空间
+      - name: 预清理服务器磁盘
+        run: |
+          set -euo pipefail
+          ssh "${ECS_HOST}" 'docker builder prune -af && docker image prune -f && df -h /'
+
       # 三个镜像一起 save，共用的基础层只传一份；直接流进 docker load，服务器不落临时包
       - name: 传输镜像
         run: |
           set -euo pipefail
           # shellcheck disable=SC2086
-          docker save ${IMAGES} | gzip | ssh "${ECS_HOST}" 'gunzip | docker load'
+          docker save ${IMAGES} | gzip | ssh "${ECS_HOST}" 'set -o pipefail; gunzip | docker load'
 
       - name: 同步配置并启动
         run: |
@@ -83,23 +90,26 @@ jobs:
           scp /tmp/campus.tgz "${ECS_HOST}:/tmp/campus.tgz"
           ssh "${ECS_HOST}" bash -s << 'EOF'
           set -euo pipefail
+          # 服务器上可能只有独立的 docker-compose，没有 compose 插件
+          if docker compose version >/dev/null 2>&1; then dc() { docker compose "$@"; }; else dc() { docker-compose "$@"; }; fi
           mkdir -p /opt/smart_campus
           tar -xzf /tmp/campus.tgz -C /opt/smart_campus
           rm -f /tmp/campus.tgz
           # 旧版 Streamlit 容器停掉省内存，数据卷还在，需要时可手动再起
           docker stop smart_campus_app smart_campus_redis >/dev/null 2>&1 || true
           cd /opt/smart_campus
-          docker compose -f docker-compose.aliyun.yml up -d --no-build
-          docker compose -f docker-compose.aliyun.yml run --rm --no-deps --entrypoint sh migrate -c "npx prisma generate && npx tsx prisma/seed.ts"
+          dc -f docker-compose.aliyun.yml up -d --no-build
+          # 脚本本身走 stdin 传进来，seed 不能读 stdin，否则会吞掉后面的行
+          dc -f docker-compose.aliyun.yml run --rm -T --no-deps --entrypoint sh migrate -c "npx prisma generate && npx tsx prisma/seed.ts" < /dev/null
           # 被新镜像顶掉的旧镜像和以前在服务器上构建留下的缓存，都是磁盘被撑满的来源
           docker image prune -f
           docker builder prune -af >/dev/null
           df -h / | tail -n 1
           # 首次启动要把维基和预置文档向量化，健康检查给足时间
           for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8001/api/health; then echo; exit 0; fi
+            if curl -fsS --max-time 5 http://127.0.0.1:8001/api/health; then echo; exit 0; fi
             sleep 10
           done
-          docker compose -f docker-compose.aliyun.yml logs --tail 80 api
+          dc -f docker-compose.aliyun.yml logs --tail 80 api
           exit 1
           EOF
