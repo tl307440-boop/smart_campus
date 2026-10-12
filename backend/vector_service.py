@@ -294,41 +294,57 @@ class VectorRAGService:
         logger.info(f"[Rerank] 交叉编码器重排完成，保留 Top {len(reranked)}")
         return reranked
 
-    def _format_context(self, chunks: list[RetrievedChunk]) -> str:
+    @staticmethod
+    def format_context(chunks: list[RetrievedChunk]) -> str:
         """把重排后的 Chunk 拼成 generate_node 使用的上下文字符串。"""
         if not chunks:
             return ""
 
         retrieved_pieces = []
-        source_names = set()
+        source_names: list[str] = []
         for chunk in chunks:
             source_file = chunk.metadata.get("source", "未知文件")
-            source_names.add(source_file)
+            if source_file not in source_names:
+                source_names.append(source_file)
             retrieved_pieces.append(f"{chunk.text}\n(来源: {source_file})")
 
         retrieved_context = "\n\n".join(retrieved_pieces)
         retrieved_context += f"\n\n 本次回答共参考了以下文件：{', '.join(source_names)}"
         return retrieved_context
 
-    def search(self, query: str, tenant_id: str, top_k: int = 3) -> str:
+    def search_chunks(
+        self,
+        query: str,
+        tenant_id: str,
+        top_k: int = 3,
+        min_score: float = 0.0,
+    ) -> list[RetrievedChunk]:
         """
-        【读取】三阶段 RAG 检索：
+        【读取】三阶段 RAG 检索，返回结构化片段（供引用卡片使用）：
         1. 宽召回 candidate_k 个候选（默认 50，仅限该租户可见的文档）
-        2. BGE CrossEncoder 重排序
-        3. 截断 Top-K 后拼接 Prompt 上下文
+        2. 丢掉余弦相似度低于 min_score 的候选（工作区设置里的相似度阈值）
+        3. BGE CrossEncoder 重排序后截断 Top-K
+
+        Example:
+            >>> chunks = svc.search_chunks("宿舍门禁", "t1", top_k=2, min_score=0.3)  # doctest: +SKIP
         """
         logger.info(f" [VectorDB] 正在检索与 '{query}' 最相关的片段...")
         candidate_k = _env_int("RERANK_CANDIDATE_K", 50)
 
         try:
             candidates = self.retrieve_candidates(query, tenant_id, k=candidate_k)
+            if min_score > 0:
+                candidates = [c for c in candidates if c.vector_score >= min_score]
             reranked_top = self.rerank_candidates(query, candidates, top_n=top_k)
-            retrieved_context = self._format_context(reranked_top)
             logger.info(f" [VectorDB] 检索到 {len(reranked_top)} 个相关片段")
-            return retrieved_context
+            return reranked_top
         except Exception as e:
             logger.error(f" [VectorDB] 检索失败: {e}")
-            return ""
+            return []
+
+    def search(self, query: str, tenant_id: str, top_k: int = 3) -> str:
+        """旧版 Streamlit 界面用的字符串接口。"""
+        return self.format_context(self.search_chunks(query, tenant_id, top_k=top_k))
     
     def clear_tenant(self, tenant_id: str) -> None:
         """只删除某个租户写入的片段。

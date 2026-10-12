@@ -1,17 +1,32 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AgentSettings } from "@/components/AgentSettings";
 import { Composer } from "@/components/Composer";
 import { ConsolePanel } from "@/components/ConsolePanel";
+import { DeskPet } from "@/components/DeskPet";
 import { MessageBubble } from "@/components/MessageBubble";
+import { WorkspaceAdmin } from "@/components/WorkspaceAdmin";
+import { fetchWorkspace } from "@/lib/api";
 import { useAuth } from "@/lib/auth/context";
 import { useChat } from "@/hooks/useChat";
-
-const WELCOME = "同学，你好！我是你的校园助手小懒。请问有什么可以帮你？";
 
 export default function ChatPage() {
   const { user, logout } = useAuth();
   const [ttsEnabled, setTtsEnabled] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [assistantName, setAssistantName] = useState("小懒");
+
+  useEffect(() => {
+    fetchWorkspace()
+      .then((workspace) => setAssistantName(workspace.assistant_name))
+      .catch(() => {
+        // 读不到就沿用默认称呼
+      });
+  }, [adminOpen]);
+
+  const welcome = `同学，你好！我是你的校园助手${assistantName}。请问有什么可以帮你？`;
 
   const speak = useCallback(
     (text: string) => {
@@ -28,6 +43,8 @@ export default function ChatPage() {
 
   const { messages, pending, status, error, restoring, busy, threadId, send, stop, startNewSession } =
     useChat(speak);
+  // 后端 generate_node 出错时把异常包成这句开头的回答（backend/graph_app.py），不走 error 事件
+  const answerFailed = messages.at(-1)?.role === "assistant" && messages.at(-1)?.content.startsWith("抱歉，我暂时无法回答");
 
   const bottomRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -56,6 +73,8 @@ export default function ChatPage() {
         ttsEnabled={ttsEnabled}
         onToggleTts={handleToggleTts}
         onNewSession={handleNewSession}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenAdmin={() => setAdminOpen(true)}
       />
 
       <main className="flex min-w-0 flex-1 flex-col">
@@ -63,7 +82,7 @@ export default function ChatPage() {
           <div />
           <div className="text-center">
             <h1 className="font-display text-2xl font-bold tracking-[0.08em]">
-              智悦校园 · <span className="text-gold">小懒</span>
+              智悦校园 · <span className="text-gold">{assistantName}</span>
             </h1>
             <p className="mt-1 text-sm text-muted">
               校园问答助手。问规章、查资助、解疑惑——像在灯下和同学聊聊。
@@ -95,16 +114,18 @@ export default function ChatPage() {
               <>
                 {messages.length === 0 && (
                   <MessageBubble
-                    message={{ id: "welcome", role: "assistant", content: WELCOME }}
+                    message={{ id: "welcome", role: "assistant", content: welcome }}
+                    assistantName={assistantName}
                   />
                 )}
 
                 {messages.map((message) => (
-                  <MessageBubble key={message.id} message={message} />
+                  <MessageBubble key={message.id} message={message} assistantName={assistantName} />
                 ))}
 
                 {pending && (
                   <MessageBubble
+                    assistantName={assistantName}
                     message={{ id: "pending", role: "assistant", content: pending }}
                     streaming
                   />
@@ -132,6 +153,9 @@ export default function ChatPage() {
           </div>
         </div>
       </main>
+      <DeskPet thinking={busy} failed={Boolean(error) || answerFailed} onOpenSettings={() => setSettingsOpen(true)} />
+      <AgentSettings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <WorkspaceAdmin open={adminOpen} onClose={() => setAdminOpen(false)} />
     </div>
   );
 }

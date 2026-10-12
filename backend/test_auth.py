@@ -16,10 +16,12 @@ from auth import (
     CurrentUser,
     CurrentUserDep,
     KnowledgeManagerDep,
+    MemberDep,
     scoped_thread_id,
 )
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from workspace import EmbedSettings
 
 SECRET = "test-secret-do-not-use-in-production"
 
@@ -151,6 +153,77 @@ def test_thread_id_is_namespaced_per_user() -> None:
 
     assert scoped_thread_id(alice, shared) != scoped_thread_id(bob, shared)
     assert scoped_thread_id(alice, shared).startswith("t1:u1:")
+
+
+# ---------- 嵌入挂件访客 ----------
+
+
+@pytest.fixture
+def member_client() -> TestClient:
+    app = FastAPI()
+
+    @app.get("/member")
+    def member_only(user: MemberDep) -> dict[str, str]:
+        return {"id": user.id}
+
+    @app.get("/any")
+    def any_user(user: CurrentUserDep) -> dict[str, str]:
+        return {"id": user.id, "embed": user.embed_id}
+
+    return TestClient(app)
+
+
+def _embed(monkeypatch: pytest.MonkeyPatch, *, enabled: bool = True, tenant: str = "tenant-1") -> None:
+    settings = EmbedSettings(id="embed-1", tenant_id=tenant, daily_limit=200, enabled=enabled)
+    monkeypatch.setattr(auth, "embed_settings", lambda eid: settings if eid == "embed-1" else None)
+
+
+def guest_token(**overrides: object) -> str:
+    claims: dict[str, object] = {"sub": "guest-embed-1-v1", "eid": "embed-1", **overrides}
+    return make_token(role="GUEST", **claims)
+
+
+def test_guest_can_chat_but_not_member_routes(
+    member_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _embed(monkeypatch)
+    token = guest_token()
+
+    response = member_client.get("/any", headers=bearer(token))
+    assert response.status_code == 200
+    assert response.json()["embed"] == "embed-1"
+    assert member_client.get("/member", headers=bearer(token)).status_code == 403
+
+
+def test_disabled_embed_revokes_guest_tokens(
+    member_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _embed(monkeypatch, enabled=False)
+    assert member_client.get("/any", headers=bearer(guest_token())).status_code == 401
+
+
+def test_guest_token_for_other_school_is_rejected(
+    member_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """挂件属于 tenant-2，令牌却声称 tenant-1，不能借别校挂件查本校资料。"""
+    _embed(monkeypatch, tenant="tenant-2")
+    assert member_client.get("/any", headers=bearer(guest_token())).status_code == 401
+
+
+def test_guest_without_embed_claim_is_rejected(
+    member_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _embed(monkeypatch)
+    assert member_client.get("/any", headers=bearer(guest_token(eid=""))).status_code == 401
+
+
+def test_guest_cannot_manage_knowledge(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _embed(monkeypatch)
+    assert client.get("/manage", headers=bearer(guest_token())).status_code == 403
+
+
+def test_student_passes_member_route(member_client: TestClient) -> None:
+    assert member_client.get("/member", headers=bearer(make_token())).status_code == 200
 
 
 # ---------- 密钥缺失时不得放行 ----------

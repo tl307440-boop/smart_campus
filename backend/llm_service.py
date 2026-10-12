@@ -1,8 +1,10 @@
 import json
 import os
+from collections.abc import Iterator
 from typing import Any
 
 from env_config import load_backend_env
+from llm_request import current_llm_request
 from logging_config import get_logger
 from openai import OpenAI, OpenAIError
 
@@ -21,6 +23,17 @@ def _env_float(name: str, default: float) -> float:
 # 不设超时的话，上游卡住会一直占着连接和线程池名额
 LLM_TIMEOUT_SECONDS = _env_float("LLM_TIMEOUT_SECONDS", 60.0)
 LLM_MAX_RETRIES = int(_env_float("LLM_MAX_RETRIES", 2))
+
+
+def prompt_extras(persona: str = "", memories: list[str] | None = None) -> str:
+    """闲聊与知识库两条路径共用的提示词尾巴：学校人设 + 用户记忆。"""
+    extra = ""
+    if persona:
+        extra += f"\n【学校对你的人设要求】:\n{persona}\n"
+    if memories:
+        joined = "\n".join(f"- {item}" for item in memories)
+        extra += f"\n【关于这位同学，你已知道的事】:\n{joined}\n"
+    return extra
 
 
 class DeepSeekService:
@@ -72,6 +85,9 @@ class DeepSeekService:
         2. stress_source(压力源): 如学业、情感、就业等
         3. risk_level (风险等级): 1-10的整数
         4. reply_text (回复内容): 温暖、共情、引导性的回复等
+        5. memory_facts (值得长期记住的事): 字符串数组，只收学生明确说出的、关于自己的
+           稳定事实（姓名、学院、专业、年级、长期偏好等），每条不超过 30 字；
+           没有就返回空数组，不要推测，不要收录一次性的提问内容
 
         """
 
@@ -121,13 +137,25 @@ class DeepSeekService:
             logger.info("模型未返回合法的JSON格式")
             return {"error": str(er)}
         
-    def chat_with_context(self,context:str,user_question:str) -> str:
+    def chat_with_context(
+        self,
+        context: str,
+        user_question: str,
+        persona: str = "",
+        memories: list[str] | None = None,
+    ) -> Iterator[str]:
         """
-       RAG 核心接口：deepseek 基于传入的Context(上下文)进行对话（来自kimi或者向量数据库）
-                    回答问题,并且分析用户情绪生成回复,流式输出提升响应速度
-        """
-        #1.构建提示词：强制deepseek只根据Context回答
+        RAG 核心接口：基于传入的 Context（来自 Kimi 或向量库）流式回答。
 
+        Args:
+            context: 检索到的参考资料
+            user_question: 用户问题
+            persona: 学校在工作区设置里配的人设说明，追加到系统提示词
+            memories: 与问题相关的用户长期记忆
+
+        Returns:
+            逐块产出回答文本的生成器
+        """
         system_prompt = f"""
         你是一名知识渊博的校园助手。
         请严格基于下方的【参考资料】回答用户的问题。
@@ -136,25 +164,44 @@ class DeepSeekService:
         【参考资料】:
         {context}
         """
-        if self.use_mock:
+        system_prompt += prompt_extras(persona, memories)
+        override = current_llm_request()
+        client = self.client
+        model = "deepseek-chat"
+        stream = True
+        if override and override.api_key:
+            client = OpenAI(
+                api_key=override.api_key,
+                base_url=override.base_url,
+                timeout=LLM_TIMEOUT_SECONDS,
+                max_retries=LLM_MAX_RETRIES,
+            )
+            model = override.model or model
+            stream = override.stream
+        if client is None:
             yield f"【deepseek】这是一个模拟回复。{user_question}的解释是"
             return
         full_answer = ""    
         try:
-            response = self.client.chat.completions.create(
-                model="deepseek-chat",
+            response = client.chat.completions.create(
+                model=model,
+                stream=stream,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_question}
                 ],
                 temperature=0.8, #增加多样性,回复更自然
-                stream=True #开启流式输出，提升响应速度
             )
-            for chunk in response:
-                content = chunk.choices[0].delta.content
-                if content:
-                    full_answer += content
-                    yield content 
+            if stream:
+                for chunk in response:
+                    content = chunk.choices[0].delta.content
+                    if content:
+                        full_answer += content
+                        yield content
+            else:
+                content = response.choices[0].message.content or ""
+                full_answer = content
+                yield content 
 
         except Exception as e:
             yield f"deepseek 回复失败：{str(e)}"

@@ -76,6 +76,7 @@ def test_done_is_always_last_and_complete() -> None:
         "answer": "嗨",
         "intent": "DIRECT",
         "context": "",
+        "sources": [],
         "emotion": {"risk_level": 1},
     }
 
@@ -99,7 +100,17 @@ def test_context_length_is_reported() -> None:
     events = [("updates", {"retrieve": {"context": "12345"}})]
     frames = parse(list(sse_from_graph_stream(events)))
 
-    assert frames[0] == ("status", {"stage": "retrieved", "chars": 5})
+    assert frames[0] == ("status", {"stage": "retrieved", "chars": 5, "sources": 0})
+
+
+def test_sources_reach_done() -> None:
+    """引用卡片的数据跟着 done 一起下发，与写进历史的那份一致。"""
+    source = {"index": 1, "source": "学生手册.pdf", "snippet": "第三条", "score": 0.8}
+    events = [("updates", {"retrieve": {"context": "第三条", "sources": [source]}})]
+    frames = parse(list(sse_from_graph_stream(events)))
+
+    assert frames[0][1]["sources"] == 1
+    assert frames[-1][1]["sources"] == [source]
 
 
 def test_chinese_is_not_escaped() -> None:

@@ -15,9 +15,11 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const isPublic = PUBLIC_PATHS.has(pathname);
+  // 嵌入挂件用访客令牌，跑在第三方网页的 iframe 里，与主站登录态无关
+  const isEmbed = pathname.startsWith("/embed/");
 
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || isEmbed) return;
     if (!user && !isPublic) {
       router.replace("/login");
       return;
@@ -25,7 +27,9 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     if (user && isPublic) {
       router.replace("/");
     }
-  }, [ready, user, isPublic, router]);
+  }, [ready, user, isPublic, isEmbed, router]);
+
+  if (isEmbed) return <>{children}</>;
 
   if (!ready) {
     return (

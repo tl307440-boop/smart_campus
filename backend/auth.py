@@ -14,6 +14,7 @@ from env_config import load_backend_env
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import InvalidTokenError
+from workspace import embed_settings
 
 load_backend_env()
 
@@ -22,6 +23,9 @@ JWT_ALGORITHM = "HS256"
 
 # 能增删知识库的角色，与前端 lib/auth/session.ts 的 canManageKnowledge 保持一致
 KNOWLEDGE_MANAGER_ROLES = frozenset({"STAFF", "ADMIN"})
+
+# 嵌入挂件的访客。令牌由 frontend/app/api/embed/[id]/token 签发，额外带 eid（挂件 id）
+GUEST_ROLE = "GUEST"
 
 # auto_error=False：HTTPBearer 默认在缺少请求头时抛 403，而前端把 401 当作
 # 「重新登录」的信号。这里自己处理，保证 401=没身份、403=权限不够。
@@ -37,10 +41,15 @@ class CurrentUser:
     student_no: str
     name: str
     role: str
+    embed_id: str = ""
 
     @property
     def can_manage_knowledge(self) -> bool:
         return self.role in KNOWLEDGE_MANAGER_ROLES
+
+    @property
+    def is_guest(self) -> bool:
+        return self.role == GUEST_ROLE
 
 
 def jwt_secret() -> str:
@@ -98,13 +107,31 @@ async def current_user(
     if not (user_id and tenant_id and student_no and name and role):
         raise _unauthorized("令牌缺少必要信息，请重新登录")
 
+    embed_id = ""
+    if role == GUEST_ROLE:
+        embed_id = _read_claim(payload, "eid") or ""
+        embed = embed_settings(embed_id) if embed_id else None
+        # 挂件被停用或改挂到别的学校后，已发出去的访客令牌立即失效（最多滞后一个缓存周期）
+        if embed is None or not embed.enabled or embed.tenant_id != tenant_id:
+            raise _unauthorized("该聊天挂件已停用")
+
     return CurrentUser(
         id=user_id,
         tenant_id=tenant_id,
         student_no=student_no,
         name=name,
         role=role,
+        embed_id=embed_id,
     )
+
+
+async def member(
+    user: Annotated[CurrentUser, Depends(current_user)],
+) -> CurrentUser:
+    """登录的本校成员。挂件访客只能问答，不能碰记忆、文档列表和自带密钥。"""
+    if user.is_guest:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="访客无权访问")
+    return user
 
 
 async def knowledge_manager(
@@ -128,4 +155,5 @@ def scoped_thread_id(user: CurrentUser, thread_id: str) -> str:
 
 
 CurrentUserDep = Annotated[CurrentUser, Depends(current_user)]
+MemberDep = Annotated[CurrentUser, Depends(member)]
 KnowledgeManagerDep = Annotated[CurrentUser, Depends(knowledge_manager)]

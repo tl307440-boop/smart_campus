@@ -1,0 +1,105 @@
+name: deploy-aliyun
+
+# push 到 master 后，在 GitHub 构建机上构建镜像，再传到阿里云 ECS 启动。
+# ECS 只有 2 核 2G，在上面 docker build 会内存溢出、构建缓存会撑满磁盘，所以服务器上不再构建。
+# 只自动更新这台校园服务器，不碰 sora 那台。
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-aliyun-smart-campus
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: 部署到阿里云
+    runs-on: ubuntu-latest
+    env:
+      ECS_HOST: ${{ secrets.ECS_HOST }}
+      IMAGES: smart_campus-api:latest smart_campus-migrate:latest smart_campus-web:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备 SSH
+        env:
+          ECS_SSH_KEY: ${{ secrets.ECS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ECS_HOST}" ] || [ -z "${ECS_SSH_KEY}" ]; then
+            echo "::error::缺少 ECS_HOST 或 ECS_SSH_KEY"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "${ECS_SSH_KEY}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf 'Host *\n  StrictHostKeyChecking accept-new\n  ServerAliveInterval 30\n' > ~/.ssh/config
+
+      # NEXT_PUBLIC_API_BASE 在构建期内联进前端产物，取服务器 .env 里的值，保持单一来源
+      - name: 读取服务器上的 PUBLIC_API_BASE
+        run: |
+          set -euo pipefail
+          api_base=$(ssh "${ECS_HOST}" "grep -E '^PUBLIC_API_BASE=' /opt/smart_campus/.env | tail -n 1 | cut -d= -f2-" | tr -d "\r\"'")
+          if [ -z "${api_base}" ]; then
+            echo "::error::服务器 /opt/smart_campus/.env 里没有 PUBLIC_API_BASE"
+            exit 1
+          fi
+          echo "PUBLIC_API_BASE=${api_base}" >> "$GITHUB_ENV"
+
+      - name: 构建镜像
+        run: |
+          set -euo pipefail
+          docker build -f backend/Dockerfile \
+            --build-arg REQUIREMENTS_FILE=requirements.aliyun.txt \
+            -t smart_campus-api:latest .
+          docker build --target migrator -t smart_campus-migrate:latest frontend
+          docker build --build-arg NEXT_PUBLIC_API_BASE="${PUBLIC_API_BASE}" \
+            -t smart_campus-web:latest frontend
+          docker image ls smart_campus-*
+
+      # 三个镜像一起 save，共用的基础层只传一份；直接流进 docker load，服务器不落临时包
+      - name: 传输镜像
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          docker save ${IMAGES} | gzip | ssh "${ECS_HOST}" 'gunzip | docker load'
+
+      - name: 同步配置并启动
+        run: |
+          set -euo pipefail
+          # compose 文件、wiki、预置资料以 bind mount 方式挂载，仍需同步源码树
+          tar -czf /tmp/campus.tgz \
+            --exclude .git \
+            --exclude node_modules \
+            --exclude '**/__pycache__' \
+            --exclude .next \
+            --exclude .ruff_cache \
+            --exclude test_data \
+            --exclude tencent-memory-channel \
+            --exclude deploy \
+            --exclude '*.mp3' \
+            .
+          scp /tmp/campus.tgz "${ECS_HOST}:/tmp/campus.tgz"
+          ssh "${ECS_HOST}" bash -s << 'EOF'
+          set -euo pipefail
+          mkdir -p /opt/smart_campus
+          tar -xzf /tmp/campus.tgz -C /opt/smart_campus
+          rm -f /tmp/campus.tgz
+          # 旧版 Streamlit 容器停掉省内存，数据卷还在，需要时可手动再起
+          docker stop smart_campus_app smart_campus_redis >/dev/null 2>&1 || true
+          cd /opt/smart_campus
+          docker compose -f docker-compose.aliyun.yml up -d --no-build
+          docker compose -f docker-compose.aliyun.yml run --rm --no-deps --entrypoint sh migrate -c "npx prisma generate && npx tsx prisma/seed.ts"
+          # 被新镜像顶掉的旧镜像和以前在服务器上构建留下的缓存，都是磁盘被撑满的来源
+          docker image prune -f
+          docker builder prune -af >/dev/null
+          df -h / | tail -n 1
+          # 首次启动要把维基和预置文档向量化，健康检查给足时间
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8001/api/health; then echo; exit 0; fi
+            sleep 10
+          done
+          docker compose -f docker-compose.aliyun.yml logs --tail 80 api
+          exit 1
+          EOF

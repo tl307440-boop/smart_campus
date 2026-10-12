@@ -7,6 +7,7 @@ Redis 本来就是图的 checkpointer 依赖，不引入新组件。
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 
 import redis
@@ -71,3 +72,13 @@ def consume(key: str, rule: QuotaRule, client: redis.Redis | None = None) -> int
 
 def enforce_chat_quota(user_id: str, client: redis.Redis | None = None) -> int:
     return consume(f"chat:{user_id}", chat_quota(), client=client)
+
+
+def enforce_embed_quota(
+    embed_id: str, daily_limit: int, client: redis.Redis | None = None
+) -> int:
+    """嵌入挂件整体的每日回答上限。挂在公开网页上，换访客 id 就能绕过按人限流，
+    所以必须再按挂件兜一道总量。"""
+    day = time.strftime("%Y%m%d", time.gmtime())
+    rule = QuotaRule(max_requests=max(1, daily_limit), window_seconds=86400)
+    return consume(f"embed:{embed_id}:{day}", rule, client=client)
