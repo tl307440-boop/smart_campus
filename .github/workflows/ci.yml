@@ -48,7 +48,9 @@ jobs:
       - name: 按锁文件安装
         run: |
           uv venv
+          # PyTorch 索引也托管 certifi 等通用包但版本滞后；默认策略会只认它，要按版本跨索引挑
           uv pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+            --index-strategy unsafe-best-match \
             -r requirements.lock pytest
 
       - name: 检索与向量库回归测试
