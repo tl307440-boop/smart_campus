@@ -24,7 +24,7 @@ jobs:
       # 这几个测试刻意不依赖 chromadb / langgraph，秒级就能跑完，
       # 需要完整依赖的那部分放在下面的 backend-full 作业。
       - name: 安装测试依赖
-        run: pip install "fastapi>=0.115.0" "pyjwt>=2.8.0,<3" "python-dotenv>=1.0.0" redis httpx pytest
+        run: pip install "fastapi>=0.115.0" "pyjwt>=2.8.0,<3" "python-dotenv>=1.0.0" "psycopg[binary]>=3.2.0" redis httpx pytest
 
       - name: 语法检查（含未在测试内导入的模块）
         run: python -m compileall -q backend
@@ -39,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
 
@@ -53,7 +53,9 @@ jobs:
 
       - name: 检索与向量库回归测试
         working-directory: backend
-        run: ../.venv/bin/pytest test_abc_regressions.py test_knowledge_scope.py -q
+        run: >-
+          ../.venv/bin/pytest test_abc_regressions.py test_knowledge_scope.py
+          test_memory_store.py test_workspace.py test_web_import.py test_api_features.py -q
 
   lock:
     name: 依赖锁文件
@@ -61,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.0
 
       # 防止只改了 requirements.txt 却忘了重新生成锁文件，
       # 那样容器里装的还是旧版本，而本地看不出来。
