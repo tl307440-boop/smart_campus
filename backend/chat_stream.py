@@ -22,6 +22,7 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]]) -> Iterator[str]:
     """
     intent = ""
     context = ""
+    sources: list[dict[str, Any]] = []
     answer = ""
     emotion: dict[str, Any] | None = None
     generating_announced = False
@@ -49,7 +50,11 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]]) -> Iterator[str]:
                 yield sse("status", {"stage": "intent", "intent": intent})
             elif node == "retrieve":
                 context = patch.get("context", "") or ""
-                yield sse("status", {"stage": "retrieved", "chars": len(context)})
+                sources = patch.get("sources") or []
+                yield sse(
+                    "status",
+                    {"stage": "retrieved", "chars": len(context), "sources": len(sources)},
+                )
             elif node == "generate":
                 answer = patch.get("final_answer", "") or ""
             elif node == "emotion":
@@ -61,6 +66,7 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]]) -> Iterator[str]:
             "answer": answer,
             "intent": intent,
             "context": context,
+            "sources": sources,
             "emotion": emotion,
         },
     )

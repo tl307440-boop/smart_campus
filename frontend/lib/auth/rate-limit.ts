@@ -18,14 +18,18 @@ export function rateLimitKey(ip: string, studentNo: string): string {
   return `${ip}|${studentNo.toLowerCase()}`;
 }
 
-export function consumeRateLimit(key: string): { ok: true } | { ok: false; retryAfterSec: number } {
+export function consumeRateLimit(
+  key: string,
+  maxAttempts = MAX_ATTEMPTS,
+  windowMs = WINDOW_MS,
+): { ok: true } | { ok: false; retryAfterSec: number } {
   const now = Date.now();
   const current = buckets.get(key);
   if (!current || current.resetAt <= now) {
-    buckets.set(key, { count: 1, resetAt: now + WINDOW_MS });
+    buckets.set(key, { count: 1, resetAt: now + windowMs });
     return { ok: true };
   }
-  if (current.count >= MAX_ATTEMPTS) {
+  if (current.count >= maxAttempts) {
     return { ok: false, retryAfterSec: Math.ceil((current.resetAt - now) / 1000) };
   }
   current.count += 1;

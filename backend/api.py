@@ -11,7 +11,15 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
-from auth import CurrentUserDep, KnowledgeManagerDep, jwt_secret, scoped_thread_id
+import memory_store
+from auth import (
+    CurrentUser,
+    CurrentUserDep,
+    KnowledgeManagerDep,
+    MemberDep,
+    jwt_secret,
+    scoped_thread_id,
+)
 from chat_stream import sse, sse_from_graph_stream
 from env_config import load_backend_env
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -19,9 +27,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from graph_app import build_graph
 from knowledge import knowledge_base
-from logging_config import setup_logging
-from pydantic import BaseModel, Field
-from rate_limit import enforce_chat_quota
+from llm_request import LlmRequest, pop_llm_request, push_llm_request
+from logging_config import get_logger, setup_logging
+from openai import OpenAI
+from pydantic import BaseModel, Field, field_validator
+from rate_limit import enforce_chat_quota, enforce_embed_quota
+from web_import import UnsafeUrlError
+from workspace import embed_settings, workspace_settings
+
+logger = get_logger(__name__)
 
 load_backend_env()
 
@@ -63,16 +77,50 @@ app.add_middleware(
 # 请求 / 响应模型
 # ============================================================
 
+class LlmConfig(BaseModel):
+    """浏览器带来的模型配置。只用于这一次调用，不写入服务器。"""
+
+    api_key: str = Field(default="", max_length=300)
+    base_url: str = Field(default="https://api.deepseek.com/v1", max_length=200)
+    model: str = Field(default="deepseek-chat", max_length=80)
+    stream: bool = True
+
+    @field_validator("base_url")
+    @classmethod
+    def https_only(cls, value: str) -> str:
+        cleaned = value.strip().rstrip("/")
+        if cleaned and not cleaned.startswith("https://"):
+            raise ValueError("模型地址必须是 https")
+        return cleaned
+
+
 class ChatRequest(BaseModel):
     thread_id: str = Field(..., min_length=1)
     question: str = Field(..., min_length=1)
+    llm: LlmConfig | None = None
 
 
 class Message(BaseModel):
     role: str
     content: str
     context: str = ""
+    sources: list[dict[str, Any]] = Field(default_factory=list)
     emotion: dict[str, Any] | None = None
+
+
+class MemoryResponse(BaseModel):
+    id: str
+    content: str
+    created_at: float
+    origin: str
+
+
+class MemoryCreate(BaseModel):
+    contents: list[str] = Field(..., min_length=1, max_length=memory_store.MAX_MEMORIES)
+
+
+class UrlImport(BaseModel):
+    url: str = Field(..., min_length=8, max_length=2000)
 
 
 class SessionResponse(BaseModel):
@@ -90,6 +138,31 @@ class DocumentResponse(BaseModel):
 def health() -> dict[str, str]:
     """探活接口，容器 healthcheck 会调，故不要求令牌。"""
     return {"status": "ok"}
+
+
+@app.get("/api/workspace")
+def get_workspace(user: CurrentUserDep) -> dict[str, Any]:
+    """前端展示用：助手称呼与是否只按资料回答。完整设置只在 Next 的管理接口里可改。"""
+    settings = workspace_settings(user.tenant_id)
+    return {"assistant_name": settings.assistant_name, "query_only": settings.query_only}
+
+
+@app.post("/api/llm/ping")
+def ping_llm(payload: LlmConfig, _: MemberDep) -> dict[str, Any]:
+    """用浏览器里的密钥试一次连通，不把密钥存下来。"""
+    request = _as_llm_request(payload)
+    if request is None:
+        raise HTTPException(status_code=400, detail="请先填写 API Key")
+    try:
+        client = OpenAI(api_key=request.api_key, base_url=request.base_url, timeout=20)
+        listed = client.models.list()
+        names = [item.id for item in list(listed)[:8]]
+    except Exception as exc:
+        detail = str(exc)
+        if payload.api_key and payload.api_key in detail:
+            detail = "密钥或地址不被接受"
+        raise HTTPException(status_code=502, detail=f"连通失败: {detail}") from exc
+    return {"ok": True, "models": names}
 
 
 # ============================================================
@@ -121,6 +194,7 @@ def get_messages(thread_id: str, user: CurrentUserDep) -> list[Message]:
             role=item.get("role", ""),
             content=item.get("content", ""),
             context=item.get("context", "") or "",
+            sources=item.get("sources") or [],
             emotion=item.get("emotion"),
         )
         for item in stored
@@ -132,12 +206,41 @@ def get_messages(thread_id: str, user: CurrentUserDep) -> list[Message]:
 # 对话（SSE）
 # ============================================================
 
-def _chat_events(thread_id: str, question: str, tenant_id: str) -> Iterator[str]:
-    """把图的流事件转成 SSE。custom 是生成中的 token，updates 是节点产出。"""
+def _as_llm_request(config: LlmConfig | None) -> LlmRequest | None:
+    if config is None or not config.api_key.strip():
+        return None
+    return LlmRequest(
+        api_key=config.api_key.strip(),
+        base_url=config.base_url or "https://api.deepseek.com/v1",
+        model=config.model.strip() or "deepseek-chat",
+        stream=config.stream,
+    )
+
+
+def _chat_events(
+    thread_id: str,
+    question: str,
+    tenant_id: str,
+    llm: LlmConfig | None = None,
+    user_id: str = "",
+) -> Iterator[str]:
+    """把图的流事件转成 SSE。custom 是生成中的 token，updates 是节点产出。
+
+    user_id 为空（挂件访客）时不读写长期记忆。
+    """
+    token = push_llm_request(_as_llm_request(llm))
+    remembered = memory_store.take_remember_command(question) if user_id else None
+    if remembered:
+        try:
+            memory_store.add_memories(tenant_id, user_id, [remembered])
+            yield sse("status", {"stage": "remembered", "content": remembered})
+        except Exception as exc:
+            logger.warning(f"[记忆] 「记住」指令写入失败: {exc}")
     input_state: dict[str, Any] = {
         "user_question": question,
         "route_strategy": ROUTE_STRATEGY,
         "tenant_id": tenant_id,
+        "user_id": user_id,
     }
     corpus = knowledge_base.short_corpus(tenant_id)
     if corpus:
@@ -152,16 +255,30 @@ def _chat_events(thread_id: str, question: str, tenant_id: str) -> Iterator[str]
         )
     except Exception as exc:
         yield sse("error", {"message": f"回答生成失败: {exc}"})
+    finally:
+        pop_llm_request(token)
+
+
+def _enforce_guest_quota(user: CurrentUser) -> None:
+    embed = embed_settings(user.embed_id)
+    if embed is None or not embed.enabled:
+        raise HTTPException(status_code=401, detail="该聊天挂件已停用")
+    enforce_embed_quota(embed.id, embed.daily_limit)
 
 
 @app.post("/api/chat")
 def chat(payload: ChatRequest, user: CurrentUserDep) -> StreamingResponse:
     enforce_chat_quota(user.id)
+    if user.is_guest:
+        _enforce_guest_quota(user)
     return StreamingResponse(
         _chat_events(
             scoped_thread_id(user, payload.thread_id),
             payload.question,
             user.tenant_id,
+            # 访客的模型调用一律走学校配置，不接受自带密钥，也没有长期记忆
+            None if user.is_guest else payload.llm,
+            "" if user.is_guest else user.id,
         ),
         media_type="text/event-stream",
         headers={
@@ -178,7 +295,7 @@ def chat(payload: ChatRequest, user: CurrentUserDep) -> StreamingResponse:
 # ============================================================
 
 @app.get("/api/documents", response_model=list[DocumentResponse])
-def list_documents(user: CurrentUserDep) -> list[DocumentResponse]:
+def list_documents(user: MemberDep) -> list[DocumentResponse]:
     return [
         DocumentResponse(name=doc.name, chars=doc.chars, indexed=doc.indexed, source=doc.source)
         for doc in knowledge_base.documents(user.tenant_id)
@@ -226,8 +343,54 @@ async def upload_document(
     )
 
 
+@app.post("/api/documents/url", response_model=DocumentResponse)
+def import_url(payload: UrlImport, user: KnowledgeManagerDep) -> DocumentResponse:
+    """抓取网页正文导入本校知识库（学校通知、教务公告等）。"""
+    try:
+        info = knowledge_base.add_url(payload.url, user.tenant_id)
+    except UnsafeUrlError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"网页抓取失败: {exc}") from exc
+    return DocumentResponse(
+        name=info.name, chars=info.chars, indexed=info.indexed, source=info.source
+    )
+
+
 @app.delete("/api/documents")
 def clear_documents(user: KnowledgeManagerDep) -> dict[str, str]:
     """只清本校上传的资料；维基与预置文档属于全局，不受影响。"""
     knowledge_base.clear(user.tenant_id)
     return {"status": "cleared"}
+
+
+# ============================================================
+# 长期记忆
+# ============================================================
+
+def _memory_response(note: memory_store.MemoryNote) -> MemoryResponse:
+    return MemoryResponse(
+        id=note.id, content=note.content, created_at=note.created_at, origin=note.origin
+    )
+
+
+@app.get("/api/memories", response_model=list[MemoryResponse])
+def list_memories(user: MemberDep) -> list[MemoryResponse]:
+    notes = memory_store.list_memories(user.tenant_id, user.id)
+    return [_memory_response(note) for note in notes]
+
+
+@app.post("/api/memories", response_model=list[MemoryResponse])
+def add_memories(payload: MemoryCreate, user: MemberDep) -> list[MemoryResponse]:
+    """一次可写多条：浏览器里旧版 localStorage 记忆迁移时整批上传。"""
+    added = memory_store.add_memories(user.tenant_id, user.id, payload.contents)
+    return [_memory_response(note) for note in added]
+
+
+@app.delete("/api/memories/{memory_id}")
+def delete_memory(memory_id: str, user: MemberDep) -> dict[str, str]:
+    if not memory_store.delete_memory(user.tenant_id, user.id, memory_id):
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    return {"status": "deleted"}

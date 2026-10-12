@@ -13,12 +13,14 @@ import os
 import re
 import threading
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from env_config import backend_dir, chroma_persist_dir
 from file_service import FileService
 from logging_config import get_logger
 from tenancy import GLOBAL_TENANT, is_visible_to, normalize_tenant
 from vector_service import VectorRAGService
+from web_import import fetch_page
 
 logger = get_logger(__name__)
 
@@ -29,8 +31,8 @@ LONG_DOC_CHARS = 20000
 # 短文再多，合起来超过预算就整体改走向量检索，而不是硬塞。
 KIMI_CORPUS_BUDGET = 20000
 
-SUPPORTED_EXTENSIONS = (".txt", ".pdf", ".md", ".markdown")
-_UPLOAD_EXTENSIONS = (".txt", ".pdf", ".md", ".markdown")
+SUPPORTED_EXTENSIONS = (".txt", ".pdf", ".md", ".markdown", ".docx")
+_UPLOAD_EXTENSIONS = SUPPORTED_EXTENSIONS
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._\-\u4e00-\u9fff]+")
 
 # wiki 内不进 RAG 的文件名（schema / 日志 / 纯导航可按需调整）
@@ -66,7 +68,7 @@ def _safe_filename(filename: str) -> str:
     stem, ext = os.path.splitext(name)
     ext = ext.lower()
     if ext not in _UPLOAD_EXTENSIONS:
-        raise ValueError("仅支持 txt、pdf 与 markdown 文件")
+        raise ValueError("仅支持 txt、pdf、docx 与 markdown 文件")
     stem = _UNSAFE_NAME.sub("_", stem).strip("._") or "未命名文件"
     return f"{stem}{ext}"
 
@@ -186,6 +188,17 @@ class KnowledgeBase:
             raise ValueError(content)
 
         return self._register(safe_name, content, source="uploaded", tenant_id=tenant_id)
+
+    def add_url(self, url: str, tenant_id: str, fetch=fetch_page) -> DocumentInfo:
+        """抓取网页正文，存成该租户 uploads 下的 markdown，再走与上传相同的登记流程。
+
+        落盘而不是只进向量库：重启后 autoload 才能重新登记，Kimi 短文路径也能读到。
+        """
+        page = fetch(url)
+        host = urlsplit(page.url).hostname or "网页"
+        stem = (page.title or host)[:60]
+        markdown = f"# {page.title or host}\n\n来源: {page.url}\n\n{page.text}\n"
+        return self.add_upload(f"{stem}.md", markdown.encode("utf-8"), tenant_id)
 
     def clear(self, tenant_id: str) -> None:
         """清空该租户上传的文档。

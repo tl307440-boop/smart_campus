@@ -2,9 +2,16 @@ import { readStoredToken } from "@/lib/auth/session";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8001";
 
+/** 嵌入挂件页面用访客令牌，不读登录态；挂件跑在自己的 iframe 文档里，不会串到主站 */
+let tokenOverride: string | null = null;
+
+export function setAccessTokenOverride(token: string | null): void {
+  tokenOverride = token;
+}
+
 /** FastAPI 侧用 HTTPBearer 校验同一个令牌，未登录时让请求带空头并由后端返回 401。 */
 function authHeaders(): Record<string, string> {
-  const token = readStoredToken();
+  const token = tokenOverride ?? readStoredToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
@@ -14,12 +21,29 @@ export interface EmotionData {
   [key: string]: unknown;
 }
 
+/** 与后端 graph_app._chunk_sources 的结构一一对应；Kimi 精读路径没有片段与分数 */
+export interface ChatSource {
+  index: number;
+  source: string;
+  snippet: string;
+  score: number | null;
+  rerank_score: number | null;
+}
+
 export interface ChatMessage {
   id: string;
   role: Role;
   content: string;
   context?: string;
+  sources?: ChatSource[];
   emotion?: EmotionData | null;
+}
+
+export interface MemoryNote {
+  id: string;
+  content: string;
+  created_at: number;
+  origin: "manual" | "auto";
 }
 
 /** 取值与后端 knowledge.py 的 DocumentInfo.source 一一对应 */
@@ -36,13 +60,16 @@ export interface ChatDone {
   answer: string;
   intent: string;
   context: string;
+  sources: ChatSource[];
   emotion: EmotionData | null;
 }
 
 export interface ChatStatus {
-  stage: "intent" | "retrieved" | "generating";
+  stage: "intent" | "retrieved" | "generating" | "remembered";
   intent?: string;
   chars?: number;
+  sources?: number;
+  content?: string;
 }
 
 export interface ChatHandlers {
@@ -88,19 +115,78 @@ export function clearDocuments() {
   return request<{ status: string }>("/api/documents", { method: "DELETE" });
 }
 
+export function fetchWorkspace() {
+  return request<{ assistant_name: string; query_only: boolean }>("/api/workspace");
+}
+
+export function importDocumentUrl(url: string) {
+  return request<DocumentInfo>("/api/documents/url", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
+}
+
+export function fetchMemories() {
+  return request<MemoryNote[]>("/api/memories");
+}
+
+export function addMemories(contents: string[]) {
+  return request<MemoryNote[]>("/api/memories", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ contents }),
+  });
+}
+
+export function deleteMemory(id: string) {
+  return request<{ status: string }>(`/api/memories/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
 /**
  * 对话走 SSE。EventSource 只能发 GET，这里用 fetch 手动解析事件帧。
  */
+export interface LlmChatConfig {
+  api_key: string;
+  base_url: string;
+  model: string;
+  stream: boolean;
+}
+
+export async function pingLlm(settings: {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+}): Promise<{ ok: boolean; models: string[] }> {
+  const response = await fetch(`${API_BASE}/api/llm/ping`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({
+      api_key: settings.apiKey,
+      base_url: settings.baseUrl,
+      model: settings.model,
+    }),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(detail || `连通失败（${response.status}）`);
+  }
+  return (await response.json()) as { ok: boolean; models: string[] };
+}
+
 export async function streamChat(
   threadId: string,
   question: string,
   handlers: ChatHandlers,
   signal?: AbortSignal,
+  llm?: LlmChatConfig,
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ thread_id: threadId, question }),
+    body: JSON.stringify({ thread_id: threadId, question, llm }),
     signal,
   });
 

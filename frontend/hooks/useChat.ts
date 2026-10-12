@@ -1,41 +1,56 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { migrateLegacyMemories, readSettings } from "@/lib/agent-settings";
 import {
   type ChatMessage,
   type ChatStatus,
+  addMemories,
   createSession,
   fetchMessages,
   streamChat,
 } from "@/lib/api";
 
 const STORAGE_KEY = "zhiyue.threadId";
+const EMBED_STORAGE_KEY = "zhiyue.embed.threadId";
 
 const STAGE_LABEL: Record<ChatStatus["stage"], string> = {
-  intent: "小懒正在理解你的问题…",
+  intent: "正在理解你的问题…",
   retrieved: "正在翻阅知识库…",
   generating: "正在组织回答…",
+  remembered: "已记下，正在回复…",
 };
+
+export interface UseChatOptions {
+  /** 嵌入挂件：会话只存 sessionStorage、不改地址栏、不带自带密钥、不迁移记忆 */
+  embedded?: boolean;
+}
 
 function newId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 }
 
 /** thread_id 优先取 URL 上的 ?tid=，其次 localStorage，都没有才向后端申请。 */
-function readStoredThreadId(): string | null {
+function readStoredThreadId(embedded: boolean): string | null {
+  if (embedded) return window.sessionStorage.getItem(EMBED_STORAGE_KEY);
   const fromUrl = new URLSearchParams(window.location.search).get("tid");
   if (fromUrl) return fromUrl;
   return window.localStorage.getItem(STORAGE_KEY);
 }
 
-function persistThreadId(threadId: string) {
+function persistThreadId(threadId: string, embedded: boolean) {
+  if (embedded) {
+    window.sessionStorage.setItem(EMBED_STORAGE_KEY, threadId);
+    return;
+  }
   window.localStorage.setItem(STORAGE_KEY, threadId);
   const url = new URL(window.location.href);
   url.searchParams.set("tid", threadId);
   window.history.replaceState(null, "", url);
 }
 
-export function useChat(onAnswer?: (text: string) => void) {
+export function useChat(onAnswer?: (text: string) => void, options: UseChatOptions = {}) {
+  const embedded = options.embedded ?? false;
   const [threadId, setThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [pending, setPending] = useState("");
@@ -52,11 +67,11 @@ export function useChat(onAnswer?: (text: string) => void) {
 
     (async () => {
       try {
-        let tid = readStoredThreadId();
+        let tid = readStoredThreadId(embedded);
         if (!tid) {
           tid = (await createSession()).thread_id;
         }
-        persistThreadId(tid);
+        persistThreadId(tid, embedded);
         setThreadId(tid);
 
         const history = await fetchMessages(tid);
@@ -66,8 +81,13 @@ export function useChat(onAnswer?: (text: string) => void) {
       } finally {
         setRestoring(false);
       }
+      if (!embedded) {
+        migrateLegacyMemories(addMemories).catch(() => {
+          // 迁移失败不影响聊天，旧记忆留在本机，下次打开再试
+        });
+      }
     })();
-  }, []);
+  }, [embedded]);
 
   const send = useCallback(
     async (question: string) => {
@@ -80,6 +100,16 @@ export function useChat(onAnswer?: (text: string) => void) {
 
       const controller = new AbortController();
       abortRef.current = controller;
+
+      const settings = embedded ? null : readSettings();
+      const llm = settings?.apiKey
+        ? {
+            api_key: settings.apiKey,
+            base_url: settings.baseUrl,
+            model: settings.model,
+            stream: settings.stream,
+          }
+        : undefined;
 
       let streamed = "";
       try {
@@ -100,6 +130,7 @@ export function useChat(onAnswer?: (text: string) => void) {
                   role: "assistant",
                   content: result.answer,
                   context: result.context,
+                  sources: result.sources,
                   emotion: result.emotion,
                 },
               ]);
@@ -109,6 +140,7 @@ export function useChat(onAnswer?: (text: string) => void) {
             onError: (message) => setError(message),
           },
           controller.signal,
+          llm,
         );
       } catch (err) {
         // 用户主动中断不算错误
@@ -127,7 +159,7 @@ export function useChat(onAnswer?: (text: string) => void) {
         setStatus(null);
       }
     },
-    [threadId, onAnswer],
+    [threadId, onAnswer, embedded],
   );
 
   const stop = useCallback(() => {
@@ -138,7 +170,7 @@ export function useChat(onAnswer?: (text: string) => void) {
     abortRef.current?.abort();
     try {
       const { thread_id: tid } = await createSession();
-      persistThreadId(tid);
+      persistThreadId(tid, embedded);
       setThreadId(tid);
       setMessages([]);
       setPending("");
@@ -146,7 +178,7 @@ export function useChat(onAnswer?: (text: string) => void) {
     } catch (err) {
       setError(err instanceof Error ? err.message : "新建会话失败");
     }
-  }, []);
+  }, [embedded]);
 
   return {
     threadId,

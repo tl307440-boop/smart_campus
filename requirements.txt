@@ -22,6 +22,10 @@ python-dotenv>=1.0.0            # 用于安全读取 .env 文件中的各类 API
 
 # --- 3. RAG 知识库与检索组件 ---
 pypdf>=4.0.0                    # 轻量级本地 PDF 解析提取
+python-docx>=1.1.0              # Word(docx) 正文与表格提取
+beautifulsoup4>=4.12.0          # 网页导入：去掉导航/脚本后取正文
+httpx>=0.27.0                   # 网页导入：逐跳校验跳转、限制体积（openai 本来就依赖它）
+psycopg[binary]>=3.2.0          # 只读 Postgres 里的工作区设置与嵌入挂件配置（表由 Prisma 建）
 chromadb>=0.4.20                # 核心本地向量数据库
 langchain-community>=0.0.20     # 提供 RAG 相关的封装工具类
 langchain-text-splitters>=0.3.0 # 递归切片，按段落/中文标点断开而非按字符硬切

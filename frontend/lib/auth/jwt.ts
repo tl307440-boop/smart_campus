@@ -45,6 +45,29 @@ export async function signAccessToken(claims: AccessTokenClaims): Promise<string
     .sign(getSecret());
 }
 
+/** 嵌入挂件访客令牌的有效期。短一些：令牌暴露在第三方网页里 */
+export const GUEST_TOKEN_TTL_SECONDS = 60 * 60 * 2;
+
+/** 访客角色只在 FastAPI 侧认，isAccessTokenClaims 会拒绝它，访客因此进不了 Next 的任何接口 */
+export const GUEST_ROLE = "GUEST";
+
+export interface GuestTokenClaims {
+  sub: string;
+  tid: string;
+  /** 挂件 id，FastAPI 用它回查启用状态与每日上限（backend/auth.py） */
+  eid: string;
+}
+
+export async function signGuestToken(claims: GuestTokenClaims): Promise<string> {
+  return new SignJWT({ ...claims, sno: "guest", name: "访客", role: GUEST_ROLE })
+    .setProtectedHeader({ alg: JWT_ALGORITHM })
+    .setIssuer(JWT_ISSUER)
+    .setSubject(claims.sub)
+    .setIssuedAt()
+    .setExpirationTime(`${GUEST_TOKEN_TTL_SECONDS}s`)
+    .sign(getSecret());
+}
+
 export async function verifyAccessToken(token: string): Promise<AccessTokenClaims | null> {
   try {
     const { payload } = await jwtVerify(token, getSecret(), {

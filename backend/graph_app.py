@@ -37,6 +37,7 @@ graph_app.py - 智悦校园 LangGraph 版本（含意图路由）
 """
 
 import os
+import re
 import sys
 from typing import Any, Literal, TypedDict
 
@@ -50,13 +51,15 @@ from langgraph.graph import END, START, StateGraph
 # 将 backend 目录加入 Python 路径，确保 import 能找到同级模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import memory_store
 from env_config import chroma_persist_dir, load_backend_env
 from kimi_extract_service import KimiExtractService
 from knowledge import KIMI_CORPUS_BUDGET
-from llm_service import DeepSeekService
+from llm_service import DeepSeekService, prompt_extras
 from logging_config import get_logger
 from tenancy import GLOBAL_TENANT
 from vector_service import VectorRAGService
+from workspace import WorkspaceSettings, workspace_settings
 
 logger = get_logger(__name__)
 
@@ -113,6 +116,12 @@ class GraphState(TypedDict):
     # ---- 提问者所属学校，检索只在「全局文档 + 本校文档」里进行 ----
     tenant_id: str
 
+    # ---- 提问者 id，长期记忆的归属键；嵌入挂件的访客为空串，不读写记忆 ----
+    user_id: str
+
+    # ---- 本轮引用的来源（retrieve_node 的输出），前端渲染成来源卡片 ----
+    sources: list[dict[str, Any]]
+
     # ---- 最终回答（generate_node 的输出）----
     final_answer: str
 
@@ -136,6 +145,8 @@ _compiled_graph = None
 MAX_STORED_TURNS = _env_int("MAX_STORED_TURNS", 30)
 # 每次请求实际发给模型的轮数，比存储的更少，用来压 token 成本
 MAX_PROMPT_TURNS = _env_int("MAX_PROMPT_TURNS", 10)
+# 情感分析顺带抽出的个人事实是否自动写进长期记忆
+MEMORY_AUTO_EXTRACT = os.getenv("MEMORY_AUTO_EXTRACT", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _delta_emitter():
@@ -158,8 +169,9 @@ def _append_turn_messages(
     question: str,
     final_answer: str,
     context: str = "",
+    sources: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """将本轮 user/assistant 写入 messages；assistant 附带 context 便于 UI 恢复。
+    """将本轮 user/assistant 写入 messages；assistant 附带 context/sources 便于 UI 恢复。
 
     只保留最近 MAX_STORED_TURNS 轮：不裁剪的话 Redis 里的 state 会随会话
     无限膨胀，每轮读写的快照也越来越大。
@@ -170,8 +182,61 @@ def _append_turn_messages(
         "role": "assistant",
         "content": final_answer,
         "context": context or "",
+        "sources": sources or [],
     })
     return updated_messages[-(MAX_STORED_TURNS * 2):]
+
+
+# 来源卡片里的片段只是预览，完整内容仍在 context 里
+SOURCE_SNIPPET_CHARS = 240
+_KIMI_SOURCE_MARK = re.compile(r"--- 文档来源: (.+?) ---")
+
+
+def _chunk_sources(chunks) -> list[dict[str, Any]]:
+    """把重排后的片段转成前端来源卡片用的结构。分数优先用重排分，没有则用向量相似度。"""
+    sources: list[dict[str, Any]] = []
+    for index, chunk in enumerate(chunks, start=1):
+        meta = chunk.metadata or {}
+        rerank = meta.get("rerank_score")
+        sources.append({
+            "index": index,
+            "source": meta.get("source", "未知文件"),
+            "snippet": chunk.text[:SOURCE_SNIPPET_CHARS],
+            "score": round(float(chunk.vector_score), 4),
+            "rerank_score": None if rerank is None else round(float(rerank), 4),
+        })
+    return sources
+
+
+def _corpus_sources(doc_content: str) -> list[dict[str, Any]]:
+    """Kimi 精读路径读的是整篇短文合集，只能给出文档名，没有片段与分数。"""
+    names = list(dict.fromkeys(_KIMI_SOURCE_MARK.findall(doc_content)))
+    return [
+        {"index": i, "source": name, "snippet": "", "score": None, "rerank_score": None}
+        for i, name in enumerate(names, start=1)
+    ]
+
+
+def _user_memories(state: GraphState, question: str) -> list[str]:
+    user_id = state.get("user_id") or ""
+    if not user_id:
+        return []
+    try:
+        return memory_store.relevant_memories(state.get("tenant_id") or GLOBAL_TENANT, user_id, question)
+    except Exception as e:
+        logger.warning(f"[记忆] 读取失败，本轮不带记忆: {e}")
+        return []
+
+
+def _settings(state: GraphState) -> WorkspaceSettings:
+    return workspace_settings(state.get("tenant_id") or GLOBAL_TENANT)
+
+
+def _refusal(settings: WorkspaceSettings) -> str:
+    return (
+        f"抱歉，{settings.assistant_name}在本校资料里没有找到与这个问题相关的内容。"
+        "可以换个说法，或者联系学校相关部门确认。"
+    )
 
 
 def recent_history(messages: list[dict[str, Any]], max_turns: int) -> list[dict[str, Any]]:
@@ -334,7 +399,8 @@ def route_query(state: GraphState) -> str:
     """
     intent = state.get("intent", "RAG")
 
-    if intent == "RAG":
+    # 「只按资料回答」的学校不走闲聊：一律先检索，查不到就拒答
+    if intent == "RAG" or _settings(state).query_only:
         target = "retrieve"
     else:
         target = "generate"
@@ -354,7 +420,7 @@ def retrieve_node(state: GraphState) -> dict:
            state["current_doc_content"] -- 已加载的文档全文（Kimi 路径需要）
            state["route_strategy"]      -- 路由策略
 
-    输出:  {"context": "..."}           -- 检索到的知识片段
+    输出:  {"context": "...", "sources": [...]}  -- 知识片段 + 结构化来源（前端来源卡片）
 
     数据流:
         user_question ──┬── route_strategy == "kimi" 或 (auto 且文档短)
@@ -362,12 +428,11 @@ def retrieve_node(state: GraphState) -> dict:
         │               │               └──> 返回相关段落文本
         │               │
         │               └── route_strategy == "vectordb" 或 (auto 且文档长)
-        │                       └──> VectorRAGService.search(question, top_k=3)
-        │                               ├── 宽召回约 50 个候选 Chunk
-        │                               ├── BGE CrossEncoder 重排序
-        │                               └── 截断 Top-3 后返回拼接上下文
+        │                       └──> VectorRAGService.search_chunks(question, top_k, min_score)
+        │                               ├── 宽召回候选 Chunk + BGE CrossEncoder 重排序
+        │                               └── top_k / min_score 取自本校工作区设置
         │
-        └──> state["context"] = 检索结果（供 generate_node 使用）
+        └──> state["context"] / state["sources"] = 检索结果（供 generate_node 与 done 事件使用）
     """
     question = state["user_question"]
     strategy = state.get("route_strategy", "auto")
@@ -376,7 +441,9 @@ def retrieve_node(state: GraphState) -> dict:
 
     logger.info(f"[检索节点] 开始检索，路由策略: {strategy}，租户: {tenant_id}")
 
+    settings = workspace_settings(tenant_id)
     context = ""
+    sources: list[dict[str, Any]] = []
 
     try:
         # 预算判定在 knowledge.short_corpus 里已经做过一次（超预算会返回空串），
@@ -388,22 +455,32 @@ def retrieve_node(state: GraphState) -> dict:
             # 直接将全文交给 Kimi 阅读，让它摘录与问题相关的段落
             logger.info(f"[检索节点] 走 Kimi 精读路径 (文档长度: {len(doc_content)} 字)")
             context = get_kimi().extract_knowledge(doc_content, question)
+            if context:
+                sources = _corpus_sources(doc_content)
         else:
             # --- 向量数据库路径 ---
             # 使用智谱 embedding-3 向量化问题，在 ChromaDB 中检索最相似的片段
             logger.info("[检索节点] 走向量数据库检索路径 (ChromaDB)")
             vdb = get_vector_db()
             if vdb is not None:
-                context = vdb.search(question, tenant_id, top_k=3)
+                chunks = vdb.search_chunks(
+                    question,
+                    tenant_id,
+                    top_k=settings.top_k,
+                    min_score=settings.similarity_threshold,
+                )
+                context = vdb.format_context(chunks)
+                sources = _chunk_sources(chunks)
             else:
                 logger.warning("[检索节点] VectorDB 不可用，跳过检索")
     except Exception as e:
         logger.error(f"[检索节点] 检索失败: {e}")
         context = ""
+        sources = []
 
-    logger.info(f"[检索节点] 检索完成，上下文长度: {len(context)} 字")
+    logger.info(f"[检索节点] 检索完成，上下文长度: {len(context)} 字，来源 {len(sources)} 条")
 
-    return {"context": context}
+    return {"context": context, "sources": sources}
 
 
 def generate_node(state: GraphState) -> dict:
@@ -437,18 +514,32 @@ def generate_node(state: GraphState) -> dict:
     context = state.get("context", "")
     question = state["user_question"]
     intent = state.get("intent", "RAG")
+    settings = _settings(state)
+    name = settings.assistant_name
+    memories = _user_memories(state, question)
 
-    logger.info(f"[生成节点] 意图={intent}，上下文长度={len(context)} 字")
+    logger.info(f"[生成节点] 意图={intent}，上下文长度={len(context)} 字，记忆 {len(memories)} 条")
 
     emit = _delta_emitter()
 
+    # 只按资料回答时每轮都检索过，context 一定是本轮的；否则 DIRECT 轮的 context 是上一轮残留
+    use_context = bool(context) and (intent == "RAG" or settings.query_only)
+
+    # --- 场景零：只按资料回答，但没检索到内容 → 直接拒答，不调用模型 ---
+    if settings.query_only and not use_context:
+        final_answer = _refusal(settings)
+        emit(final_answer)
+        updated_messages = _append_turn_messages(state, question, final_answer)
+        logger.info("[生成节点] 只按资料回答模式，未检索到内容，已拒答")
+        return {"final_answer": final_answer, "messages": updated_messages}
+
     # --- 场景一：DIRECT 路径（无上下文，直接对话）---
-    if not context or intent == "DIRECT":
+    if not use_context:
         logger.info("[生成节点] 无上下文，走拟人化对话模式")
 
         # Mock 模式：返回模拟回答
         if get_deepseek().use_mock:
-            final_answer = f"【小懒】你好呀！我是智悦校园的智能助手小懒～ 你问的「{question}」是一个有趣的问题呢！不过如果你想了解学校的具体政策或规定，可以试试加载相关文档后提问哦。"
+            final_answer = f"【{name}】你好呀！我是智悦校园的智能助手{name}～ 你问的「{question}」是一个有趣的问题呢！不过如果你想了解学校的具体政策或规定，可以试试加载相关文档后提问哦。"
             emit(final_answer)
             logger.info("[生成节点] Mock 模式，返回模拟回答")
             updated_messages = _append_turn_messages(state, question, final_answer, context="")
@@ -457,13 +548,13 @@ def generate_node(state: GraphState) -> dict:
 
         # 真实 API 模式：调用 DeepSeek 以校园助手身份直接回答
         try:
-            system_prompt = """
-你是"小懒"，武汉文理学院的智能校园助手。
+            system_prompt = f"""
+你是"{name}"，智悦校园的智能校园助手。
 你性格温暖、友善、幽默，像一个贴心的学长/学姐。
 请用自然、亲切的语气回答用户的问题。
 如果用户问的是校园相关问题但你没有具体资料，请礼貌地建议他们使用 /read 命令加载相关文档。
 请根据对话历史理解用户的上下文，比如用户之前告诉过你他的名字，你应该记住并使用。
-"""
+""" + prompt_extras(settings.persona, memories)
             # 从 Redis 恢复的历史里取最近几轮，LLM 才能记住「我是唐亮」这类上文。
             # 只取最近几轮而非全量：否则 token 成本随会话长度线性上涨。
             history_messages = recent_history(state.get("messages", []), MAX_PROMPT_TURNS)
@@ -496,12 +587,16 @@ def generate_node(state: GraphState) -> dict:
 
     # chat_with_context 是 generator，逐块消费：一边拼完整答案，一边下发给前端
     parts: list[str] = []
-    for chunk in get_deepseek().chat_with_context(context, question):
+    for chunk in get_deepseek().chat_with_context(
+        context, question, persona=settings.persona, memories=memories
+    ):
         parts.append(chunk)
         emit(chunk)
     full_answer = "".join(parts)
 
-    updated_messages = _append_turn_messages(state, question, full_answer, context=context)
+    updated_messages = _append_turn_messages(
+        state, question, full_answer, context=context, sources=state.get("sources") or []
+    )
     logger.info(f"[生成节点] 回答生成完成，长度: {len(full_answer)} 字，messages 共 {len(updated_messages)} 条")
     return {"final_answer": full_answer, "messages": updated_messages}
 
@@ -516,10 +611,35 @@ def emotion_node(state: GraphState) -> dict:
 
     只返回 emotion_data，挂到消息上的事交给 finalize_node——
     那时候 generate 才刚把 assistant 消息写进去。
+
+    同一次 JSON 调用顺带抽取 memory_facts（值得长期记住的个人事实），
+    自动记忆不多花一次模型调用；抽到的条目写进记忆库，不留在 emotion_data 里。
     """
     question = state.get("user_question", "")
     logger.info(f"[情感节点] 分析用户问题: \"{question[:40]}\"")
-    return {"emotion_data": get_deepseek().analyze_emotion_and_reply(question)}
+    emotion = get_deepseek().analyze_emotion_and_reply(question)
+    if isinstance(emotion, dict):
+        emotion = dict(emotion)
+        facts = emotion.pop("memory_facts", None)
+        _store_auto_memories(state, facts)
+    return {"emotion_data": emotion}
+
+
+def _store_auto_memories(state: GraphState, facts: Any) -> None:
+    user_id = state.get("user_id") or ""
+    if not user_id or not MEMORY_AUTO_EXTRACT or not isinstance(facts, list):
+        return
+    contents = [item for item in facts if isinstance(item, str) and item.strip()][:3]
+    if not contents:
+        return
+    try:
+        added = memory_store.add_memories(
+            state.get("tenant_id") or GLOBAL_TENANT, user_id, contents, origin="auto"
+        )
+        if added:
+            logger.info(f"[记忆] 自动记下 {len(added)} 条")
+    except Exception as e:
+        logger.warning(f"[记忆] 自动写入失败: {e}")
 
 
 def finalize_node(state: GraphState) -> dict:
@@ -598,6 +718,7 @@ def ask_question(
     history: list = None,
     thread_id: str = "default",
     tenant_id: str = GLOBAL_TENANT,
+    user_id: str = "",
 ) -> dict:
     """
     一站式提问函数：封装 Graph 的调用流程。
@@ -625,6 +746,7 @@ def ask_question(
         "user_question": question,          # 当前问题（必填）
         "route_strategy": strategy,         # 检索子路由策略
         "tenant_id": tenant_id,             # 决定检索可见范围
+        "user_id": user_id,                 # 长期记忆归属；空串表示不读写记忆
     }
 
     # 如果显式传入了 history，才覆盖 messages（首次调用或重置场景）

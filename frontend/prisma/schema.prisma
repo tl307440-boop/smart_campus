@@ -28,9 +28,50 @@ model Tenant {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  users User[]
+  users    User[]
+  settings TenantSettings?
+  embeds   EmbedConfig[]
 
   @@map("tenants")
+}
+
+/// 每所学校的工作区设置。FastAPI 只读（backend/workspace.py），表名与列名改动要同步那边的 SQL
+model TenantSettings {
+  tenantId            String   @id
+  /// 助手称呼，同时出现在闲聊人设与嵌入挂件标题里
+  assistantName       String   @default("小懒")
+  /// 追加到系统提示词里的人设说明，空串表示用默认人设
+  persona             String   @default("")
+  /// 只按资料回答：检索不到内容时直接拒答，不走闲聊
+  queryOnly           Boolean  @default(false)
+  /// 余弦相似度下限（0-1），低于它的片段不进上下文；0 表示不过滤
+  similarityThreshold Float    @default(0)
+  /// 每次回答引用的片段数
+  topK                Int      @default(3)
+  updatedAt           DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("tenant_settings")
+}
+
+/// 可嵌入外部网站的聊天挂件。访客令牌由 Next 签发，FastAPI 按 id 回查启用状态与每日上限
+model EmbedConfig {
+  id             String   @id @default(cuid())
+  tenantId       String
+  name           String
+  /// 允许调用的来源，形如 https://www.example.edu.cn；与浏览器 Origin 头逐字比对
+  allowedOrigins String[]
+  /// 整个挂件每天最多回答多少次，防止被刷爆账单
+  dailyLimit     Int      @default(200)
+  enabled        Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("embed_configs")
 }
 
 enum UserRole {

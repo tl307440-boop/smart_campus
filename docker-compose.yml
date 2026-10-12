@@ -65,8 +65,12 @@ services:
       - FRONTEND_ORIGINS=http://localhost:3000
       # 与 web 同源，两端验签密钥不可能对不上。大模型 API Key 仍读 backend/.env
       - AUTH_JWT_SECRET=${AUTH_JWT_SECRET:?请在根目录 .env 中设置 AUTH_JWT_SECRET}
+      # 只读工作区设置与嵌入挂件配置（backend/workspace.py）
+      - DATABASE_URL=postgresql://campus:${POSTGRES_PASSWORD:?请在根目录 .env 中设置 POSTGRES_PASSWORD}@postgres:5432/smart_campus
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     restart: unless-stopped
 
