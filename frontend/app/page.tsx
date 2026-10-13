@@ -13,11 +13,11 @@ import { SuggestedQuestions } from "@/components/SuggestedQuestions";
 import { type ToolTab, ToolDrawer } from "@/components/ToolDrawer";
 import { WorkspacePane } from "@/components/WorkspaceAdmin";
 import { PET_LOOK_EVENT } from "@/hooks/useDeskPet";
-import { readSettings } from "@/lib/agent-settings";
 import { fetchWorkspace } from "@/lib/api";
 import { useAuth } from "@/lib/auth/context";
 import { canManageKnowledge } from "@/lib/auth/session";
 import { isFallbackAnswer, mayBeFallback } from "@/lib/friendly-error";
+import { speakText, useSpeechSettings } from "@/lib/speech-settings";
 import { useChat } from "@/hooks/useChat";
 
 const DEFAULT_ASSISTANT_NAME = "校园助手";
@@ -26,7 +26,7 @@ export default function ChatPage() {
   const { user, logout } = useAuth();
   const isStaff = canManageKnowledge(user?.role);
   const isAdmin = user?.role === "ADMIN";
-  const [ttsEnabled, setTtsEnabled] = useState(false);
+  const [speech] = useSpeechSettings();
   const [drawer, setDrawer] = useState<{ tab: ToolTab; open: boolean; n: number }>({ tab: "service", open: false, n: 0 });
   const [assistantName, setAssistantName] = useState<string | null>(null);
 
@@ -40,15 +40,9 @@ export default function ChatPage() {
 
   const speak = useCallback(
     (text: string) => {
-      if (!ttsEnabled || isFallbackAnswer(text)) return;
-      const synth = window.speechSynthesis;
-      if (!synth) return;
-      synth.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = "zh-CN";
-      synth.speak(utterance);
+      if (speech.enabled && !isFallbackAnswer(text)) speakText(text, speech);
     },
-    [ttsEnabled],
+    [speech],
   );
 
   const { messages, pending, status, error, restoring, busy, threadId, send, stop, startNewSession } =
@@ -80,11 +74,6 @@ export default function ChatPage() {
     );
   }
 
-  function handleToggleTts(enabled: boolean) {
-    setTtsEnabled(enabled);
-    if (!enabled) window.speechSynthesis?.cancel();
-  }
-
   function handleNewSession() {
     window.speechSynthesis?.cancel();
     void startNewSession();
@@ -96,8 +85,7 @@ export default function ChatPage() {
   }
 
   const tabs: ToolTab[] = ["service", "memory", ...(isStaff ? (["knowledge"] as const) : []), ...(isAdmin ? (["workspace", "embeds"] as const) : [])];
-  const ownKey = Boolean(readSettings().apiKey);
-  const noteProps = { canDebug: isStaff, ownKey, onOpenService: openService };
+  const noteProps = { canDebug: isStaff, canConfigure: isAdmin, onOpenService: openService };
 
   return (
     <div className="h-dvh lg:py-4">
@@ -107,8 +95,6 @@ export default function ChatPage() {
           user={user}
           isStaff={isStaff}
           threadId={threadId}
-          ttsEnabled={ttsEnabled}
-          onToggleTts={handleToggleTts}
           onNewSession={handleNewSession}
           onOpenTools={() => openTool(drawer.tab)}
           onLogout={handleLogout}
@@ -169,7 +155,7 @@ export default function ChatPage() {
 
       <ToolDrawer tabs={tabs} tab={drawer.tab} open={drawer.open} onOpen={openTool} onClose={closeTool}>
         <div key={`${drawer.tab}-${drawer.n}`}>
-          {drawer.tab === "service" && <ServicePane />}
+          {drawer.tab === "service" && <ServicePane isAdmin={isAdmin} />}
           {drawer.tab === "memory" && <MemoryPane />}
           {drawer.tab === "knowledge" && isStaff && <KnowledgePane />}
           {drawer.tab === "workspace" && isAdmin && <WorkspacePane onSaved={loadWorkspace} />}

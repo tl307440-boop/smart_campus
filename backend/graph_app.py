@@ -52,10 +52,11 @@ from langgraph.graph import END, START, StateGraph
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import memory_store
+from ai_config import ModelEndpoint, chat_endpoint, client_for, reader_endpoint, scrub
 from env_config import chroma_persist_dir, load_backend_env
 from kimi_extract_service import KimiExtractService
 from knowledge import KIMI_CORPUS_BUDGET
-from llm_service import DeepSeekService, prompt_extras
+from llm_service import FAILED_PREFIX, NOT_CONFIGURED, DeepSeekService, prompt_extras
 from logging_config import get_logger
 from tenancy import GLOBAL_TENANT
 from vector_service import VectorRAGService
@@ -147,6 +148,8 @@ MAX_STORED_TURNS = _env_int("MAX_STORED_TURNS", 30)
 MAX_PROMPT_TURNS = _env_int("MAX_PROMPT_TURNS", 10)
 # 情感分析顺带抽出的个人事实是否自动写进长期记忆
 MEMORY_AUTO_EXTRACT = os.getenv("MEMORY_AUTO_EXTRACT", "true").strip().lower() in {"1", "true", "yes", "on"}
+# 不连任何模型、全部用模拟数据（本地演示）。线上必须关着，否则学生拿到的是假回答
+LLM_MOCK = os.getenv("LLM_MOCK", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _delta_emitter():
@@ -232,6 +235,10 @@ def _settings(state: GraphState) -> WorkspaceSettings:
     return workspace_settings(state.get("tenant_id") or GLOBAL_TENANT)
 
 
+def _chat_endpoint(state: GraphState) -> ModelEndpoint | None:
+    return chat_endpoint(state.get("tenant_id") or GLOBAL_TENANT)
+
+
 def _refusal(settings: WorkspaceSettings) -> str:
     return (
         f"抱歉，{settings.assistant_name}在本校资料里没有找到与这个问题相关的内容。"
@@ -257,7 +264,7 @@ def get_deepseek() -> DeepSeekService:
     """获取 DeepSeek 服务单例（首次调用时创建）"""
     global _deepseek_brain
     if _deepseek_brain is None:
-        _deepseek_brain = DeepSeekService(use_mock=False)
+        _deepseek_brain = DeepSeekService(use_mock=LLM_MOCK)
     return _deepseek_brain
 
 
@@ -265,7 +272,7 @@ def get_kimi() -> KimiExtractService:
     """获取 Kimi 服务单例（首次调用时创建）"""
     global _kimi_eye
     if _kimi_eye is None:
-        _kimi_eye = KimiExtractService(use_mock=False)
+        _kimi_eye = KimiExtractService(use_mock=LLM_MOCK)
     return _kimi_eye
 
 
@@ -341,9 +348,11 @@ def intent_node(state: GraphState) -> dict:
 只返回一个词：RAG 或 DIRECT。不要返回任何其他内容。
 """
 
-    # --- Mock 模式：用关键词规则做快速分类，不调用 API ---
-    if get_deepseek().use_mock:
-        logger.info("[意图判定] Mock 模式，使用关键词规则分类")
+    endpoint = None if get_deepseek().use_mock else _chat_endpoint(state)
+
+    # --- Mock 模式或没配对话模型：用关键词规则做快速分类，不调用 API ---
+    if endpoint is None:
+        logger.info("[意图判定] 无可用对话模型（或 Mock 模式），使用关键词规则分类")
         # 定义教务相关的关键词列表
         rag_keywords = [
             "奖学金", "助学金", "学籍", "学分", "绩点", "考试", "挂科", "补考",
@@ -358,10 +367,10 @@ def intent_node(state: GraphState) -> dict:
         intent = "RAG" if any(kw in question for kw in rag_keywords) else "DIRECT"
 
     else:
-        # --- 真实 API 模式：调用 DeepSeek 做意图分类 ---
+        # --- 真实 API 模式：调用对话模型做意图分类 ---
         try:
-            response = get_deepseek().client.chat.completions.create(
-                model="deepseek-chat",
+            response = client_for(endpoint).chat.completions.create(
+                model=endpoint.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": question}
@@ -374,7 +383,7 @@ def intent_node(state: GraphState) -> dict:
 
         except Exception as e:
             # API 调用失败时，默认走 RAG 路径（保守策略）
-            logger.error(f"[意图判定] API 调用失败: {e}，默认走 RAG 路径")
+            logger.error(f"[意图判定]（{endpoint.label}）API 调用失败: {scrub(str(e), endpoint)}，默认走 RAG 路径")
             intent = "RAG"
 
     logger.info(f"[意图判定] 判定意图为: {intent}")
@@ -452,12 +461,12 @@ def retrieve_node(state: GraphState) -> dict:
             strategy == "auto" and 0 < len(doc_content) <= KIMI_CORPUS_BUDGET
         ):
             # --- Kimi 小文档路径 ---
-            # 直接将全文交给 Kimi 阅读，让它摘录与问题相关的段落
+            # 直接将全文交给 Kimi 阅读，让它摘录与问题相关的段落；没配精读模型或没摘到时落到向量检索
             logger.info(f"[检索节点] 走 Kimi 精读路径 (文档长度: {len(doc_content)} 字)")
-            context = get_kimi().extract_knowledge(doc_content, question)
+            context = get_kimi().extract_knowledge(doc_content, question, endpoint=reader_endpoint(tenant_id))
             if context:
                 sources = _corpus_sources(doc_content)
-        else:
+        if not context:
             # --- 向量数据库路径 ---
             # 使用智谱 embedding-3 向量化问题，在 ChromaDB 中检索最相似的片段
             logger.info("[检索节点] 走向量数据库检索路径 (ChromaDB)")
@@ -546,7 +555,13 @@ def generate_node(state: GraphState) -> dict:
             logger.info(f"[生成节点] 回答生成完成，长度: {len(final_answer)} 字，messages 共 {len(updated_messages)} 条")
             return {"final_answer": final_answer, "messages": updated_messages}
 
-        # 真实 API 模式：调用 DeepSeek 以校园助手身份直接回答
+        # 真实 API 模式：以校园助手身份直接回答
+        endpoint = _chat_endpoint(state)
+        if endpoint is None:
+            emit(NOT_CONFIGURED)
+            updated_messages = _append_turn_messages(state, question, NOT_CONFIGURED, context="")
+            logger.warning("[生成节点] 个人、学校、平台都没有可用的对话模型")
+            return {"final_answer": NOT_CONFIGURED, "messages": updated_messages}
         try:
             system_prompt = f"""
 你是"{name}"，智悦校园的智能校园助手。
@@ -562,21 +577,14 @@ def generate_node(state: GraphState) -> dict:
             # 将 system prompt + 历史消息 + 当前问题 组装为完整对话
             api_messages = [{"role": "system", "content": system_prompt}] + history_messages + [{"role": "user", "content": question}]
 
-            response = get_deepseek().client.chat.completions.create(
-                model="deepseek-chat",
-                messages=api_messages,
-                temperature=0.8,
-                stream=True,  # 边生成边下发，首字延迟不再等整段写完
-            )
+            # 边生成边下发，首字延迟不再等整段写完
             parts: list[str] = []
-            for chunk in response:
-                piece = chunk.choices[0].delta.content
-                if piece:
-                    parts.append(piece)
-                    emit(piece)
+            for piece in get_deepseek().stream_chat(api_messages, endpoint, temperature=0.8):
+                parts.append(piece)
+                emit(piece)
             final_answer = "".join(parts)
         except Exception as e:
-            final_answer = f"抱歉，我暂时无法回答这个问题。错误信息: {str(e)}"
+            final_answer = f"{FAILED_PREFIX}（{endpoint.label}）{scrub(str(e), endpoint)}"
 
         updated_messages = _append_turn_messages(state, question, final_answer, context="")
         logger.info(f"[生成节点] 回答生成完成，长度: {len(final_answer)} 字，messages 共 {len(updated_messages)} 条")
@@ -588,7 +596,7 @@ def generate_node(state: GraphState) -> dict:
     # chat_with_context 是 generator，逐块消费：一边拼完整答案，一边下发给前端
     parts: list[str] = []
     for chunk in get_deepseek().chat_with_context(
-        context, question, persona=settings.persona, memories=memories
+        context, question, persona=settings.persona, memories=memories, endpoint=_chat_endpoint(state)
     ):
         parts.append(chunk)
         emit(chunk)
@@ -617,7 +625,7 @@ def emotion_node(state: GraphState) -> dict:
     """
     question = state.get("user_question", "")
     logger.info(f"[情感节点] 分析用户问题: \"{question[:40]}\"")
-    emotion = get_deepseek().analyze_emotion_and_reply(question)
+    emotion = get_deepseek().analyze_emotion_and_reply(question, endpoint=_chat_endpoint(state))
     if isinstance(emotion, dict):
         emotion = dict(emotion)
         facts = emotion.pop("memory_facts", None)

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { NewPageIcon, PouchIcon, SpeakerIcon } from "@/components/SketchIcons";
+import { NewPageIcon, PouchIcon } from "@/components/SketchIcons";
 import type { AuthUser } from "@/lib/auth/session";
 
 interface Props {
@@ -10,17 +10,12 @@ interface Props {
   /** 老师/管理员：账户菜单里显示会话编号，方便对日志 */
   isStaff: boolean;
   threadId: string | null;
-  ttsEnabled: boolean;
-  onToggleTts: (enabled: boolean) => void;
   onNewSession: () => void;
   onOpenTools: () => void;
   onLogout: () => void;
 }
 
-function AccountMenu({ user, isStaff, threadId, ttsEnabled, onToggleTts, onLogout }: Pick<
-  Props,
-  "user" | "isStaff" | "threadId" | "ttsEnabled" | "onToggleTts" | "onLogout"
->) {
+function AccountMenu({ user, isStaff, threadId, onLogout }: Pick<Props, "user" | "isStaff" | "threadId" | "onLogout">) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -58,20 +53,10 @@ function AccountMenu({ user, isStaff, threadId, ttsEnabled, onToggleTts, onLogou
           <p className="text-sm text-muted">
             {user.tenantName} · {user.studentNo}
           </p>
-          <label className="mt-3 flex cursor-pointer items-center justify-between gap-3 border-t border-dashed border-rule pt-3">
-            <span className="flex items-center gap-2">
-              <SpeakerIcon on={ttsEnabled} size={18} />
-              朗读回答
-            </span>
-            <input
-              type="checkbox"
-              checked={ttsEnabled}
-              onChange={(event) => onToggleTts(event.target.checked)}
-              className="size-4 accent-pink"
-            />
-          </label>
           {isStaff && threadId && (
-            <p className="mt-2 text-[0.8125rem] break-all text-muted">会话 {threadId}</p>
+            <p className="mt-3 border-t border-dashed border-rule pt-3 text-[0.8125rem] break-all text-muted">
+              会话 {threadId}
+            </p>
           )}
           <button type="button" onClick={onLogout} className="link-ink mt-3 text-[0.9375rem]">
             退出登录

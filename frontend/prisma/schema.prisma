@@ -30,6 +30,7 @@ model Tenant {
 
   users    User[]
   settings TenantSettings?
+  aiConfig TenantAiConfig?
   embeds   EmbedConfig[]
 
   @@map("tenants")
@@ -53,6 +54,29 @@ model TenantSettings {
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@map("tenant_settings")
+}
+
+/// 每所学校自配的 AI 服务。FastAPI 只读（backend/workspace.py 的 school_ai），表名与列名改动要同步那边的 SQL。
+/// 密钥只存 AES-256-GCM 密文：lib/ai-config/secret-box.ts 加密，backend/secret_box.py 解密
+model TenantAiConfig {
+  tenantId      String   @id
+  /// 对话模型：意图判定、闲聊、按资料回答、情绪分析共用。网址与模型 ID 空串表示用默认值
+  chatBaseUrl   String   @default("")
+  chatModel     String   @default("")
+  /// 密文；空串表示没填，退回服务器 .env 的平台默认
+  chatKey       String   @default("")
+  /// 密钥末四位，给管理员认出是哪一把，不必解密
+  chatKeyHint   String   @default("")
+  /// 长文档精读：读整篇短文合集，摘出与问题相关的段落
+  readerBaseUrl String   @default("")
+  readerModel   String   @default("")
+  readerKey     String   @default("")
+  readerKeyHint String   @default("")
+  updatedAt     DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("tenant_ai_configs")
 }
 
 /// 可嵌入外部网站的聊天挂件。访客令牌由 Next 签发，FastAPI 按 id 回查启用状态与每日上限

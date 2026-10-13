@@ -9,10 +9,21 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import memory_store
+from ai_config import (
+    EMBEDDING_MODEL,
+    READER_TIMEOUT_SECONDS,
+    ModelEndpoint,
+    client_for,
+    embedding_configured,
+    reader_endpoint,
+    school_chat_endpoint,
+    scrub,
+)
 from auth import (
+    AdminDep,
     CurrentUser,
     CurrentUserDep,
     KnowledgeManagerDep,
@@ -25,15 +36,15 @@ from env_config import load_backend_env
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from graph_app import build_graph
+from graph_app import build_graph, get_vector_db
 from knowledge import knowledge_base
-from llm_request import LlmRequest, pop_llm_request, push_llm_request
+from llm_request import LlmRequest, stream_with_llm_request
 from logging_config import get_logger, setup_logging
 from openai import OpenAI
 from pydantic import BaseModel, Field, field_validator
 from rate_limit import enforce_chat_quota, enforce_embed_quota
 from web_import import UnsafeUrlError
-from workspace import embed_settings, workspace_settings
+from workspace import embed_settings, forget_school_ai, workspace_settings
 
 logger = get_logger(__name__)
 
@@ -92,6 +103,10 @@ class LlmConfig(BaseModel):
         if cleaned and not cleaned.startswith("https://"):
             raise ValueError("模型地址必须是 https")
         return cleaned
+
+
+class AiServiceTest(BaseModel):
+    service: Literal["chat", "reader", "embedding"]
 
 
 class ChatRequest(BaseModel):
@@ -165,6 +180,62 @@ def ping_llm(payload: LlmConfig, _: MemberDep) -> dict[str, Any]:
     return {"ok": True, "models": names}
 
 
+def _endpoint_status(endpoint: ModelEndpoint | None) -> dict[str, Any]:
+    if endpoint is None:
+        return {"configured": False, "source": None, "model": ""}
+    return {"configured": True, "source": endpoint.source, "model": endpoint.model}
+
+
+@app.get("/api/ai/status")
+def ai_status(user: MemberDep) -> dict[str, Any]:
+    """本校各项 AI 服务配没配、用的是学校的还是平台的。不含任何密钥，学生也能看。"""
+    embedding = embedding_configured()
+    return {
+        "chat": _endpoint_status(school_chat_endpoint(user.tenant_id)),
+        "reader": _endpoint_status(reader_endpoint(user.tenant_id)),
+        "embedding": {
+            "configured": embedding,
+            "source": "platform" if embedding else None,
+            "model": EMBEDDING_MODEL,
+        },
+    }
+
+
+@app.post("/api/ai/test")
+def test_ai_service(payload: AiServiceTest, user: AdminDep) -> dict[str, Any]:
+    """用本校当前生效的配置真实调一次。管理员刚保存完就会点它，所以先丢掉缓存。"""
+    forget_school_ai(user.tenant_id)
+    if payload.service == "embedding":
+        if not embedding_configured():
+            raise HTTPException(status_code=400, detail="服务器还没配置向量化密钥（zhi_pu_API_KEY）")
+        vdb = get_vector_db()
+        if vdb is None:
+            raise HTTPException(status_code=502, detail="向量库初始化失败，查看后端日志")
+        try:
+            vdb.embedding_model.embed_query("连通测试")
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"连通失败: {exc}") from exc
+        return {"ok": True, "source": "platform", "model": EMBEDDING_MODEL}
+
+    is_chat = payload.service == "chat"
+    endpoint = school_chat_endpoint(user.tenant_id) if is_chat else reader_endpoint(user.tenant_id)
+    if endpoint is None:
+        raise HTTPException(status_code=400, detail="还没配置：先填好密钥并保存")
+    timeout = 20.0 if is_chat else min(READER_TIMEOUT_SECONDS, 30.0)
+    try:
+        # 只要 1 个 token：既验密钥，也验模型 ID 写没写对
+        client_for(endpoint, timeout=timeout, retries=0).chat.completions.create(
+            model=endpoint.model,
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=1,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"连通失败（{endpoint.label}）: {scrub(str(exc), endpoint)}"
+        ) from exc
+    return {"ok": True, "source": endpoint.source, "model": endpoint.model}
+
+
 # ============================================================
 # 会话
 # ============================================================
@@ -228,7 +299,10 @@ def _chat_events(
 
     user_id 为空（挂件访客）时不读写长期记忆。
     """
-    token = push_llm_request(_as_llm_request(llm))
+    return stream_with_llm_request(_as_llm_request(llm), _graph_events(thread_id, question, tenant_id, user_id))
+
+
+def _graph_events(thread_id: str, question: str, tenant_id: str, user_id: str) -> Iterator[str]:
     remembered = memory_store.take_remember_command(question) if user_id else None
     if remembered:
         try:
@@ -255,8 +329,6 @@ def _chat_events(
         )
     except Exception as exc:
         yield sse("error", {"message": f"回答生成失败: {exc}"})
-    finally:
-        pop_llm_request(token)
 
 
 def _enforce_guest_quota(user: CurrentUser) -> None:

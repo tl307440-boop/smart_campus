@@ -1,7 +1,7 @@
-"""每所学校的工作区设置与嵌入挂件配置：只读 Postgres，带短时缓存。
+"""每所学校的工作区设置、AI 服务配置与嵌入挂件配置：只读 Postgres，带短时缓存。
 
-两张表由 Next 侧 Prisma 建（frontend/prisma/schema.prisma 的 TenantSettings / EmbedConfig），
-写入也只走 Next 的管理接口。这里手写 SQL，改表名或列名必须同步。
+三张表由 Next 侧 Prisma 建（frontend/prisma/schema.prisma 的 TenantSettings / TenantAiConfig /
+EmbedConfig），写入也只走 Next 的管理接口。这里手写 SQL，改表名或列名必须同步。
 
 没配 DATABASE_URL（本地只起 FastAPI）或查询失败时一律退回默认设置，
 不让配置读取故障拖垮问答主链路。
@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg
+import secret_box
 from env_config import load_backend_env
 from logging_config import get_logger
 
@@ -36,6 +37,18 @@ class WorkspaceSettings:
 
 
 @dataclass(frozen=True)
+class SchoolAi:
+    """学校在「AI 服务」页配的模型；密钥已解密，空串表示没填。"""
+
+    chat_base_url: str = ""
+    chat_model: str = ""
+    chat_key: str = ""
+    reader_base_url: str = ""
+    reader_model: str = ""
+    reader_key: str = ""
+
+
+@dataclass(frozen=True)
 class EmbedSettings:
     id: str
     tenant_id: str
@@ -44,6 +57,7 @@ class EmbedSettings:
 
 
 DEFAULT_SETTINGS = WorkspaceSettings()
+NO_SCHOOL_AI = SchoolAi()
 
 _cache: dict[tuple[str, str], tuple[float, Any]] = {}
 _cache_lock = threading.Lock()
@@ -85,6 +99,12 @@ def clear_cache() -> None:
         _cache.clear()
 
 
+def forget_school_ai(tenant_id: str) -> None:
+    """管理员刚保存完就点「测一下」时，不能拿缓存里的旧配置去测。"""
+    with _cache_lock:
+        _cache.pop(("ai", tenant_id), None)
+
+
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
@@ -115,6 +135,39 @@ def workspace_settings(tenant_id: str) -> WorkspaceSettings:
         )
 
     return _cached("settings", tenant_id, load, DEFAULT_SETTINGS)
+
+
+def _decrypt(tenant_id: str, token: str) -> str:
+    try:
+        return secret_box.decrypt(token or "")
+    except Exception as exc:
+        # 多半是换过 AUTH_JWT_SECRET：当作没填，退回平台默认，并提示管理员重填
+        logger.warning(f"[Workspace] {tenant_id} 的模型密钥解不开，按未配置处理: {exc}")
+        return ""
+
+
+def school_ai(tenant_id: str) -> SchoolAi:
+    """取某校自配的对话模型与长文档精读模型；没配或读库失败时全部为空。"""
+
+    def load() -> SchoolAi:
+        row = _fetch_one(
+            'SELECT "chatBaseUrl", "chatModel", "chatKey", "readerBaseUrl", "readerModel", "readerKey" '
+            'FROM tenant_ai_configs WHERE "tenantId" = %s',
+            (tenant_id,),
+        )
+        if row is None:
+            return NO_SCHOOL_AI
+        chat_url, chat_model, chat_key, reader_url, reader_model, reader_key = row
+        return SchoolAi(
+            chat_base_url=(chat_url or "").strip(),
+            chat_model=(chat_model or "").strip(),
+            chat_key=_decrypt(tenant_id, chat_key),
+            reader_base_url=(reader_url or "").strip(),
+            reader_model=(reader_model or "").strip(),
+            reader_key=_decrypt(tenant_id, reader_key),
+        )
+
+    return _cached("ai", tenant_id, load, NO_SCHOOL_AI)
 
 
 def embed_settings(embed_id: str) -> EmbedSettings | None:

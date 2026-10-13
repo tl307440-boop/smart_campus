@@ -1,4 +1,5 @@
 /** 管理员面板调用 Next 侧的管理接口（同源 /api/admin/*），带上登录令牌。 */
+import type { AiConfigInput, AiConfigView } from "@/lib/ai-config/schema";
 import { readStoredToken } from "@/lib/auth/session";
 import type { EmbedInput, WorkspaceSettingsInput } from "@/lib/workspace/schema";
 
@@ -35,6 +36,14 @@ export function saveWorkspaceSettings(settings: WorkspaceSettings) {
     method: "PUT",
     body: JSON.stringify(settings),
   });
+}
+
+export function fetchAiConfig() {
+  return adminRequest<AiConfigView>("/api/admin/ai");
+}
+
+export function saveAiConfig(input: AiConfigInput) {
+  return adminRequest<AiConfigView>("/api/admin/ai", { method: "PUT", body: JSON.stringify(input) });
 }
 
 export async function fetchEmbeds(): Promise<EmbedConfig[]> {

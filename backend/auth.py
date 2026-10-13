@@ -146,6 +146,15 @@ async def knowledge_manager(
     return user
 
 
+async def admin(
+    user: Annotated[CurrentUser, Depends(current_user)],
+) -> CurrentUser:
+    """本校管理员。以令牌里的角色为准；改配置的接口在 Next 侧还会回查数据库。"""
+    if user.role != "ADMIN":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
+    return user
+
+
 def scoped_thread_id(user: CurrentUser, thread_id: str) -> str:
     """把会话 id 收进用户命名空间。
 
@@ -157,3 +166,4 @@ def scoped_thread_id(user: CurrentUser, thread_id: str) -> str:
 CurrentUserDep = Annotated[CurrentUser, Depends(current_user)]
 MemberDep = Annotated[CurrentUser, Depends(member)]
 KnowledgeManagerDep = Annotated[CurrentUser, Depends(knowledge_manager)]
+AdminDep = Annotated[CurrentUser, Depends(admin)]
