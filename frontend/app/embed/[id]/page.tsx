@@ -21,7 +21,7 @@ function readSession(): EmbedSession | null {
   const token = params.get("token");
   if (token) setAccessTokenOverride(token);
   captured = token
-    ? { assistantName: params.get("name") || "小懒", tenantName: params.get("school") || "" }
+    ? { assistantName: params.get("name") || "校园助手", tenantName: params.get("school") || "" }
     : null;
   return captured;
 }
@@ -42,8 +42,8 @@ export default function EmbedPage() {
   if (session === undefined) return null;
   if (session === null) {
     return (
-      <div className="flex h-dvh items-center justify-center p-6 text-center text-sm text-muted">
-        请通过学校网站右下角的聊天气泡打开。
+      <div className="flex h-dvh items-center justify-center bg-paper p-6 text-center text-muted">
+        请从学校网站右下角的聊天入口打开。
       </div>
     );
   }

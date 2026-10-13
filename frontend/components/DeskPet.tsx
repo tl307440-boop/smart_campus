@@ -62,7 +62,7 @@ function closedEyePath(kind: ClosedEyes, e: Eye, side: number): string {
   }
 }
 
-function PetEye({ eye, index, clipId, mood, closed }: {
+export function PetEye({ eye, index, clipId, mood, closed }: {
   eye: Eye; index: number; clipId: string; mood: PetMood; closed?: ClosedEyes;
 }) {
   const look = mood === "thinking"
@@ -104,7 +104,7 @@ function PetEye({ eye, index, clipId, mood, closed }: {
   );
 }
 
-function PetMouth({ mood }: { mood: PetMood }) {
+export function PetMouth({ mood }: { mood: PetMood }) {
   const { x, y } = MOUTH_CENTER;
   let shape: ReactNode = null;
   if (mood === "sleepy") {
@@ -129,9 +129,9 @@ function PetMouth({ mood }: { mood: PetMood }) {
   );
 }
 
-function Flower() {
+export function Flower({ size = 18, className }: { size?: number; className?: string }) {
   return (
-    <svg viewBox="-10 -10 20 20" width="18" height="18" aria-hidden="true">
+    <svg viewBox="-10 -10 20 20" width={size} height={size} className={className} aria-hidden="true">
       {[0, 72, 144, 216, 288].map((deg) => (
         <ellipse key={deg} cx="0" cy="-5" rx="3.6" ry="5" fill="#7cc8f2" stroke={INK} strokeWidth="0.8" transform={`rotate(${deg})`} />
       ))}
@@ -170,8 +170,8 @@ function DeskPetInner({ thinking, failed = false, onOpenSettings }: Props) {
       ref={rootRef}
       role="button"
       tabIndex={0}
-      aria-label="校园桌宠：单击戳一戳，拖动换位置，双击配置模型"
-      title="双击配置模型"
+      aria-label="校园桌宠：单击戳一戳，拖动换位置，双击打开设置"
+      title="双击打开设置"
       className={styles.pet}
       data-mood={mood}
       data-pressed={pressed || undefined}
@@ -223,7 +223,7 @@ function DeskPetInner({ thinking, failed = false, onOpenSettings }: Props) {
 
 const subscribe = () => () => {};
 
-/** 桌宠：眼睛跟着鼠标转，闲置会睡着；单击戳一戳、摸头、拖动，双击打开 AI 服务设置。 */
+/** 桌宠：眼睛跟着鼠标转，闲置会睡着；单击戳一戳、摸头、拖动，双击打开设置抽屉。 */
 export function DeskPet(props: Props) {
   const mounted = useSyncExternalStore(subscribe, () => true, () => false);
   return mounted ? <DeskPetInner {...props} /> : null;

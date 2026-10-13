@@ -55,7 +55,7 @@
   width: 100%;
   height: 100%;
   overflow: visible;
-  filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.35));
+  filter: drop-shadow(0 4px 6px rgba(27, 18, 20, 0.16));
 }
 
 .hopA { animation: hopA 0.42s cubic-bezier(0.3, 1.6, 0.5, 1); }
@@ -113,15 +113,15 @@
   right: 72%;
   bottom: 82%;
   width: max-content;
-  max-width: 11rem;
-  padding: 6px 12px;
+  max-width: 12rem;
+  padding: 7px 12px;
   border: 2px solid #1b1214;
-  border-radius: 16px 16px 4px 16px;
-  background: #fff7f9;
+  border-radius: 16px 14px 4px 17px;
+  background: #fffaf4;
   color: #1b1214;
-  font-size: 13px;
+  font-family: var(--font-display);
+  font-size: 14px;
   line-height: 1.4;
-  box-shadow: 0 4px 0 #f28aa3;
   pointer-events: none;
   animation: pop 0.22s cubic-bezier(0.3, 1.6, 0.5, 1);
 }
@@ -129,7 +129,7 @@
 .pet[data-flip] .bubble {
   right: auto;
   left: 72%;
-  border-radius: 16px 16px 16px 4px;
+  border-radius: 14px 16px 17px 4px;
 }
 
 .pet[data-below] .bubble {
@@ -146,14 +146,15 @@
   padding: 6px 9px;
   border: 2px solid #1b1214;
   border-radius: 999px;
-  background: #fff7f9;
+  background: #fffaf4;
 }
 
 .think i {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
+  border: 1.5px solid #1b1214;
   border-radius: 50%;
-  background: #1b1214;
+  background: #ffd34d;
   animation: dot 1s ease-in-out infinite;
 }
 

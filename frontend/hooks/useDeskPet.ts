@@ -43,22 +43,32 @@ export const PET_EYES = [
 export const PET_WIDTH = 128;
 export const PET_HEIGHT = Math.round((PET_WIDTH * PET_VIEWBOX.h) / PET_VIEWBOX.w);
 
+/** 让桌宠看向页面上某一点：window.dispatchEvent(new CustomEvent(PET_LOOK_EVENT, { detail: { x, y } })) */
+export const PET_LOOK_EVENT = "deskpet:look";
+
 const POSITION_KEY = "zhiyue.deskpet.position";
 const HINT_KEY = "zhiyue.deskpet.hinted";
 const EDGE = 8;
 const DRAG_THRESHOLD = 5;
 const SLEEP_AFTER_MS = 6000;
 const BLINK_MS = 130;
-const POKE_LINES = ["干嘛戳我～", "嘿嘿", "今天也要加油鸭！", "有问题尽管问我", "双击我可以配置模型哦"];
+const POKE_LINES = ["干嘛戳我～", "嘿嘿", "今天也要加油鸭！", "有问题尽管问我", "回答下面的小纸条是出处哦"];
 const PET_LINES = ["好舒服～", "再摸摸嘛", "嘿嘿嘿"];
 const WAKE_LINES = ["啊…我没睡着！", "嗯？你回来啦"];
+const FIRST_HINT = "想问资助、考试还是宿舍？直接打字问我～";
 
 const pick = (lines: readonly string[]) => lines[Math.floor(Math.random() * lines.length)];
 
+/** 页面上带 data-pet-avoid 的区域（输入框）：桌宠横向和它重叠时只能待在它上方 */
 function clampPosition(p: Point): Point {
   const maxX = window.innerWidth - PET_WIDTH - EDGE;
-  const maxY = window.innerHeight - PET_HEIGHT - EDGE;
-  return { x: Math.max(EDGE, Math.min(p.x, maxX)), y: Math.max(EDGE, Math.min(p.y, maxY)) };
+  let maxY = window.innerHeight - PET_HEIGHT - EDGE;
+  const x = Math.max(EDGE, Math.min(p.x, maxX));
+  const avoid = document.querySelector("[data-pet-avoid]")?.getBoundingClientRect();
+  if (avoid && x < avoid.right && x + PET_WIDTH > avoid.left) {
+    maxY = Math.min(maxY, avoid.top - PET_HEIGHT - 4);
+  }
+  return { x, y: Math.max(EDGE, Math.min(p.y, maxY)) };
 }
 
 function loadPosition(): Point {
@@ -194,7 +204,10 @@ function usePetMood(thinking: boolean, failed: boolean) {
     scheduleSleep();
     const hint = localStorage.getItem(HINT_KEY)
       ? 0
-      : window.setTimeout(() => say("双击我可以配置模型哦", 4200), 1500);
+      : window.setTimeout(() => {
+          localStorage.setItem(HINT_KEY, "1");
+          say(FIRST_HINT, 4200);
+        }, 1500);
     return () => {
       window.clearTimeout(hint);
       Object.values(all).forEach((t) => window.clearTimeout(t));
@@ -356,6 +369,12 @@ function usePetTracking(
         kick();
       }
     };
+    const onLook = (ev: Event) => {
+      const target = (ev as CustomEvent<Point>).detail;
+      if (!target) return;
+      pointer = target;
+      kick();
+    };
     const onVisibility = () => {
       root.toggleAttribute("data-paused", document.hidden);
       if (document.hidden && raf) {
@@ -369,9 +388,11 @@ function usePetTracking(
     window.addEventListener("keydown", onKey);
     document.addEventListener("visibilitychange", onVisibility);
     root.addEventListener("pet:kick", kick);
+    window.addEventListener(PET_LOOK_EVENT, onLook);
     return () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener(PET_LOOK_EVENT, onLook);
       document.removeEventListener("visibilitychange", onVisibility);
       root.removeEventListener("pet:kick", kick);
       if (raf) window.cancelAnimationFrame(raf);
@@ -428,8 +449,13 @@ export function useDeskPet({ thinking, failed, onOpenSettings }: {
         posRef.current = next;
         return next.x === p.x && next.y === p.y ? p : next;
       });
+    // 首次渲染时输入框可能还没进 DOM，挂载后再按 data-pet-avoid 校正一次
+    const settle = window.requestAnimationFrame(onResize);
     window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+    return () => {
+      window.cancelAnimationFrame(settle);
+      window.removeEventListener("resize", onResize);
+    };
   }, []);
 
   const moveTo = (next: Point) => {
