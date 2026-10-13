@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 智悦校园 · 嵌入挂件加载器。学校官网只需加一行：
  *   <script src="https://<智悦站点>/embed.js" data-embed-id="<挂件 id>" defer></script>
  *
@@ -68,22 +68,73 @@
 
   var panel = document.createElement("div");
   panel.style.cssText =
-    "position:fixed;right:20px;bottom:88px;width:380px;max-width:calc(100vw - 40px);height:560px;" +
-    "max-height:calc(100vh - 120px);border-radius:16px;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.25);" +
-    "display:none;z-index:2147483646;background:#0c1319;";
+    "position:fixed;right:16px;bottom:96px;width:380px;max-width:calc(100vw - 32px);height:560px;" +
+    "max-height:calc(100vh - 120px);border:2px solid #1b1214;border-radius:16px;overflow:hidden;" +
+    "box-shadow:0 10px 28px rgba(27,18,20,.18);display:none;z-index:2147483646;background:#fffaf4;";
 
+  // 启动器：桌宠从页面右下角探出半个脑袋，眼睛跟着鼠标转。坐标系与 hooks/useDeskPet.ts 的 PET_VIEWBOX / PET_EYES 一致
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var EYES = [
+    { cx: 247, cy: 257, rx: 60, ry: 54 },
+    { cx: 398, cy: 248, rx: 65, ry: 55 },
+  ];
   var button = document.createElement("button");
   button.type = "button";
   button.setAttribute("aria-label", "打开校园助手");
-  button.textContent = "问";
+  button.setAttribute("aria-expanded", "false");
+  button.title = "有问题问我";
   button.style.cssText =
-    "position:fixed;right:20px;bottom:20px;width:56px;height:56px;border-radius:50%;border:none;cursor:pointer;" +
-    "background:linear-gradient(135deg,#c8954a,#e2b866);color:#1a1208;font-size:22px;font-weight:700;" +
-    "box-shadow:0 6px 20px rgba(0,0,0,.25);z-index:2147483647;";
+    "position:fixed;right:14px;bottom:-18px;width:96px;height:96px;padding:0;border:0;background:none;cursor:pointer;" +
+    "z-index:2147483647;transition:transform .18s cubic-bezier(.3,1.5,.5,1);-webkit-tap-highlight-color:transparent;";
+
+  function svgEl(tag, attrs) {
+    var el = document.createElementNS(SVG_NS, tag);
+    for (var key in attrs) el.setAttribute(key, attrs[key]);
+    return el;
+  }
+
+  var head = svgEl("svg", { viewBox: "40 0 566 560", width: "96", height: "96", "aria-hidden": "true" });
+  head.style.cssText = "display:block;overflow:visible;filter:drop-shadow(0 3px 4px rgba(27,18,20,.18));";
+  head.appendChild(svgEl("image", { href: base + "/pet/girl.webp", width: "646", height: "634" }));
+  var pupils = EYES.map(function (eye, i) {
+    var clipId = "zhiyue-eye-" + i;
+    var clip = svgEl("clipPath", { id: clipId });
+    clip.appendChild(svgEl("ellipse", { cx: eye.cx, cy: eye.cy, rx: eye.rx, ry: eye.ry }));
+    head.appendChild(clip);
+    var holder = svgEl("g", { "clip-path": "url(#" + clipId + ")" });
+    var pupil = svgEl("g", {});
+    pupil.style.transition = "transform .12s ease-out";
+    pupil.appendChild(svgEl("ellipse", { cx: eye.cx, cy: eye.cy, rx: "11", ry: "14", fill: "#1b1214" }));
+    pupil.appendChild(svgEl("circle", { cx: eye.cx + 4, cy: eye.cy - 5, r: "3.6", fill: "#fff" }));
+    holder.appendChild(pupil);
+    head.appendChild(holder);
+    return pupil;
+  });
+  button.appendChild(head);
+
+  function look(ev) {
+    var rect = head.getBoundingClientRect();
+    var scale = rect.width / 566;
+    EYES.forEach(function (eye, i) {
+      var dx = ev.clientX - (rect.left + (eye.cx - 40) * scale);
+      var dy = ev.clientY - (rect.top + eye.cy * scale);
+      var d = Math.hypot(dx, dy) || 1;
+      var reach = Math.min(d / 240, 1);
+      var x = (dx / d) * reach * (eye.rx - 22);
+      var y = (dy / d) * reach * (eye.ry - 24);
+      pupils[i].style.transform = "translate(" + x.toFixed(1) + "px," + y.toFixed(1) + "px)";
+    });
+  }
+
+  function lift(up) {
+    button.style.transform = up ? "translateY(-10px)" : "";
+  }
 
   function open() {
     if (frame) {
-      panel.style.display = panel.style.display === "none" ? "block" : "none";
+      var show = panel.style.display === "none";
+      panel.style.display = show ? "block" : "none";
+      button.setAttribute("aria-expanded", String(show));
       return;
     }
     if (opening) return;
@@ -102,6 +153,7 @@
         frame.style.cssText = "width:100%;height:100%;border:0;";
         panel.appendChild(frame);
         panel.style.display = "block";
+        button.setAttribute("aria-expanded", "true");
       })
       .catch(function (err) {
         button.title = err.message;
@@ -113,6 +165,11 @@
   }
 
   button.addEventListener("click", open);
+  button.addEventListener("pointerenter", function () { lift(true); });
+  button.addEventListener("pointerleave", function () { lift(false); });
+  button.addEventListener("focus", function () { lift(true); });
+  button.addEventListener("blur", function () { lift(false); });
+  window.addEventListener("pointermove", look, { passive: true });
   document.body.appendChild(panel);
   document.body.appendChild(button);
 })();

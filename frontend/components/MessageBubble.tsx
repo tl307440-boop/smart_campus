@@ -1,9 +1,14 @@
+import { Flower } from "@/components/DeskPet";
+import { PaperclipIcon, PencilIcon } from "@/components/SketchIcons";
 import type { ChatMessage, ChatSource } from "@/lib/api";
 
 interface Props {
   message: ChatMessage;
   streaming?: boolean;
-  assistantName?: string;
+  /** 最新一条答完的回答：末尾画一朵蓝花 */
+  signed?: boolean;
+  /** 管理员排查用：情感分析等调试信息 */
+  showDebug?: boolean;
 }
 
 function scoreLabel(source: ChatSource): string | null {
@@ -11,75 +16,100 @@ function scoreLabel(source: ChatSource): string | null {
   return `相似度 ${Math.round(source.score * 100)}%`;
 }
 
-function SourceCards({ sources }: { sources: ChatSource[] }) {
+/** wiki/concepts/国家助学金.md → 国家助学金 */
+function sourceTitle(path: string): string {
+  const base = path.split(/[\\/]/).pop() ?? path;
+  return base.replace(/\.(md|txt|pdf|docx)$/i, "") || path;
+}
+
+function Slip({ index, title, full, score, tilt = 0, children }: {
+  index: number | string; title: string; full: string; score?: string | null; tilt?: number; children: React.ReactNode;
+}) {
   return (
-    <div className="mt-3 space-y-2">
-      <p className="text-xs text-muted">参考来源</p>
-      {sources.map((source) => (
-        <details
-          key={`${source.index}-${source.source}`}
-          className="rounded-lg border border-line bg-ink-elevated px-3 py-2"
-        >
-          <summary className="flex cursor-pointer items-center gap-2 text-xs text-parchment">
-            <span className="rounded bg-gold-soft px-1.5 text-gold">{source.index}</span>
-            <span className="min-w-0 flex-1 truncate" title={source.source}>
-              {source.source}
-            </span>
-            {scoreLabel(source) && <span className="shrink-0 text-muted">{scoreLabel(source)}</span>}
-          </summary>
-          {source.snippet ? (
-            <p className="mt-2 whitespace-pre-wrap text-xs text-muted">{source.snippet}…</p>
-          ) : (
-            <p className="mt-2 text-xs text-muted">整篇精读，未截取片段。</p>
-          )}
-        </details>
-      ))}
+    <details
+      className="sketch rotate-(--tilt) bg-paper transition-[rotate] duration-150 open:basis-full open:rotate-0"
+      style={{ "--tilt": `${tilt}deg` } as React.CSSProperties}
+    >
+      <summary className="flex cursor-pointer list-none items-center gap-2 py-1.5 pr-3 pl-7 text-sm [&::-webkit-details-marker]:hidden">
+        <PaperclipIcon size={20} className="pointer-events-none absolute -top-2.5 left-2 rotate-[-18deg] text-ink" />
+        <span className="grid size-[1.375rem] shrink-0 place-items-center rounded-full border-[1.5px] border-ink bg-flower text-[0.8125rem] leading-none font-semibold">
+          {index}
+        </span>
+        <span className="min-w-0 truncate" title={full}>{title}</span>
+        {score && <span className="shrink-0 text-[0.8125rem] text-muted tabular-nums">{score}</span>}
+      </summary>
+      <div className="border-t border-dashed border-rule px-3 pt-2 pb-3 text-sm leading-relaxed text-muted">
+        {children}
+      </div>
+    </details>
+  );
+}
+
+function SourceSlips({ sources }: { sources: ChatSource[] }) {
+  return (
+    <div className="mt-4">
+      <p className="mb-2 text-sm text-muted">出处</p>
+      <div className="flex flex-wrap gap-2.5">
+        {sources.map((source, i) => (
+          <Slip
+            key={`${source.index}-${source.source}`}
+            tilt={i % 2 ? 0.8 : -0.6}
+            index={source.index}
+            title={sourceTitle(source.source)}
+            full={source.source}
+            score={scoreLabel(source)}
+          >
+            {source.snippet ? (
+              <p className="whitespace-pre-wrap">{source.snippet}…</p>
+            ) : (
+              <p>整篇精读，未截取片段。</p>
+            )}
+          </Slip>
+        ))}
+      </div>
     </div>
   );
 }
 
-export function MessageBubble({ message, streaming = false, assistantName = "小懒" }: Props) {
-  const isUser = message.role === "user";
+export function MessageBubble({ message, streaming = false, signed = false, showDebug = false }: Props) {
   const sources = message.sources ?? [];
 
-  return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-      <div
-        className={`max-w-[85%] animate-fade-in rounded-2xl border border-line px-4 py-3 leading-relaxed ${
-          isUser ? "bg-bubble-user" : "bg-bubble-assistant"
-        }`}
-      >
-        {!isUser && (
-          <p className="mb-1 font-display text-xs tracking-widest text-gold">{assistantName}</p>
-        )}
-
-        <p className="whitespace-pre-wrap break-words text-[0.95rem] text-parchment">
-          {message.content}
-          {streaming && <span className="ml-0.5 animate-pulse text-gold">▌</span>}
+  if (message.role === "user") {
+    return (
+      <div className="flex justify-end" data-role="user">
+        <p className="max-w-[85%] text-right leading-[1.9] whitespace-pre-wrap break-words">
+          <span className="marker marker-swipe">{message.content}</span>
         </p>
-
-        {sources.length > 0 && <SourceCards sources={sources} />}
-
-        {sources.length === 0 && message.context && (
-          <details className="mt-3 rounded-lg border border-line bg-ink-elevated px-3 py-2">
-            <summary className="cursor-pointer text-xs text-muted">
-              查看知识库来源片段
-            </summary>
-            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-muted">
-              {message.context}
-            </pre>
-          </details>
-        )}
-
-        {message.emotion && (
-          <details className="mt-2 rounded-lg border border-line bg-ink-elevated px-3 py-2">
-            <summary className="cursor-pointer text-xs text-muted">情感分析结果</summary>
-            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-muted">
-              {JSON.stringify(message.emotion, null, 2)}
-            </pre>
-          </details>
-        )}
       </div>
+    );
+  }
+
+  return (
+    <div className="animate-fade-in">
+      <p className="leading-[1.75] whitespace-pre-wrap break-words">
+        {message.content}
+        {streaming && <PencilIcon size={18} className="pencil-bob ml-1 inline-block align-[-3px] text-pink" />}
+        {signed && <Flower size={20} className="flower-draw ml-1.5 inline-block align-[-4px]" />}
+      </p>
+
+      {sources.length > 0 && <SourceSlips sources={sources} />}
+
+      {sources.length === 0 && message.context && (
+        <div className="mt-4 flex">
+          <Slip index="※" title="资料原文" full="知识库里检索到的原文">
+            <pre className="max-h-64 overflow-auto font-body whitespace-pre-wrap">{message.context}</pre>
+          </Slip>
+        </div>
+      )}
+
+      {showDebug && message.emotion && (
+        <details className="mt-3 text-sm text-muted">
+          <summary className="cursor-pointer">情感分析（仅管理员可见）</summary>
+          <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap">
+            {JSON.stringify(message.emotion, null, 2)}
+          </pre>
+        </details>
+      )}
     </div>
   );
 }

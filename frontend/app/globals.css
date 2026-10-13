@@ -1,18 +1,18 @@
 @import "tailwindcss";
 
+/* 草稿本：纸白、墨、粉色马克笔，颜色全部取自桌宠画稿 public/pet/girl.webp */
 @theme {
-  --color-ink: #0b1218;
-  --color-ink-elevated: #121a22;
-  --color-surface: #18222c;
-  --color-line: rgba(212, 163, 90, 0.18);
-  --color-line-strong: rgba(212, 163, 90, 0.45);
-  --color-parchment: #e8e4dc;
-  --color-muted: #9aa3ad;
-  --color-gold: #d4a35a;
-  --color-gold-soft: rgba(212, 163, 90, 0.14);
-  --color-bubble-user: #243140;
-  --color-bubble-assistant: #152029;
-  --color-danger: #c97b7b;
+  --color-desk: #f5ece2;
+  --color-paper: #fffaf4;
+  --color-ink: #1b1214;
+  --color-muted: #625759;
+  --color-rule: rgba(27, 18, 20, 0.14);
+  --color-pink: #e8487e;
+  --color-marker: rgba(232, 72, 126, 0.36);
+  --color-skin: #fde3e9;
+  --color-flower: #76ddf4;
+  --color-pollen: #ffd34d;
+  --color-danger: #b3264f;
 
   --animate-fade-in: fade-in 0.35s ease both;
 
@@ -29,17 +29,20 @@
 }
 
 @theme inline {
-  --font-display: var(--font-noto-serif-sc), "Songti SC", serif;
-  --font-body: var(--font-noto-sans-sc), "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-display: var(--font-marker), "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-body: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", "Source Han Sans SC", sans-serif;
 }
 
 body {
-  background:
-    radial-gradient(900px 420px at 50% -10%, rgba(212, 163, 90, 0.08), transparent 60%),
-    radial-gradient(700px 500px at 100% 100%, rgba(61, 99, 120, 0.12), transparent 55%),
-    var(--color-ink);
-  color: var(--color-parchment);
+  background: var(--color-desk);
+  color: var(--color-ink);
   font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.7;
+}
+
+::selection {
+  background: var(--color-marker);
 }
 
 ::-webkit-scrollbar {
@@ -47,8 +50,275 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(212, 163, 90, 0.22);
+  background: rgba(27, 18, 20, 0.18);
   border-radius: 999px;
+}
+
+@layer base {
+  :focus-visible {
+    outline: 2px dashed var(--color-pink);
+    outline-offset: 3px;
+  }
+}
+
+@layer components {
+  /* 手绘墨线框：边线放在伪元素上过一遍 #ink-wobble 位移滤镜（定义在 app/layout.tsx） */
+  .sketch {
+    position: relative;
+    border-radius: 15px 12px 16px 11px;
+  }
+
+  .sketch::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border: 2px solid var(--color-ink);
+    border-radius: inherit;
+    filter: url(#ink-wobble);
+    pointer-events: none;
+  }
+
+  /* 只在宽屏画框：窄屏上抽屉和纸页都铺满屏幕，不需要边线 */
+  @media (width >= 64rem) {
+    .sketch-lg {
+      border-radius: 15px 12px 16px 11px;
+    }
+
+    .sketch-lg::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border: 2px solid var(--color-ink);
+      border-radius: inherit;
+      filter: url(#ink-wobble);
+      pointer-events: none;
+    }
+  }
+
+  .btn {
+    position: relative;
+    isolation: isolate;
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    min-height: 2.5rem;
+    padding: 0 1rem;
+    border-radius: 15px 12px 16px 11px;
+    background: var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-display);
+    font-size: 1rem;
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: translate 0.12s ease;
+  }
+
+  .btn::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border: 2px solid var(--color-ink);
+    border-radius: inherit;
+    filter: url(#ink-wobble);
+    pointer-events: none;
+  }
+
+  /* 悬停：马克笔底色从左往右涂上 */
+  .btn::after {
+    content: "";
+    position: absolute;
+    inset: 4px 3px;
+    z-index: -1;
+    border-radius: 6px;
+    background: var(--color-skin);
+    transform: scaleX(0);
+    transform-origin: left center;
+    transition: transform 0.18s cubic-bezier(0.2, 0.8, 0.3, 1);
+  }
+
+  .btn:hover::after {
+    transform: scaleX(1);
+  }
+
+  .btn:active {
+    translate: 0 2px;
+  }
+
+  .btn:active::before {
+    border-width: 3px;
+  }
+
+  .btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.4;
+    translate: none;
+  }
+
+  .btn:disabled::after {
+    display: none;
+  }
+
+  .btn-primary {
+    background: var(--color-pink);
+  }
+
+  .btn-primary::after {
+    background: rgba(255, 255, 255, 0.28);
+  }
+
+  .btn-sm {
+    min-height: 2.25rem;
+    padding: 0 0.75rem;
+    font-size: 0.875rem;
+  }
+
+  .btn-icon {
+    width: 2.5rem;
+    padding: 0;
+  }
+
+  .btn-danger {
+    color: var(--color-danger);
+  }
+
+  /* 文字按钮：只有一道马克笔下划线 */
+  .link-ink {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    color: var(--color-ink);
+    background: linear-gradient(var(--color-marker), var(--color-marker)) no-repeat 0 92% / 100% 0.35em;
+    cursor: pointer;
+    transition: background-size 0.18s ease;
+  }
+
+  .link-ink:hover {
+    background-size: 100% 0.9em;
+  }
+
+  /* 本子横线式输入：聚焦时横线变粉 */
+  .field {
+    width: 100%;
+    min-width: 0;
+    padding: 0.45rem 0.15rem;
+    border: 0;
+    border-bottom: 2px solid rgba(27, 18, 20, 0.32);
+    border-radius: 0;
+    background: transparent;
+    color: var(--color-ink);
+    font-size: 1rem;
+    line-height: 1.5;
+    outline: none;
+    transition: border-color 0.16s ease;
+  }
+
+  .field:focus,
+  .field:focus-visible {
+    border-bottom-color: var(--color-pink);
+    outline: none;
+  }
+
+  .field::placeholder {
+    color: rgba(27, 18, 20, 0.58);
+  }
+
+  .field-label {
+    display: block;
+    color: var(--color-muted);
+    font-size: 0.875rem;
+    line-height: 1.4;
+  }
+
+  /* 提问：粉色马克笔，跨行时每行各涂一道 */
+  .marker {
+    padding: 0.15em 0.35em;
+    background-image: linear-gradient(
+      100deg,
+      transparent 0,
+      var(--color-marker) 0.25em,
+      var(--color-marker) calc(100% - 0.3em),
+      transparent 100%
+    );
+    background-repeat: no-repeat;
+    background-position: 0 60%;
+    background-size: 100% 80%;
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+  }
+
+  .marker-swipe {
+    animation: marker-swipe 0.18s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+  }
+
+  .pencil-bob {
+    animation: pencil-bob 0.7s ease-in-out infinite;
+  }
+
+  .flower-draw {
+    animation: flower-draw 0.5s cubic-bezier(0.3, 1.5, 0.5, 1) both;
+  }
+
+  .pop-in {
+    animation: pop-in 0.42s cubic-bezier(0.3, 1.45, 0.5, 1) both;
+  }
+
+  /* 像笔从左往右画出来：动画结束后不留 clip-path，伸出框外的尾巴照常显示 */
+  .wipe-in {
+    animation: wipe-in 0.3s ease-out 0.28s backwards;
+  }
+
+  .rise-in {
+    animation: fade-in 0.3s ease both;
+  }
+}
+
+@keyframes marker-swipe {
+  from {
+    background-size: 0% 80%;
+  }
+}
+
+@keyframes pencil-bob {
+  0%,
+  100% {
+    translate: 0 0;
+    rotate: 0deg;
+  }
+  50% {
+    translate: 2px -2px;
+    rotate: -8deg;
+  }
+}
+
+@keyframes flower-draw {
+  from {
+    opacity: 0;
+    scale: 0.2;
+    rotate: -120deg;
+  }
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    scale: 0.6;
+  }
+  60% {
+    opacity: 1;
+    scale: 1.1;
+  }
+}
+
+@keyframes wipe-in {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
