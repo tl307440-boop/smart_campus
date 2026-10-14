@@ -17,10 +17,13 @@ COPY desk/ ./desk/
 COPY backend/desk_log.py backend/logging_config.py ./backend/
 
 USER notebook
+WORKDIR /app/desk
+# 缺了登录表单的依赖时，镜像在这里就构建失败，不会传到服务器才崩。
+RUN python -c "import app"
+
 EXPOSE 8300
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request as u, sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8300/health', timeout=3).status == 200 else 1)"
 
-WORKDIR /app/desk
 CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8300"]

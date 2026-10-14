@@ -120,12 +120,15 @@ jobs:
             dc -f docker-compose.aliyun.yml logs --tail 80 desk
             exit 1
           fi
+          # 看状态码，不在脚本里匹配中文。登录页本身就是 200。
           desk_ok=0
           for i in $(seq 1 15); do
-            if curl -fsSL --max-time 5 http://127.0.0.1/desk | grep -q "平台小本子"; then desk_ok=1; break; fi
+            code=$(curl -sS -o /dev/null -w "%{http_code}" -L --max-time 8 http://127.0.0.1/desk || true)
+            if [ "$code" = "200" ]; then desk_ok=1; break; fi
             sleep 4
           done
           if [ "$desk_ok" != 1 ]; then
+            echo "学校站点 /desk 返回 ${code:-无响应}"
             dc -f docker-compose.aliyun.yml logs --tail 40 desk web
             exit 1
           fi
