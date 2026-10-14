@@ -118,7 +118,7 @@ export default function ChatPage() {
 
                 {messages.map((message) =>
                   message.role === "assistant" && isFallbackAnswer(message.content) ? (
-                    <ErrorNote key={message.id} raw={message.content} {...noteProps} />
+                    <ErrorNote key={message.id} raw={message.content} safety={message.safety} {...noteProps} />
                   ) : (
                     <MessageBubble key={message.id} message={message} signed={message.id === signedId} showDebug={isStaff} />
                   ),

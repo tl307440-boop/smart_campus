@@ -78,7 +78,19 @@ def test_done_is_always_last_and_complete() -> None:
         "context": "",
         "sources": [],
         "emotion": {"risk_level": 1},
+        "safety": None,
     }
+
+
+def test_safety_card_from_generate_or_finalize_reaches_done() -> None:
+    card = {"level": "crisis", "hotlines": [], "school": ""}
+    for node in ("generate", "finalize"):
+        events = [
+            ("updates", {"generate": {"final_answer": "我在", "safety": card if node == "generate" else None}}),
+            ("updates", {"finalize": {"safety": card} if node == "finalize" else {}}),
+        ]
+        _, payload = parse(list(sse_from_graph_stream(events)))[-1]
+        assert payload["safety"] == card
 
 
 def test_empty_and_malformed_chunks_are_skipped() -> None:

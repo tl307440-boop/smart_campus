@@ -121,6 +121,7 @@ class Message(BaseModel):
     context: str = ""
     sources: list[dict[str, Any]] = Field(default_factory=list)
     emotion: dict[str, Any] | None = None
+    safety: dict[str, Any] | None = None
 
 
 class MemoryResponse(BaseModel):
@@ -267,6 +268,7 @@ def get_messages(thread_id: str, user: CurrentUserDep) -> list[Message]:
             context=item.get("context", "") or "",
             sources=item.get("sources") or [],
             emotion=item.get("emotion"),
+            safety=item.get("safety"),
         )
         for item in stored
         if item.get("role") in ("user", "assistant") and item.get("content")

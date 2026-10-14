@@ -25,6 +25,7 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]]) -> Iterator[str]:
     sources: list[dict[str, Any]] = []
     answer = ""
     emotion: dict[str, Any] | None = None
+    safety: dict[str, Any] | None = None
     generating_announced = False
 
     for mode, chunk in events:
@@ -59,6 +60,9 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]]) -> Iterator[str]:
                 answer = patch.get("final_answer", "") or ""
             elif node == "emotion":
                 emotion = patch.get("emotion_data")
+            # 求助卡片：高危关键词在 generate 给出，情绪分析判出高风险时在 finalize 补上
+            if node in ("generate", "finalize") and patch.get("safety"):
+                safety = patch["safety"]
 
     yield sse(
         "done",
@@ -68,5 +72,6 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]]) -> Iterator[str]:
             "context": context,
             "sources": sources,
             "emotion": emotion,
+            "safety": safety,
         },
     )

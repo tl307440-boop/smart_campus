@@ -30,6 +30,13 @@ export interface ChatSource {
   rerank_score: number | null;
 }
 
+/** 与后端 comfort.safety_card 一一对应 */
+export interface SafetyCardData {
+  level: "crisis";
+  hotlines: { name: string; phone: string }[];
+  school: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: Role;
@@ -37,6 +44,7 @@ export interface ChatMessage {
   context?: string;
   sources?: ChatSource[];
   emotion?: EmotionData | null;
+  safety?: SafetyCardData | null;
 }
 
 export interface MemoryNote {
@@ -62,6 +70,7 @@ export interface ChatDone {
   context: string;
   sources: ChatSource[];
   emotion: EmotionData | null;
+  safety: SafetyCardData | null;
 }
 
 export interface ChatStatus {

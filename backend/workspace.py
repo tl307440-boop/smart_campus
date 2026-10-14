@@ -34,6 +34,8 @@ class WorkspaceSettings:
     query_only: bool = False
     similarity_threshold: float = 0.0
     top_k: int = 3
+    # 学校心理咨询的联系方式，出现在求助卡片和陪伴回复里；空串表示只给全国热线
+    counseling_contact: str = ""
 
 
 @dataclass(frozen=True)
@@ -119,19 +121,20 @@ def workspace_settings(tenant_id: str) -> WorkspaceSettings:
 
     def load() -> WorkspaceSettings:
         row = _fetch_one(
-            'SELECT "assistantName", "persona", "queryOnly", "similarityThreshold", "topK" '
+            'SELECT "assistantName", "persona", "queryOnly", "similarityThreshold", "topK", "counselingContact" '
             'FROM tenant_settings WHERE "tenantId" = %s',
             (tenant_id,),
         )
         if row is None:
             return DEFAULT_SETTINGS
-        name, persona, query_only, threshold, top_k = row
+        name, persona, query_only, threshold, top_k, counseling = row
         return WorkspaceSettings(
             assistant_name=(name or DEFAULT_SETTINGS.assistant_name).strip(),
             persona=(persona or "").strip(),
             query_only=bool(query_only),
             similarity_threshold=_clamp(float(threshold or 0.0), 0.0, 1.0),
             top_k=int(_clamp(int(top_k or DEFAULT_SETTINGS.top_k), 1, 10)),
+            counseling_contact=(counseling or "").strip(),
         )
 
     return _cached("settings", tenant_id, load, DEFAULT_SETTINGS)

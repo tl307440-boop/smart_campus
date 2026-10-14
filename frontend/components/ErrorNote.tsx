@@ -1,3 +1,5 @@
+import { SafetyCard } from "@/components/SafetyCard";
+import type { SafetyCardData } from "@/lib/api";
 import { describeFailure, failedModelSource } from "@/lib/friendly-error";
 
 interface Props {
@@ -9,6 +11,8 @@ interface Props {
   /** 管理员：能去「AI 服务」页改学校的模型配置 */
   canConfigure?: boolean;
   onOpenService?: () => void;
+  /** 这一轮回答没出来，但情绪分析判出了高风险：求助卡片照样要给 */
+  safety?: SafetyCardData | null;
 }
 
 const DEBUG_HINT = {
@@ -19,7 +23,7 @@ const DEBUG_HINT = {
 } as const;
 
 /** 出错时的小纸条：学生只看到发生了什么、该找谁；原文折在「技术细节」里且只给管理员。 */
-export function ErrorNote({ raw, embedded = false, canDebug = false, canConfigure = false, onOpenService }: Props) {
+export function ErrorNote({ raw, embedded = false, canDebug = false, canConfigure = false, onOpenService, safety }: Props) {
   const failure = describeFailure(raw, embedded);
   const source = failure.kind === "service" ? failedModelSource(raw) : null;
   // 报错里带着「（个人密钥）」：确实是本人自带的那把出了问题，不是学校的
@@ -53,6 +57,7 @@ export function ErrorNote({ raw, embedded = false, canDebug = false, canConfigur
             </pre>
           </details>
         )}
+        {safety && <SafetyCard card={safety} />}
       </div>
     </div>
   );

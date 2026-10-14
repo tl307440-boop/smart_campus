@@ -49,6 +49,8 @@ model TenantSettings {
   similarityThreshold Float    @default(0)
   /// 每次回答引用的片段数
   topK                Int      @default(3)
+  /// 学校心理咨询的联系方式（电话、地点、时间），出现在求助卡片里；空串表示只给全国热线
+  counselingContact   String   @default("")
   updatedAt           DateTime @updatedAt
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)

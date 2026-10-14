@@ -51,6 +51,7 @@ from langgraph.graph import END, START, StateGraph
 # 将 backend 目录加入 Python 路径，确保 import 能找到同级模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import comfort
 import memory_store
 from ai_config import ModelEndpoint, chat_endpoint, client_for, reader_endpoint, scrub
 from env_config import chroma_persist_dir, load_backend_env
@@ -129,6 +130,9 @@ class GraphState(TypedDict):
     # ---- 情感分析结果（后续扩展）----
     emotion_data: dict[str, Any] | None
 
+    # ---- 本轮的求助卡片（comfort.safety_card），没有则为 None ----
+    safety: dict[str, Any] | None
+
 
 # ============================================================
 # 第三步：懒加载服务实例（首次使用时才初始化，避免 import 时网络/SSL 报错）
@@ -173,6 +177,7 @@ def _append_turn_messages(
     final_answer: str,
     context: str = "",
     sources: list[dict[str, Any]] | None = None,
+    safety: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """将本轮 user/assistant 写入 messages；assistant 附带 context/sources 便于 UI 恢复。
 
@@ -181,12 +186,15 @@ def _append_turn_messages(
     """
     updated_messages = list(state.get("messages", []))
     updated_messages.append({"role": "user", "content": question})
-    updated_messages.append({
+    assistant: dict[str, Any] = {
         "role": "assistant",
         "content": final_answer,
         "context": context or "",
         "sources": sources or [],
-    })
+    }
+    if safety:
+        assistant["safety"] = safety
+    updated_messages.append(assistant)
     return updated_messages[-(MAX_STORED_TURNS * 2):]
 
 
@@ -336,6 +344,11 @@ def intent_node(state: GraphState) -> dict:
     logger.info(f"\n{'='*50}")
     logger.info(f"[意图判定] 当前问题: \"{question}\"")
 
+    # --- 高危表达：不等模型，直接走陪伴 + 求助卡片 ---
+    if comfort.is_crisis(question):
+        logger.warning("[意图判定] 命中高危表达，走危机陪伴")
+        return {"intent": "CRISIS"}
+
     # --- 使用 DeepSeek 做极速意图分类 ---
     # 非流式调用（不带 stream=True），直接获取完整响应，速度快
     system_prompt = """
@@ -343,9 +356,11 @@ def intent_node(state: GraphState) -> dict:
 
 1. 如果问题涉及【校园教务、规章制度、奖学金、学籍管理、学生手册、课程安排、考试规定、宿舍管理、图书馆规则】等需要查阅学校资料才能准确回答的内容，返回：RAG
 
-2. 如果问题是【日常闲聊、打招呼、自我介绍、通用知识、情感倾诉】等不需要查阅学校资料就能回答的内容，返回：DIRECT
+2. 如果用户在【倾诉情绪、诉说压力或烦恼、心情低落、人际或感情困扰】，想被倾听和安慰，返回：COMFORT
 
-只返回一个词：RAG 或 DIRECT。不要返回任何其他内容。
+3. 如果问题是【日常闲聊、打招呼、自我介绍、通用知识】等不需要查阅学校资料就能回答的内容，返回：DIRECT
+
+只返回一个词：RAG、COMFORT 或 DIRECT。不要返回任何其他内容。
 """
 
     endpoint = None if get_deepseek().use_mock else _chat_endpoint(state)
@@ -363,8 +378,11 @@ def intent_node(state: GraphState) -> dict:
             "教务", "招生", "录取", "报到", "注册", "校历", "放假", "开学",
             "国家奖学金", "国家励志奖学金", "助学贷款", "勤工助学",
         ]
-        # 如果问题中包含任何教务关键词，走 RAG 路径
-        intent = "RAG" if any(kw in question for kw in rag_keywords) else "DIRECT"
+        # 带明显情绪词先当倾诉；再看教务关键词
+        if comfort.looks_like_venting(question):
+            intent = "COMFORT"
+        else:
+            intent = "RAG" if any(kw in question for kw in rag_keywords) else "DIRECT"
 
     else:
         # --- 真实 API 模式：调用对话模型做意图分类 ---
@@ -379,12 +397,12 @@ def intent_node(state: GraphState) -> dict:
                 max_tokens=10,    # 只需一个词，限制 token 消耗
             )
             raw_result = response.choices[0].message.content.strip().upper()
-            intent = "RAG" if "RAG" in raw_result else "DIRECT"
+            intent = "RAG" if "RAG" in raw_result else "COMFORT" if "COMFORT" in raw_result else "DIRECT"
 
         except Exception as e:
-            # API 调用失败时，默认走 RAG 路径（保守策略）
-            logger.error(f"[意图判定]（{endpoint.label}）API 调用失败: {scrub(str(e), endpoint)}，默认走 RAG 路径")
-            intent = "RAG"
+            # API 调用失败时，默认走 RAG 路径（保守策略）；明显在倾诉的除外
+            intent = "COMFORT" if comfort.looks_like_venting(question) else "RAG"
+            logger.error(f"[意图判定]（{endpoint.label}）API 调用失败: {scrub(str(e), endpoint)}，按 {intent} 处理")
 
     logger.info(f"[意图判定] 判定意图为: {intent}")
 
@@ -408,8 +426,10 @@ def route_query(state: GraphState) -> str:
     """
     intent = state.get("intent", "RAG")
 
-    # 「只按资料回答」的学校不走闲聊：一律先检索，查不到就拒答
-    if intent == "RAG" or _settings(state).query_only:
+    # 高危表达任何设置下都直接回应；「只按资料回答」的学校不走闲聊和倾诉：一律先检索，查不到就拒答
+    if intent == "CRISIS":
+        target = "generate"
+    elif intent == "RAG" or _settings(state).query_only:
         target = "retrieve"
     else:
         target = "generate"
@@ -493,6 +513,48 @@ def retrieve_node(state: GraphState) -> dict:
 
 
 def generate_node(state: GraphState) -> dict:
+    """【生成节点】见 _generate。state 存在 Redis 里，每轮都写一次 safety，上一轮的求助卡片才不会留到这一轮。"""
+    out = _generate(state)
+    out.setdefault("safety", None)
+    return out
+
+
+def _comfort_answer(state: GraphState, question: str, settings: WorkspaceSettings, memories: list[str], crisis: bool) -> dict:
+    """倾诉与高危两种情况：用陪伴提示词带上历史多轮回应。高危时一定附求助卡片，模型不可用也给固定回复。"""
+    emit = _delta_emitter()
+    contact = settings.counseling_contact
+    card = comfort.safety_card(contact) if crisis else None
+    endpoint = None if get_deepseek().use_mock else _chat_endpoint(state)
+    final_answer = ""
+    if get_deepseek().use_mock and not crisis:
+        final_answer = f"【{settings.assistant_name}】（模拟回复）听起来你最近不太好受，愿意和我多说说吗？"
+        emit(final_answer)
+    if endpoint is not None:
+        system_prompt = comfort.comfort_prompt(settings.assistant_name, crisis, contact) + prompt_extras(settings.persona, memories)
+        api_messages = (
+            [{"role": "system", "content": system_prompt}]
+            + recent_history(state.get("messages", []), MAX_PROMPT_TURNS)
+            + [{"role": "user", "content": question}]
+        )
+        parts: list[str] = []
+        try:
+            for piece in get_deepseek().stream_chat(api_messages, endpoint, temperature=0.7):
+                parts.append(piece)
+                emit(piece)
+            final_answer = "".join(parts)
+        except Exception as e:
+            logger.error(f"[陪伴]（{endpoint.label}）回复失败: {scrub(str(e), endpoint)}")
+            # 高危时不把报错甩给学生，下面换成固定回复
+            final_answer = "" if crisis else f"{FAILED_PREFIX}（{endpoint.label}）{scrub(str(e), endpoint)}"
+    if not final_answer.strip():
+        final_answer = comfort.crisis_fallback(contact) if crisis else NOT_CONFIGURED
+        emit(final_answer)
+    logger.info(f"[生成节点] {'危机' if crisis else '倾诉'}陪伴完成，长度: {len(final_answer)} 字")
+    updated_messages = _append_turn_messages(state, question, final_answer, safety=card)
+    return {"final_answer": final_answer, "messages": updated_messages, "safety": card}
+
+
+def _generate(state: GraphState) -> dict:
     """
     【生成节点】- 调用 DeepSeek 大模型生成最终回答。
 
@@ -528,6 +590,9 @@ def generate_node(state: GraphState) -> dict:
     memories = _user_memories(state, question)
 
     logger.info(f"[生成节点] 意图={intent}，上下文长度={len(context)} 字，记忆 {len(memories)} 条")
+
+    if intent == "CRISIS" or (intent == "COMFORT" and not settings.query_only):
+        return _comfort_answer(state, question, settings, memories, crisis=intent == "CRISIS")
 
     emit = _delta_emitter()
 
@@ -625,7 +690,12 @@ def emotion_node(state: GraphState) -> dict:
     """
     question = state.get("user_question", "")
     logger.info(f"[情感节点] 分析用户问题: \"{question[:40]}\"")
-    emotion = get_deepseek().analyze_emotion_and_reply(question, endpoint=_chat_endpoint(state))
+    try:
+        emotion = get_deepseek().analyze_emotion_and_reply(question, endpoint=_chat_endpoint(state))
+    except Exception as e:
+        # 这条分支出错不能拖垮整轮：危机回复和求助卡片都要等它跑完
+        logger.error(f"[情感节点] 分析失败，本轮不挂情绪: {e}")
+        return {"emotion_data": None}
     if isinstance(emotion, dict):
         emotion = dict(emotion)
         facts = emotion.pop("memory_facts", None)
@@ -662,8 +732,14 @@ def finalize_node(state: GraphState) -> dict:
 
     last = dict(messages[-1])
     last["emotion"] = emotion_data
+    patch: dict[str, Any] = {}
+    # 关键词没拦到、但情绪分析判出高风险：补一张求助卡片
+    if not last.get("safety") and comfort.model_flags_risk(emotion_data):
+        logger.warning("[收尾] 情绪分析判为高风险，补发求助卡片")
+        last["safety"] = patch["safety"] = comfort.safety_card(_settings(state).counseling_contact)
     messages[-1] = last
-    return {"messages": messages}
+    patch["messages"] = messages
+    return patch
 
 
 # ============================================================
@@ -706,8 +782,8 @@ def build_graph():
         }
     )
     graph.add_edge("retrieve", "generate")
-    graph.add_edge("generate", "finalize")
-    graph.add_edge("emotion", "finalize")
+    # 两条分支都到齐才收尾；分开写两条边的话，先完成的那条就会单独触发 finalize
+    graph.add_edge(["generate", "emotion"], "finalize")
     graph.add_edge("finalize", END)
 
     checkpointer = get_checkpointer()

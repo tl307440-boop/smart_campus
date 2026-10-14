@@ -56,7 +56,7 @@ export function EmbedChat({ assistantName, tenantName }: Props) {
               )}
               {messages.map((message) =>
                 message.role === "assistant" && isFallbackAnswer(message.content) ? (
-                  <ErrorNote key={message.id} raw={message.content} embedded />
+                  <ErrorNote key={message.id} raw={message.content} safety={message.safety} embedded />
                 ) : (
                   <MessageBubble key={message.id} message={message} signed={message.id === signedId} />
                 ),

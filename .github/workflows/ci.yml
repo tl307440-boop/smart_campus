@@ -58,7 +58,7 @@ jobs:
         run: >-
           ../.venv/bin/pytest test_abc_regressions.py test_knowledge_scope.py
           test_memory_store.py test_workspace.py test_web_import.py test_api_features.py
-          test_ai_config.py -q
+          test_ai_config.py test_comfort.py -q
 
   lock:
     name: 依赖锁文件

@@ -5,6 +5,7 @@ import type { ValidationResult } from "@/lib/auth/schema";
 
 export const ASSISTANT_NAME_MAX = 16;
 export const PERSONA_MAX = 800;
+export const COUNSELING_CONTACT_MAX = 200;
 export const TOP_K_RANGE = [1, 10] as const;
 export const EMBED_NAME_MAX = 40;
 export const MAX_ALLOWED_ORIGINS = 10;
@@ -16,6 +17,8 @@ export interface WorkspaceSettingsInput {
   queryOnly: boolean;
   similarityThreshold: number;
   topK: number;
+  /** 学校心理咨询的电话、地点、时间，出现在求助卡片里 */
+  counselingContact: string;
 }
 
 export interface EmbedInput {
@@ -35,6 +38,7 @@ export function parseWorkspaceSettings(body: unknown): ValidationResult<Workspac
 
   const assistantName = typeof source.assistantName === "string" ? source.assistantName.trim() : "";
   const persona = typeof source.persona === "string" ? source.persona.trim() : "";
+  const counselingContact = typeof source.counselingContact === "string" ? source.counselingContact.trim() : "";
   const threshold = Number(source.similarityThreshold);
   const topK = Number(source.topK);
 
@@ -43,6 +47,9 @@ export function parseWorkspaceSettings(body: unknown): ValidationResult<Workspac
   }
   if (persona.length > PERSONA_MAX) {
     return { ok: false, message: `人设说明不超过 ${PERSONA_MAX} 字` };
+  }
+  if (counselingContact.length > COUNSELING_CONTACT_MAX) {
+    return { ok: false, message: `心理咨询联系方式不超过 ${COUNSELING_CONTACT_MAX} 字` };
   }
   if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
     return { ok: false, message: "相似度阈值应在 0 到 1 之间" };
@@ -58,6 +65,7 @@ export function parseWorkspaceSettings(body: unknown): ValidationResult<Workspac
       queryOnly: source.queryOnly === true,
       similarityThreshold: threshold,
       topK,
+      counselingContact,
     },
   };
 }

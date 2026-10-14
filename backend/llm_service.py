@@ -55,7 +55,8 @@ class DeepSeekService:
         请分析学生的输入，并返回严格正确的JSON格式数据，包含以下字段：
         1. core_emotion (核心情绪): 如焦虑、兴奋、迷茫等
         2. stress_source(压力源): 如学业、情感、就业等
-        3. risk_level (风险等级): 1-10的整数
+        3. risk_level (风险等级): 1-10的整数。日常烦恼、学业压力一般在 1-6；
+           只有流露出伤害自己、轻生或伤害他人的念头时才给 8 及以上（会触发求助提示）
         4. reply_text (回复内容): 温暖、共情、引导性的回复等
         5. memory_facts (值得长期记住的事): 字符串数组，只收学生明确说出的、关于自己的
            稳定事实（姓名、学院、专业、年级、长期偏好等），每条不超过 30 字；
@@ -96,7 +97,7 @@ class DeepSeekService:
         except OpenAIError as e:
             logger.error(f"[情感分析]（{resolved.label}）API 请求失败：{scrub(str(e), resolved)}")
             return {"error": scrub(str(e), resolved)}
-        except json.JSONDecodeError as er:
+        except (json.JSONDecodeError, TypeError) as er:
             logger.info("模型未返回合法的JSON格式")
             return {"error": str(er)}
 

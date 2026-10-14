@@ -1,4 +1,5 @@
 import { Flower } from "@/components/DeskPet";
+import { SafetyCard } from "@/components/SafetyCard";
 import { PaperclipIcon, PencilIcon } from "@/components/SketchIcons";
 import type { ChatMessage, ChatSource } from "@/lib/api";
 
@@ -91,6 +92,8 @@ export function MessageBubble({ message, streaming = false, signed = false, show
         {streaming && <PencilIcon size={18} className="pencil-bob ml-1 inline-block align-[-3px] text-pink" />}
         {signed && <Flower size={20} className="flower-draw ml-1.5 inline-block align-[-4px]" />}
       </p>
+
+      {message.safety && <SafetyCard card={message.safety} />}
 
       {sources.length > 0 && <SourceSlips sources={sources} />}
 
