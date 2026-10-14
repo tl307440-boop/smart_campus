@@ -28,6 +28,9 @@ NOTICE_CHARS = 4000
 AMAP = "https://restapi.amap.com"
 BOCHA = "https://api.bochaai.com/v1/web-search"
 URI_SRC = "smartcampus"
+NEARBY_M = 3000
+# 「瑞幸咖啡(武汉文理学院店)」这类校内小店不算校内地点
+_SHOP = re.compile(r"店\)?$")
 AMAP_RETRIES = 2
 AMAP_RETRY_WAIT = 0.5
 _AMAP_BUSY = frozenset({"CUQPS_HAS_EXCEEDED_THE_LIMIT", "CKQPS_HAS_EXCEEDED_THE_LIMIT", "CQPS_HAS_EXCEEDED_THE_LIMIT", "ACCESS_TOO_FREQUENT"})
@@ -214,17 +217,83 @@ def _campus(api_key: str, school: str) -> Place | None:
     return _place(pois[0]) if pois else None
 
 
+def _tips(api_key: str, campus: Place, keywords: str) -> list[Place]:
+    """输入提示：收录了周边搜索漏掉的校门、楼栋。只留学校附近、带坐标的。"""
+    tips = _amap(api_key, "/v3/assistant/inputtips", {"keywords": keywords, "location": f"{campus.lng},{campus.lat}"}).get("tips") or []
+    places = []
+    for tip in tips:
+        location = tip.get("location")
+        if not isinstance(location, str) or "," not in location:
+            continue
+        place = _place({"name": tip.get("name", ""), "address": tip.get("address"), "location": location})
+        if _distance_m(campus, place) <= NEARBY_M:
+            places.append(place)
+    return places
+
+
 def find_places(api_key: str, school: str, keyword: str, limit: int = 5) -> list[Place]:
     """在学校附近 3 公里内找地点；找不到学校本身时退回全国搜「学校名 + 地点」。"""
     campus = _campus(api_key, school) if school else None
-    if campus:
+    if not campus:
+        pois = _amap(api_key, "/v5/place/text", {"keywords": f"{school} {keyword}".strip(), "page_size": str(limit)}).get("pois") or []
+        return [_place(p) for p in pois]
+    keyword = keyword.removeprefix(school).strip() or keyword
+    places = [_place(p) for p in _amap(
+        api_key, "/v5/place/around",
+        {"keywords": keyword, "location": f"{campus.lng},{campus.lat}", "radius": str(NEARBY_M), "page_size": str(limit)},
+    ).get("pois") or []]
+    matched = [p for p in places if name_matches(keyword, p)]
+    if not matched:
+        # 周边搜索不收「通行设施」：东门、北门这类只在输入提示里有；名字里没有这个词的提示多半不相干
+        matched = [p for p in _tips(api_key, campus, f"{school}{keyword}") if name_matches(keyword, p)]
+    # 名字对得上的优先；都对不上（问「医院」得到「卫生服务站」）就照周边搜索的结果给
+    return (matched or places)[:limit]
+
+
+def _plain(text: str) -> str:
+    return re.sub(r"[\s()（）·\-]", "", text)
+
+
+def name_matches(keyword: str, place: Place, school: str = "") -> bool:
+    """「高车地铁站」对得上「高车(地铁站)」，「武汉文理学院东门」对得上「武汉文理学院(东门)」。"""
+    return _plain(keyword.removeprefix(school).strip() or keyword) in _plain(place.name)
+
+
+def short_name(place: Place, school: str) -> str:
+    """「武汉文理学院(东门)」→「东门」，「武汉文理学院和澄苑」→「和澄苑」。"""
+    rest = place.name.removeprefix(school).lstrip("-· ")
+    if re.fullmatch(r"[(（][^()（）]+[)）]", rest):
+        rest = rest[1:-1]
+    return rest or place.name
+
+
+def campus_places(api_key: str, school: str) -> list[Place]:
+    """学校在地图上标注过的校内地点（楼、宿舍、食堂、校门等），去掉校内小店。"""
+    return list(_campus_places(api_key, school)) if school else []
+
+
+@lru_cache(maxsize=16)
+def _campus_places(api_key: str, school: str) -> tuple[Place, ...]:
+    campus = _campus(api_key, school)
+    if not campus:
+        return ()
+    found: list[Place] = []
+    for page in ("1", "2"):
         pois = _amap(
             api_key, "/v5/place/around",
-            {"keywords": keyword, "location": f"{campus.lng},{campus.lat}", "radius": "3000", "page_size": str(limit)},
+            {"keywords": school, "location": f"{campus.lng},{campus.lat}", "radius": "1500", "page_size": "25", "page_num": page},
         ).get("pois") or []
-    else:
-        pois = _amap(api_key, "/v5/place/text", {"keywords": f"{school} {keyword}".strip(), "page_size": str(limit)}).get("pois") or []
-    return [_place(p) for p in pois]
+        found += [_place(p) for p in pois]
+        if len(pois) < 25:
+            break
+    found += [p for p in _tips(api_key, campus, f"{school}门") if "门" in p.name]
+    seen: set[str] = set()
+    places = []
+    for p in found:
+        if p.name.startswith(school) and p.name != school and not _SHOP.search(p.name) and p.name not in seen:
+            seen.add(p.name)
+            places.append(p)
+    return tuple(places)
 
 
 def _distance_m(a: Place, b: Place) -> int:
@@ -235,9 +304,13 @@ def _distance_m(a: Place, b: Place) -> int:
 
 
 def walking_route(api_key: str, school: str, origin: str, destination: str) -> dict[str, Any]:
-    starts, ends = find_places(api_key, school, origin, 1), find_places(api_key, school, destination, 1)
+    # 名字对不上的「相近结果」不能拿来导航，会把人带到不相干的地方
+    starts = [p for p in find_places(api_key, school, origin, 3) if name_matches(origin, p, school)][:1]
+    ends = [p for p in find_places(api_key, school, destination, 3) if name_matches(destination, p, school)][:1]
     if not starts or not ends:
-        raise ToolError(f"地图上没有标注「{origin if not starts else destination}」，校内地点请以学校资料为准")
+        known = "、".join(short_name(p, school) for p in campus_places(api_key, school)[:20])
+        hint = f"。地图上标注过的校内地点有：{known}" if known else ""
+        raise ToolError(f"地图上没有标注「{origin if not starts else destination}」，校内地点请以学校资料为准{hint}")
     start, end = starts[0], ends[0]
     if _distance_m(start, end) > 20000:
         raise ToolError("两地相距太远，不适合步行")
