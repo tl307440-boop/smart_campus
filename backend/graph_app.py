@@ -54,14 +54,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agent
 import comfort
 import memory_store
-from ai_config import ModelEndpoint, chat_endpoint, client_for, reader_endpoint, scrub
-from env_config import chroma_persist_dir, load_backend_env
+from ai_config import ModelEndpoint, chat_endpoint, client_for, embedding_spec, reader_endpoint, scrub
+from env_config import load_backend_env
 from kimi_extract_service import KimiExtractService
 from knowledge import KIMI_CORPUS_BUDGET
 from llm_service import FAILED_PREFIX, NOT_CONFIGURED, DeepSeekService, prompt_extras
 from logging_config import get_logger
 from tenancy import GLOBAL_TENANT
-from vector_service import VectorRAGService
+from vector_service import VectorRAGService, open_store
 from workspace import WorkspaceSettings, workspace_settings
 
 logger = get_logger(__name__)
@@ -143,7 +143,6 @@ class GraphState(TypedDict):
 
 _deepseek_brain = None
 _kimi_eye = None
-_vector_db = None
 _checkpointer = None
 _compiled_graph = None
 
@@ -285,16 +284,21 @@ def get_kimi() -> KimiExtractService:
     return _kimi_eye
 
 
-def get_vector_db() -> VectorRAGService:
-    """获取 VectorDB 服务单例（首次调用时创建，失败则返回 None）"""
-    global _vector_db
-    if _vector_db is None:
-        try:
-            _vector_db = VectorRAGService(persist_directory=chroma_persist_dir())
-        except Exception as e:
-            logger.error(f"[VectorDB] 初始化失败: {e}")
-            return None
-    return _vector_db
+def get_vector_db(tenant_id: str | None = None) -> VectorRAGService | None:
+    """按这所学校选的向量模型打开向量库。失败返回 None，下次还能再试。"""
+    if not tenant_id:
+        return None
+    spec = embedding_spec(tenant_id)
+    if spec is None:
+        return None
+    return open_store(spec)
+
+
+def _prepare_index(tenant_id: str) -> None:
+    """检索前把该校可见文档写进它的向量库。列表页会在后台做同一件事。"""
+    from knowledge import knowledge_base
+
+    knowledge_base.ensure_indexed(tenant_id)
 
 
 def get_checkpointer() -> RedisSaver:
@@ -498,9 +502,9 @@ def retrieve_node(state: GraphState) -> dict:
                 sources = _corpus_sources(doc_content)
         if not context:
             # --- 向量数据库路径 ---
-            # 使用智谱 embedding-3 向量化问题，在 ChromaDB 中检索最相似的片段
             logger.info("[检索节点] 走向量数据库检索路径 (ChromaDB)")
-            vdb = get_vector_db()
+            _prepare_index(tenant_id)
+            vdb = get_vector_db(tenant_id)
             if vdb is not None:
                 chunks = vdb.search_chunks(
                     question,
@@ -577,7 +581,8 @@ def _agent_answer(state: GraphState, question: str, settings: WorkspaceSettings,
         emit(text)
 
     def search(query: str) -> tuple[str, list[dict[str, Any]]]:
-        vdb = get_vector_db()
+        _prepare_index(tenant_id)
+        vdb = get_vector_db(tenant_id)
         if vdb is None or not query:
             return "", []
         chunks = vdb.search_chunks(query, tenant_id, top_k=settings.top_k, min_score=settings.similarity_threshold)

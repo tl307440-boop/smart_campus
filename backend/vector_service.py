@@ -1,5 +1,6 @@
 import hashlib
 import os
+import threading
 import uuid
 from dataclasses import dataclass, field
 
@@ -120,32 +121,76 @@ class BatchedZhipuEmbeddings:
         return self.inner.embed_query(text)
 
 
+def build_embeddings(spec):
+    """只接智谱。开源模型只预留了名字，这里拒绝加载，避免把 PyTorch 拉进 2G 内存的机器。"""
+    if spec.provider != "zhipu":
+        raise RuntimeError("开源向量模型只预留了位置，尚未接入，不会在服务器上加载")
+    return BatchedZhipuEmbeddings(model=spec.model or "embedding-3", api_key=spec.api_key, batch_size=64)
+
+
+_stores: dict[str, "VectorRAGService"] = {}
+_store_lock = threading.Lock()
+
+
+def peek_store(collection_name: str) -> "VectorRAGService | None":
+    """已经加载过的向量库；没加载就返回 None，避免为了看一眼状态去下载模型。"""
+    return _stores.get(collection_name)
+
+
+def open_store(spec) -> "VectorRAGService | None":
+    """按模型打开向量库。同一种模型进程内只加载一次。失败不缓存，下次还能再试。"""
+    name = spec.collection_name
+    with _store_lock:
+        existing = _stores.get(name)
+    if existing is not None:
+        return existing
+    try:
+        store = VectorRAGService(
+            persist_directory=_persist_dir(),
+            embeddings=build_embeddings(spec),
+            collection_name=name,
+        )
+    except Exception as exc:
+        logger.error(f"[VectorDB] 打开 {spec.provider}:{spec.model} 失败: {exc}")
+        return None
+    with _store_lock:
+        return _stores.setdefault(name, store)
+
+
+def _persist_dir() -> str:
+    from env_config import chroma_persist_dir
+
+    return chroma_persist_dir()
+
+
 class VectorRAGService:
     """
-    方案 B：传统 RAG 引擎 (基于智谱AI + ChromaDB)
+    方案 B：传统 RAG 引擎 (ChromaDB + 智谱 embedding-3)
     适用场景：超大文档库 (>20万字)、全校校规合集等。
     原理：切片 -> 向量化 -> 检索 Top-K 片段。
     """
-    def __init__(self, persist_directory="chroma_db"):
+    def __init__(self, persist_directory="chroma_db", embeddings=None, collection_name: str = "campus_knowledge"):
         load_backend_env()
 
-        # 初始化智谱AI向量模型
-        logger.info(" [VectorDB] 正在初始化智谱AI向量模型...")
-        try:
-            self.embedding_model = BatchedZhipuEmbeddings(
-                model="embedding-3",
-                api_key=os.getenv("zhi_pu_API_KEY"),
-                batch_size=64
-            )
-            logger.info("[VectorDB] 智谱AI向量模型加载成功！")
-        except Exception as e:
-            logger.error(f"[VectorDB] 连接智谱AI失败: {e}")
-            raise
-        
-        # 初始化持久化向量数据库
+        if embeddings is not None:
+            self.embedding_model = embeddings
+        else:
+            # 旧的 Streamlit 入口没传模型，仍走智谱
+            logger.info(" [VectorDB] 正在初始化智谱AI向量模型...")
+            try:
+                self.embedding_model = BatchedZhipuEmbeddings(
+                    model="embedding-3",
+                    api_key=os.getenv("zhi_pu_API_KEY"),
+                    batch_size=64
+                )
+                logger.info("[VectorDB] 智谱AI向量模型加载成功！")
+            except Exception as e:
+                logger.error(f"[VectorDB] 连接智谱AI失败: {e}")
+                raise
+
         self.client = chromadb.PersistentClient(path=persist_directory)
         self.collection = self.client.get_or_create_collection(
-            name="campus_knowledge",
+            name=collection_name,
             metadata={"hnsw:space": "cosine"}  # 使用余弦相似度，适合文本向量检索
         )
 

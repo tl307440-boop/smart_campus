@@ -168,7 +168,8 @@ def test_retrieve_applies_threshold_and_returns_sources(monkeypatch: pytest.Monk
     chunk = RetrievedChunk("门禁 22 点", {"source": "手册.pdf", "rerank_score": 0.9}, vector_score=0.8)
     vdb.search_chunks.return_value = [chunk]
     vdb.format_context.return_value = "门禁 22 点\n(来源: 手册.pdf)"
-    monkeypatch.setattr(graph_app, "get_vector_db", lambda: vdb)
+    monkeypatch.setattr(graph_app, "get_vector_db", lambda *_args, **_kwargs: vdb)
+    monkeypatch.setattr(graph_app, "_prepare_index", lambda tenant_id: None)
 
     out = graph_app.retrieve_node(
         {"user_question": "门禁", "route_strategy": "vectordb", "tenant_id": "t1"}

@@ -74,6 +74,7 @@ def test_school_ai_decrypts_row_and_drops_bad_ciphertext(monkeypatch: pytest.Mon
             " https://api.x.com/v1 ", "m1", good, "", "", "v1.broken",
             map_key, "", "zhengfang", "https://cas.x.edu.cn:90/cas/", " https://jw.x.edu.cn/jwglxt ",
             "https://www.x.edu.cn/a.htm\n\n https://jwc.x.edu.cn/b.htm ",
+            "local", "BAAI/bge-small-zh-v1.5", "", secret_box.encrypt("embed-key"),
         ),
     )
     school = workspace.school_ai("t1")
@@ -82,6 +83,7 @@ def test_school_ai_decrypts_row_and_drops_bad_ciphertext(monkeypatch: pytest.Mon
         map_key="amap-key", jw_mode="zhengfang",
         jw_cas_url="https://cas.x.edu.cn:90/cas", jw_base_url="https://jw.x.edu.cn/jwglxt",
         news_urls=("https://www.x.edu.cn/a.htm", "https://jwc.x.edu.cn/b.htm"),
+        embedding_provider="local", embedding_model="BAAI/bge-small-zh-v1.5", embedding_key="embed-key",
     )
 
 
@@ -189,7 +191,8 @@ def test_reader_without_model_falls_back_to_vector_search(monkeypatch: pytest.Mo
     vdb = MagicMock()
     vdb.search_chunks.return_value = []
     vdb.format_context.return_value = "向量片段"
-    monkeypatch.setattr(graph_app, "get_vector_db", lambda: vdb)
+    monkeypatch.setattr(graph_app, "get_vector_db", lambda *_args, **_kwargs: vdb)
+    monkeypatch.setattr(graph_app, "_prepare_index", lambda tenant_id: None)
 
     out = graph_app.retrieve_node({
         "user_question": "门禁", "route_strategy": "auto",
@@ -252,8 +255,34 @@ def test_status_reports_sources_without_keys(monkeypatch: pytest.MonkeyPatch) ->
 
     assert body["chat"] == {"configured": True, "source": "school", "model": "qwen-plus"}
     assert body["reader"] == {"configured": False, "source": None, "model": ""}
-    assert body["embedding"]["configured"] is True
+    assert body["embedding"] == {"configured": True, "source": "platform", "model": "embedding-3"}
     assert "sk-school" not in str(body)
+
+
+def test_embedding_without_zhipu_key_stays_off() -> None:
+    assert ai_config.embedding_spec("t1") is None
+
+
+def test_placeholder_zhipu_key_does_not_enable_embedding(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("zhi_pu_API_KEY", "your_zhipu_api_key")
+    assert ai_config.embedding_spec("t1") is None
+
+
+def test_school_zhipu_key_beats_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("zhi_pu_API_KEY", "zp-platform")
+    _school(monkeypatch, embedding_key="zp-school")
+    spec = ai_config.embedding_spec("t1")
+    assert spec is not None
+    assert (spec.provider, spec.model, spec.api_key, spec.source) == ("zhipu", "embedding-3", "zp-school", "school")
+
+
+def test_reserved_open_source_choice_does_not_load_a_local_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """选了预留的开源模型也不在这台机器上加载，有智谱密钥仍走智谱。"""
+    monkeypatch.setenv("zhi_pu_API_KEY", "zp-real")
+    _school(monkeypatch, embedding_provider="local", embedding_model="BAAI/bge-base-zh-v1.5")
+    spec = ai_config.embedding_spec("t1")
+    assert spec is not None
+    assert (spec.provider, spec.model, spec.source) == ("zhipu", "embedding-3", "platform")
 
 
 def test_only_admin_can_run_connection_test() -> None:

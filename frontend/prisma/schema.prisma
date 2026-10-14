@@ -88,6 +88,15 @@ model TenantAiConfig {
   jwBaseUrl     String   @default("")
   /// 学校通知、新闻列表页，一行一个；Agent 回答「最新通知」时现查
   newsUrls      String   @default("")
+  /// 知识库向量化。空串 / zhipu 用智谱 embedding-3；local / openai 只预留，后端不加载
+  embeddingProvider String @default("")
+  /// 预留的开源模型名。当前不会用来建索引
+  embeddingModel    String @default("")
+  /// 预留的兼容接口网址。当前不会发起请求
+  embeddingBaseUrl  String @default("")
+  /// 智谱 embedding-3 的密钥密文。学校管理员填的优先于服务器 .env
+  embeddingKey      String @default("")
+  embeddingKeyHint  String @default("")
   updatedAt     DateTime @updatedAt
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
