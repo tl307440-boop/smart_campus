@@ -2,15 +2,21 @@ import { NextResponse } from "next/server";
 import { getPrisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/auth/admin";
 import { AUTH_ERROR, authError } from "@/lib/auth/errors";
-import { parseWorkspaceSettings } from "@/lib/workspace/schema";
+import { type WorkspaceSettingsInput, parseWorkspaceSettings } from "@/lib/workspace/schema";
 
-const DEFAULTS = {
+const DEFAULTS: WorkspaceSettingsInput = {
   assistantName: "小懒",
   persona: "",
   queryOnly: false,
   similarityThreshold: 0,
   topK: 3,
+  counselingContact: "",
 };
+
+function toView(row: WorkspaceSettingsInput): WorkspaceSettingsInput {
+  const { assistantName, persona, queryOnly, similarityThreshold, topK, counselingContact } = row;
+  return { assistantName, persona, queryOnly, similarityThreshold, topK, counselingContact };
+}
 
 /** 读取本校工作区设置；还没保存过时返回默认值。 */
 export async function GET(request: Request): Promise<NextResponse> {
@@ -21,8 +27,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     const settings = await getPrisma().tenantSettings.findUnique({
       where: { tenantId: check.tenant.id },
     });
-    const { assistantName, persona, queryOnly, similarityThreshold, topK } = settings ?? DEFAULTS;
-    return NextResponse.json({ assistantName, persona, queryOnly, similarityThreshold, topK });
+    return NextResponse.json(toView(settings ?? DEFAULTS));
   } catch (error) {
     console.error("[admin/workspace] 读取失败", error);
     return authError(AUTH_ERROR.SERVER_ERROR, "读取设置失败");
@@ -49,8 +54,7 @@ export async function PUT(request: Request): Promise<NextResponse> {
       update: parsed.value,
       create: { tenantId: check.tenant.id, ...parsed.value },
     });
-    const { assistantName, persona, queryOnly, similarityThreshold, topK } = saved;
-    return NextResponse.json({ assistantName, persona, queryOnly, similarityThreshold, topK });
+    return NextResponse.json(toView(saved));
   } catch (error) {
     console.error("[admin/workspace] 保存失败", error);
     return authError(AUTH_ERROR.SERVER_ERROR, "保存设置失败");

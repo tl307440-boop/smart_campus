@@ -1,28 +1,17 @@
 import json
-import os
 from collections.abc import Iterator
 from typing import Any
 
-from env_config import load_backend_env
-from llm_request import current_llm_request
+from ai_config import ModelEndpoint, client_for, platform_chat_endpoint, scrub
 from logging_config import get_logger
-from openai import OpenAI, OpenAIError
+from openai import OpenAIError
 
 logger = get_logger(__name__)
 
-load_backend_env()
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return max(1.0, float(os.getenv(name, str(default))))
-    except (TypeError, ValueError):
-        return default
-
-
-# 不设超时的话，上游卡住会一直占着连接和线程池名额
-LLM_TIMEOUT_SECONDS = _env_float("LLM_TIMEOUT_SECONDS", 60.0)
-LLM_MAX_RETRIES = int(_env_float("LLM_MAX_RETRIES", 2))
+# 两处兜底回答的开头被前端 lib/friendly-error.ts 的 FALLBACK_PREFIXES 认出来，改动要同步
+FAILED_PREFIX = "抱歉，我暂时无法回答这个问题。错误信息:"
+RAG_FAILED_PREFIX = "deepseek 回复失败："
+NOT_CONFIGURED = f"{FAILED_PREFIX} 还没有可用的对话模型（未配置），请管理员在「AI 服务」页填好学校的模型密钥。"
 
 
 def prompt_extras(persona: str = "", memories: list[str] | None = None) -> str:
@@ -38,52 +27,36 @@ def prompt_extras(persona: str = "", memories: list[str] | None = None) -> str:
 
 class DeepSeekService:
     """
-    封装deepseek的客户端类
-    实现情感分析 自然语言处理
+    对话模型的调用封装：情感分析、按资料回答、直接对话。
+
+    用哪家模型、哪把密钥由调用方按 ai_config 选好传进来（endpoint）；
+    不传时用服务器 .env 里的平台默认，这样 main01.py 这类老脚本照旧能跑。
     """
 
-    def __init__(self,use_mock:bool = True):
+    def __init__(self, use_mock: bool = False):
         """
-        初始化服务
-        
-        :param : use_mock为true,不发送真实网络请求，返回会模拟数据（调试 省钱）
-
+        :param use_mock: 为 True 时不发网络请求，返回模拟数据（本地演示、省钱）。
+            只能显式打开；线上没配密钥时要如实报「未配置」，不能拿假回答糊弄学生。
         """
         self.use_mock = use_mock
-        self.api_key = os.getenv("deepseek_API_key")
-        self.url = os.getenv("deepseek_url")
 
-
-        if self.api_key and not use_mock:
-            self.client = OpenAI(api_key=self.api_key,
-                                 base_url = self.url,
-                                 timeout = LLM_TIMEOUT_SECONDS,
-                                 max_retries = LLM_MAX_RETRIES)
-        else:
-            self.client = None
-            if not use_mock:
-                logger.warning("未检测到API KEY ，强制切换为mock模式")
-                self.use_mock = True
-
+    @staticmethod
+    def _resolve(endpoint: ModelEndpoint | None) -> ModelEndpoint | None:
+        return endpoint or platform_chat_endpoint()
 
  # // AI辅助生成：DeepSeek-chat (API), 2026-04
-# 辅助设计系统提示词，实现严格 JSON 格式的情感分析输出   
-    def analyze_emotion_and_reply(self,user_text:str) -> dict[str,Any]:
+# 辅助设计系统提示词，实现严格 JSON 格式的情感分析输出
+    def analyze_emotion_and_reply(self, user_text: str, endpoint: ModelEndpoint | None = None) -> dict[str, Any]:
         """
-        analyze_emotion_and_reply 的 Docstring
-        情感生成 NLP回复
-        :param user_text: 用户输入
-        :type user_text: str
-        :return: 返回json
-        :rtype: Dict[str, Any]
+        情感分析 + 共情回复，返回 JSON 字典；没有可用模型时返回空字典（本轮不挂情绪）。
         """
-        #1.定义系统提示词 
         system_prompt = """
         你是一名专业的校园心理咨询师助手“小懒”。
         请分析学生的输入，并返回严格正确的JSON格式数据，包含以下字段：
         1. core_emotion (核心情绪): 如焦虑、兴奋、迷茫等
         2. stress_source(压力源): 如学业、情感、就业等
-        3. risk_level (风险等级): 1-10的整数
+        3. risk_level (风险等级): 1-10的整数。日常烦恼、学业压力一般在 1-6；
+           只有流露出伤害自己、轻生或伤害他人的念头时才给 8 及以上（会触发求助提示）
         4. reply_text (回复内容): 温暖、共情、引导性的回复等
         5. memory_facts (值得长期记住的事): 字符串数组，只收学生明确说出的、关于自己的
            稳定事实（姓名、学院、专业、年级、长期偏好等），每条不超过 30 字；
@@ -91,58 +64,72 @@ class DeepSeekService:
 
         """
 
-        #2.模拟返回
         if self.use_mock:
             logger.info("[Mock]正在模拟DeepSeek思考过程...")
-
-            #模拟挂科 返回JSON格式
-            if "挂科" in user_text or "考试" in user_text :
+            if "挂科" in user_text or "考试" in user_text:
                 return {
-                    "core_emotion":"焦虑",
-                    "stress_source":"学业压力",
+                    "core_emotion": "焦虑",
+                    "stress_source": "学业压力",
                     "risk_level": 6,
                     "reply_text": "同学，听到你这么说，我能感觉到你此刻的紧绷。一次考试的失利不代表整个大学生涯的失败。我们先深呼吸一下，要不要一起复盘下是复习方法的问题，还是最近状态不太好？"
                 }
-            else :
-                # 默认模拟返回
-                return {
-                    "core_emotion": "平静/未知",
-                    "stressor": "无",
-                    "risk_level": 1,
-                    "reply_text": "我在听，你可以随时告诉我你的想法。"
-                }
-            
-        
-        #3.真实API调用
-        """messages (列表) -> 发送给 API -> reponse (对象) -> 提取出 content (JSON 字符串) -> 转换为 Python 字典返回。"""
-        try :
-            logger.info("[真实API] 正在请求DeepSeek...")
-            reponse = self.client.chat.completions.create(
-                model = "deepseek-chat",
-                messages = [
-                    {"role":"system","content":system_prompt},
-                    {"role":"user","content":user_text}
+            return {
+                "core_emotion": "平静/未知",
+                "stressor": "无",
+                "risk_level": 1,
+                "reply_text": "我在听，你可以随时告诉我你的想法。"
+            }
+
+        resolved = self._resolve(endpoint)
+        if resolved is None:
+            return {}
+        try:
+            response = client_for(resolved).chat.completions.create(
+                model=resolved.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_text}
                 ],
-                response_format  = {"type":"json_object"} #强转json
-
+                response_format={"type": "json_object"}
             )
-
-            #解析json字符串
-            content = reponse.choices[0].message.content
+            content = response.choices[0].message.content
             return json.loads(content)
         except OpenAIError as e:
-            logger.error(f" API请求失败：{e}")
-            return {"error" :str(e)}
-        except json.JSONDecodeError as er:
+            logger.error(f"[情感分析]（{resolved.label}）API 请求失败：{scrub(str(e), resolved)}")
+            return {"error": scrub(str(e), resolved)}
+        except (json.JSONDecodeError, TypeError) as er:
             logger.info("模型未返回合法的JSON格式")
             return {"error": str(er)}
-        
+
+    def stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        endpoint: ModelEndpoint,
+        temperature: float = 0.8,
+    ) -> Iterator[str]:
+        """逐块产出回答；出错直接抛给调用方，由它决定兜底文案。"""
+        client = client_for(endpoint)
+        if not endpoint.stream:
+            response = client.chat.completions.create(
+                model=endpoint.model, messages=messages, temperature=temperature
+            )
+            yield response.choices[0].message.content or ""
+            return
+        response = client.chat.completions.create(
+            model=endpoint.model, messages=messages, temperature=temperature, stream=True
+        )
+        for chunk in response:
+            piece = chunk.choices[0].delta.content if chunk.choices else None
+            if piece:
+                yield piece
+
     def chat_with_context(
         self,
         context: str,
         user_question: str,
         persona: str = "",
         memories: list[str] | None = None,
+        endpoint: ModelEndpoint | None = None,
     ) -> Iterator[str]:
         """
         RAG 核心接口：基于传入的 Context（来自 Kimi 或向量库）流式回答。
@@ -152,6 +139,7 @@ class DeepSeekService:
             user_question: 用户问题
             persona: 学校在工作区设置里配的人设说明，追加到系统提示词
             memories: 与问题相关的用户长期记忆
+            endpoint: 这一轮该用的对话模型（ai_config.chat_endpoint）
 
         Returns:
             逐块产出回答文本的生成器
@@ -165,87 +153,18 @@ class DeepSeekService:
         {context}
         """
         system_prompt += prompt_extras(persona, memories)
-        override = current_llm_request()
-        client = self.client
-        model = "deepseek-chat"
-        stream = True
-        if override and override.api_key:
-            client = OpenAI(
-                api_key=override.api_key,
-                base_url=override.base_url,
-                timeout=LLM_TIMEOUT_SECONDS,
-                max_retries=LLM_MAX_RETRIES,
-            )
-            model = override.model or model
-            stream = override.stream
-        if client is None:
+        if self.use_mock:
             yield f"【deepseek】这是一个模拟回复。{user_question}的解释是"
             return
-        full_answer = ""    
+        resolved = self._resolve(endpoint)
+        if resolved is None:
+            yield NOT_CONFIGURED
+            return
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_question},
+        ]
         try:
-            response = client.chat.completions.create(
-                model=model,
-                stream=stream,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_question}
-                ],
-                temperature=0.8, #增加多样性,回复更自然
-            )
-            if stream:
-                for chunk in response:
-                    content = chunk.choices[0].delta.content
-                    if content:
-                        full_answer += content
-                        yield content
-            else:
-                content = response.choices[0].message.content or ""
-                full_answer = content
-                yield content 
-
+            yield from self.stream_chat(messages, resolved)
         except Exception as e:
-            yield f"deepseek 回复失败：{str(e)}"
-        
-    def clear_context(self):
-        """
-        清除上下文（如果需要）
-        """
-        # 目前 deepseek 是无状态的，每次请求都是独立的，所以不需要清除上下文。
-        # 但如果未来 deepseek 支持多轮对话，我们可以在这里实现清除上下文的逻辑。
-        pass
-        
-
-
-
-
-            
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+            yield f"{RAG_FAILED_PREFIX}（{resolved.label}）{scrub(str(e), resolved)}"

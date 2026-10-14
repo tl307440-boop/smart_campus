@@ -8,11 +8,80 @@ import {
   readSettings,
   saveSettings,
 } from "@/lib/agent-settings";
-import { type MemoryNote, addMemories, deleteMemory, fetchMemories, pingLlm } from "@/lib/api";
+import { type MemoryNote, addMemories, deleteMemory, errorDetail, fetchMemories, pingLlm } from "@/lib/api";
+import { RATE_RANGE, speakText, useChineseVoices, useSpeechSettings } from "@/lib/speech-settings";
+import { SchoolAiSettings } from "@/components/SchoolAiSettings";
+import { SpeakerIcon } from "@/components/SketchIcons";
 import { PaneTitle } from "@/components/ToolDrawer";
 
-/** 抽屉页「AI 服务」：自带密钥只存在这台浏览器的 localStorage 里。 */
-export function ServicePane() {
+/** 朗读回答：开关、声音、语速，只存在这台浏览器里 */
+function SpeechPrefs() {
+  const [speech, updateSpeech] = useSpeechSettings();
+  const { supported, voices } = useChineseVoices();
+
+  return (
+    <section className="space-y-3">
+      <h3 className="font-display text-xl leading-tight">我的偏好</h3>
+      <label className="flex cursor-pointer items-center justify-between gap-3">
+        <span className="flex items-center gap-2">
+          <SpeakerIcon on={speech.enabled} size={18} />
+          朗读回答
+          <span className="text-sm text-muted">答完自动念出来</span>
+        </span>
+        <input
+          type="checkbox"
+          checked={speech.enabled}
+          disabled={!supported}
+          onChange={(event) => {
+            updateSpeech({ enabled: event.target.checked });
+            if (!event.target.checked) window.speechSynthesis?.cancel();
+          }}
+          className="size-4 accent-pink"
+        />
+      </label>
+      {!supported && <p className="text-sm text-muted">这个浏览器不支持朗读，换 Chrome 或 Edge 试试。</p>}
+      {supported && speech.enabled && (
+        <div className="space-y-3 border-l-2 border-dashed border-rule pl-4">
+          <label className="block">
+            <span className="field-label">声音</span>
+            <select
+              value={speech.voiceURI}
+              onChange={(event) => updateSpeech({ voiceURI: event.target.value })}
+              className="field"
+            >
+              <option value="">浏览器默认的中文声音</option>
+              {voices.map((voice) => (
+                <option key={voice.voiceURI} value={voice.voiceURI}>
+                  {voice.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="field-label">
+              语速 <span className="text-ink tabular-nums">{speech.rate.toFixed(1)}×</span>
+            </span>
+            <input
+              type="range"
+              min={RATE_RANGE[0]}
+              max={RATE_RANGE[1]}
+              step={0.1}
+              value={speech.rate}
+              onChange={(event) => updateSpeech({ rate: Number(event.target.value) })}
+              className="w-full accent-pink"
+            />
+          </label>
+          <button type="button" onClick={() => speakText("你好，我会把回答念给你听。", speech)} className="btn btn-sm">
+            试听
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** 自带密钥：填了以后本人的提问改走自己的模型，只存在这台浏览器的 localStorage 里 */
+function PersonalKey() {
   const [settings, setSettings] = useState<LlmSettings>(readSettings);
   const [notice, setNotice] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
@@ -42,7 +111,7 @@ export function ServicePane() {
       const result = await pingLlm(settings);
       setNotice(result.models.length ? `连通，可用模型 ${result.models.slice(0, 3).join("、")}` : "连通");
     } catch (err) {
-      const detail = err instanceof Error ? err.message : "";
+      const detail = errorDetail(err);
       setNotice(`连不上，检查网址和密钥是否填对。${detail ? `（${detail.slice(0, 120)}）` : ""}`);
     } finally {
       setChecking(false);
@@ -50,12 +119,15 @@ export function ServicePane() {
   }
 
   return (
-    <section>
-      <PaneTitle title="AI 服务">
-        不填也能用：默认走学校配置的服务。想用自己的模型，就在这里填密钥，只存在这台浏览器里。
-      </PaneTitle>
+    <details open={Boolean(settings.apiKey) || undefined} className="sketch px-4 py-3">
+      <summary className="cursor-pointer font-display text-lg">
+        用我自己的密钥<span className="ml-2 font-body text-sm text-muted">可选</span>
+      </summary>
+      <p className="mt-1 text-sm text-muted">
+        填了以后，你的提问改用你自己的模型，不占学校的额度；只存在这台浏览器里。清空密钥再保存，就回到学校的服务。
+      </p>
 
-      <div className="space-y-4">
+      <div className="mt-4 space-y-4">
         <label className="block">
           <span className="field-label">服务商</span>
           <select
@@ -63,8 +135,11 @@ export function ServicePane() {
             onChange={(event) => chooseProvider(event.target.value as LlmProvider)}
             className="field"
           >
-            <option value="deepseek">Deepseek</option>
-            <option value="kimi">Kimi</option>
+            {Object.entries(PROVIDERS).map(([id, preset]) => (
+              <option key={id} value={id}>
+                {preset.label}
+              </option>
+            ))}
             <option value="custom">自定义</option>
           </select>
         </label>
@@ -98,7 +173,7 @@ export function ServicePane() {
         </label>
       </div>
 
-      <div className="mt-6 flex flex-wrap gap-3">
+      <div className="mt-5 flex flex-wrap gap-3">
         <button type="button" onClick={handleSave} className="btn btn-primary">
           保存
         </button>
@@ -107,6 +182,18 @@ export function ServicePane() {
         </button>
       </div>
       {notice && <p className="mt-3 text-[0.9375rem] break-all text-muted" role="status">{notice}</p>}
+    </details>
+  );
+}
+
+/** 抽屉页「AI 服务」：朗读偏好、学校的模型配置与状态、可选的自带密钥 */
+export function ServicePane({ isAdmin }: { isAdmin: boolean }) {
+  return (
+    <section className="space-y-8">
+      <PaneTitle title="AI 服务">问答用哪个模型、配没配好、要不要把回答念出来，都在这一页。</PaneTitle>
+      <SpeechPrefs />
+      <SchoolAiSettings isAdmin={isAdmin} />
+      <PersonalKey />
     </section>
   );
 }

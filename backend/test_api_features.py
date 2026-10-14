@@ -193,6 +193,18 @@ def test_url_import_success(client: TestClient, monkeypatch: pytest.MonkeyPatch)
     adder.assert_called_once_with("https://a.edu.cn/1", "tenant-1")
 
 
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [(api.outbound.UnsafeUrlError("不允许访问内网或保留地址"), 400), (ValueError("Expecting value"), 502)],
+)
+def test_jw_bind_maps_unsafe_url_and_bad_json(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, error: Exception, code: int
+) -> None:
+    monkeypatch.setattr(api.jw_account, "bind", MagicMock(side_effect=error))
+    response = client.post("/api/jw/account", json={"username": "2023001", "password": "x"}, headers=headers())
+    assert response.status_code == code
+
+
 def test_student_cannot_import_url(client: TestClient) -> None:
     response = client.post("/api/documents/url", json={"url": "https://a.edu.cn"}, headers=headers())
     assert response.status_code == 403

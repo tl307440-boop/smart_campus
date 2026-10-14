@@ -19,6 +19,19 @@ const NETWORK = /network ?error|failed to fetch|networkerror|load failed|econnre
 const SESSION = /连接后端失败（401）|会话已过期|令牌/;
 const BUSY = /连接后端失败（429）|too many|rate limit|上限|次数/i;
 
+/** 后端在兜底回答里标出这次用的是谁的模型（backend/ai_config.py 的 SOURCE_LABEL） */
+const SOURCE_MARKS = { personal: "（个人密钥）", school: "（学校配置）", platform: "（平台默认）" } as const;
+
+export type ModelSource = keyof typeof SOURCE_MARKS | "none";
+
+export function failedModelSource(raw: string): ModelSource | null {
+  if (raw.includes("（未配置）")) return "none";
+  for (const [source, mark] of Object.entries(SOURCE_MARKS) as [keyof typeof SOURCE_MARKS, string][]) {
+    if (raw.includes(mark)) return source;
+  }
+  return null;
+}
+
 export function isFallbackAnswer(content: string): boolean {
   return FALLBACK_PREFIXES.some((prefix) => content.startsWith(prefix));
 }

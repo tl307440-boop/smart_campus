@@ -51,11 +51,14 @@ from langgraph.graph import END, START, StateGraph
 # 将 backend 目录加入 Python 路径，确保 import 能找到同级模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import agent
+import comfort
 import memory_store
+from ai_config import ModelEndpoint, chat_endpoint, client_for, reader_endpoint, scrub
 from env_config import chroma_persist_dir, load_backend_env
 from kimi_extract_service import KimiExtractService
 from knowledge import KIMI_CORPUS_BUDGET
-from llm_service import DeepSeekService, prompt_extras
+from llm_service import FAILED_PREFIX, NOT_CONFIGURED, DeepSeekService, prompt_extras
 from logging_config import get_logger
 from tenancy import GLOBAL_TENANT
 from vector_service import VectorRAGService
@@ -128,6 +131,9 @@ class GraphState(TypedDict):
     # ---- 情感分析结果（后续扩展）----
     emotion_data: dict[str, Any] | None
 
+    # ---- 本轮的求助卡片（comfort.safety_card），没有则为 None ----
+    safety: dict[str, Any] | None
+
 
 # ============================================================
 # 第三步：懒加载服务实例（首次使用时才初始化，避免 import 时网络/SSL 报错）
@@ -147,6 +153,8 @@ MAX_STORED_TURNS = _env_int("MAX_STORED_TURNS", 30)
 MAX_PROMPT_TURNS = _env_int("MAX_PROMPT_TURNS", 10)
 # 情感分析顺带抽出的个人事实是否自动写进长期记忆
 MEMORY_AUTO_EXTRACT = os.getenv("MEMORY_AUTO_EXTRACT", "true").strip().lower() in {"1", "true", "yes", "on"}
+# 不连任何模型、全部用模拟数据（本地演示）。线上必须关着，否则学生拿到的是假回答
+LLM_MOCK = os.getenv("LLM_MOCK", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _delta_emitter():
@@ -170,6 +178,7 @@ def _append_turn_messages(
     final_answer: str,
     context: str = "",
     sources: list[dict[str, Any]] | None = None,
+    safety: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """将本轮 user/assistant 写入 messages；assistant 附带 context/sources 便于 UI 恢复。
 
@@ -178,12 +187,15 @@ def _append_turn_messages(
     """
     updated_messages = list(state.get("messages", []))
     updated_messages.append({"role": "user", "content": question})
-    updated_messages.append({
+    assistant: dict[str, Any] = {
         "role": "assistant",
         "content": final_answer,
         "context": context or "",
         "sources": sources or [],
-    })
+    }
+    if safety:
+        assistant["safety"] = safety
+    updated_messages.append(assistant)
     return updated_messages[-(MAX_STORED_TURNS * 2):]
 
 
@@ -232,6 +244,10 @@ def _settings(state: GraphState) -> WorkspaceSettings:
     return workspace_settings(state.get("tenant_id") or GLOBAL_TENANT)
 
 
+def _chat_endpoint(state: GraphState) -> ModelEndpoint | None:
+    return chat_endpoint(state.get("tenant_id") or GLOBAL_TENANT)
+
+
 def _refusal(settings: WorkspaceSettings) -> str:
     return (
         f"抱歉，{settings.assistant_name}在本校资料里没有找到与这个问题相关的内容。"
@@ -257,7 +273,7 @@ def get_deepseek() -> DeepSeekService:
     """获取 DeepSeek 服务单例（首次调用时创建）"""
     global _deepseek_brain
     if _deepseek_brain is None:
-        _deepseek_brain = DeepSeekService(use_mock=False)
+        _deepseek_brain = DeepSeekService(use_mock=LLM_MOCK)
     return _deepseek_brain
 
 
@@ -265,7 +281,7 @@ def get_kimi() -> KimiExtractService:
     """获取 Kimi 服务单例（首次调用时创建）"""
     global _kimi_eye
     if _kimi_eye is None:
-        _kimi_eye = KimiExtractService(use_mock=False)
+        _kimi_eye = KimiExtractService(use_mock=LLM_MOCK)
     return _kimi_eye
 
 
@@ -329,21 +345,35 @@ def intent_node(state: GraphState) -> dict:
     logger.info(f"\n{'='*50}")
     logger.info(f"[意图判定] 当前问题: \"{question}\"")
 
+    # --- 高危表达：不等模型，直接走陪伴 + 求助卡片 ---
+    if comfort.is_crisis(question):
+        logger.warning("[意图判定] 命中高危表达，走危机陪伴")
+        return {"intent": "CRISIS"}
+
     # --- 使用 DeepSeek 做极速意图分类 ---
     # 非流式调用（不带 stream=True），直接获取完整响应，速度快
-    system_prompt = """
+    endpoint = None if get_deepseek().use_mock else _chat_endpoint(state)
+    tools_on = endpoint is not None and agent.has_live_tools(
+        state.get("tenant_id") or GLOBAL_TENANT, state.get("user_id") or "", _settings(state)
+    )
+    tool_rule = """
+4. 如果要查【本人的课表、考试安排、成绩、空教室】，或问【学校最新的通知/新闻/活动】，或问【校园里某个地方在哪、怎么走】，或需要【联网查最新信息】，返回：TOOL
+""" if tools_on else ""
+    system_prompt = f"""
 你是一个意图分类器。请判断用户的问题属于以下哪个类别：
 
 1. 如果问题涉及【校园教务、规章制度、奖学金、学籍管理、学生手册、课程安排、考试规定、宿舍管理、图书馆规则】等需要查阅学校资料才能准确回答的内容，返回：RAG
 
-2. 如果问题是【日常闲聊、打招呼、自我介绍、通用知识、情感倾诉】等不需要查阅学校资料就能回答的内容，返回：DIRECT
+2. 如果用户在【倾诉情绪、诉说压力或烦恼、心情低落、人际或感情困扰】，想被倾听和安慰，返回：COMFORT
 
-只返回一个词：RAG 或 DIRECT。不要返回任何其他内容。
+3. 如果问题是【日常闲聊、打招呼、自我介绍、通用知识】等不需要查阅学校资料就能回答的内容，返回：DIRECT
+{tool_rule}
+只返回一个词：RAG、COMFORT{"、TOOL" if tools_on else ""} 或 DIRECT。不要返回任何其他内容。
 """
 
-    # --- Mock 模式：用关键词规则做快速分类，不调用 API ---
-    if get_deepseek().use_mock:
-        logger.info("[意图判定] Mock 模式，使用关键词规则分类")
+    # --- Mock 模式或没配对话模型：用关键词规则做快速分类，不调用 API ---
+    if endpoint is None:
+        logger.info("[意图判定] 无可用对话模型（或 Mock 模式），使用关键词规则分类")
         # 定义教务相关的关键词列表
         rag_keywords = [
             "奖学金", "助学金", "学籍", "学分", "绩点", "考试", "挂科", "补考",
@@ -354,14 +384,17 @@ def intent_node(state: GraphState) -> dict:
             "教务", "招生", "录取", "报到", "注册", "校历", "放假", "开学",
             "国家奖学金", "国家励志奖学金", "助学贷款", "勤工助学",
         ]
-        # 如果问题中包含任何教务关键词，走 RAG 路径
-        intent = "RAG" if any(kw in question for kw in rag_keywords) else "DIRECT"
+        # 带明显情绪词先当倾诉；再看教务关键词
+        if comfort.looks_like_venting(question):
+            intent = "COMFORT"
+        else:
+            intent = "RAG" if any(kw in question for kw in rag_keywords) else "DIRECT"
 
     else:
-        # --- 真实 API 模式：调用 DeepSeek 做意图分类 ---
+        # --- 真实 API 模式：调用对话模型做意图分类 ---
         try:
-            response = get_deepseek().client.chat.completions.create(
-                model="deepseek-chat",
+            response = client_for(endpoint).chat.completions.create(
+                model=endpoint.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": question}
@@ -370,12 +403,15 @@ def intent_node(state: GraphState) -> dict:
                 max_tokens=10,    # 只需一个词，限制 token 消耗
             )
             raw_result = response.choices[0].message.content.strip().upper()
-            intent = "RAG" if "RAG" in raw_result else "DIRECT"
+            if tools_on and "TOOL" in raw_result:
+                intent = "TOOL"
+            else:
+                intent = "RAG" if "RAG" in raw_result else "COMFORT" if "COMFORT" in raw_result else "DIRECT"
 
         except Exception as e:
-            # API 调用失败时，默认走 RAG 路径（保守策略）
-            logger.error(f"[意图判定] API 调用失败: {e}，默认走 RAG 路径")
-            intent = "RAG"
+            # API 调用失败时，默认走 RAG 路径（保守策略）；明显在倾诉的除外
+            intent = "COMFORT" if comfort.looks_like_venting(question) else "RAG"
+            logger.error(f"[意图判定]（{endpoint.label}）API 调用失败: {scrub(str(e), endpoint)}，按 {intent} 处理")
 
     logger.info(f"[意图判定] 判定意图为: {intent}")
 
@@ -399,8 +435,11 @@ def route_query(state: GraphState) -> str:
     """
     intent = state.get("intent", "RAG")
 
-    # 「只按资料回答」的学校不走闲聊：一律先检索，查不到就拒答
-    if intent == "RAG" or _settings(state).query_only:
+    # 高危表达任何设置下都直接回应；「只按资料回答」的学校不走闲聊和倾诉：一律先检索，查不到就拒答。
+    # 工具问答自己会按需查知识库，不必先检索
+    if intent in ("CRISIS", "TOOL"):
+        target = "generate"
+    elif intent == "RAG" or _settings(state).query_only:
         target = "retrieve"
     else:
         target = "generate"
@@ -452,12 +491,12 @@ def retrieve_node(state: GraphState) -> dict:
             strategy == "auto" and 0 < len(doc_content) <= KIMI_CORPUS_BUDGET
         ):
             # --- Kimi 小文档路径 ---
-            # 直接将全文交给 Kimi 阅读，让它摘录与问题相关的段落
+            # 直接将全文交给 Kimi 阅读，让它摘录与问题相关的段落；没配精读模型或没摘到时落到向量检索
             logger.info(f"[检索节点] 走 Kimi 精读路径 (文档长度: {len(doc_content)} 字)")
-            context = get_kimi().extract_knowledge(doc_content, question)
+            context = get_kimi().extract_knowledge(doc_content, question, endpoint=reader_endpoint(tenant_id))
             if context:
                 sources = _corpus_sources(doc_content)
-        else:
+        if not context:
             # --- 向量数据库路径 ---
             # 使用智谱 embedding-3 向量化问题，在 ChromaDB 中检索最相似的片段
             logger.info("[检索节点] 走向量数据库检索路径 (ChromaDB)")
@@ -484,6 +523,94 @@ def retrieve_node(state: GraphState) -> dict:
 
 
 def generate_node(state: GraphState) -> dict:
+    """【生成节点】见 _generate。state 存在 Redis 里，每轮都写一次 safety，上一轮的求助卡片才不会留到这一轮。"""
+    out = _generate(state)
+    out.setdefault("safety", None)
+    return out
+
+
+def _comfort_answer(state: GraphState, question: str, settings: WorkspaceSettings, memories: list[str], crisis: bool) -> dict:
+    """倾诉与高危两种情况：用陪伴提示词带上历史多轮回应。高危时一定附求助卡片，模型不可用也给固定回复。"""
+    emit = _delta_emitter()
+    contact = settings.counseling_contact
+    card = comfort.safety_card(contact) if crisis else None
+    endpoint = None if get_deepseek().use_mock else _chat_endpoint(state)
+    final_answer = ""
+    if get_deepseek().use_mock and not crisis:
+        final_answer = f"【{settings.assistant_name}】（模拟回复）听起来你最近不太好受，愿意和我多说说吗？"
+        emit(final_answer)
+    if endpoint is not None:
+        system_prompt = comfort.comfort_prompt(settings.assistant_name, crisis, contact) + prompt_extras(settings.persona, memories)
+        api_messages = (
+            [{"role": "system", "content": system_prompt}]
+            + recent_history(state.get("messages", []), MAX_PROMPT_TURNS)
+            + [{"role": "user", "content": question}]
+        )
+        parts: list[str] = []
+        try:
+            for piece in get_deepseek().stream_chat(api_messages, endpoint, temperature=0.7):
+                parts.append(piece)
+                emit(piece)
+            final_answer = "".join(parts)
+        except Exception as e:
+            logger.error(f"[陪伴]（{endpoint.label}）回复失败: {scrub(str(e), endpoint)}")
+            # 高危时不把报错甩给学生，下面换成固定回复
+            final_answer = "" if crisis else f"{FAILED_PREFIX}（{endpoint.label}）{scrub(str(e), endpoint)}"
+    if not final_answer.strip():
+        final_answer = comfort.crisis_fallback(contact) if crisis else NOT_CONFIGURED
+        emit(final_answer)
+    logger.info(f"[生成节点] {'危机' if crisis else '倾诉'}陪伴完成，长度: {len(final_answer)} 字")
+    updated_messages = _append_turn_messages(state, question, final_answer, safety=card)
+    return {"final_answer": final_answer, "messages": updated_messages, "safety": card}
+
+
+def _agent_answer(state: GraphState, question: str, settings: WorkspaceSettings, memories: list[str]) -> dict:
+    """工具问答：模型自己决定查教务、通知、地图还是知识库。工具进度以 {"tool": ...} 推给前端。"""
+    emit = _delta_emitter()
+    writer = get_stream_writer()
+    tenant_id = state.get("tenant_id") or GLOBAL_TENANT
+    endpoint = _chat_endpoint(state)
+    spoken: list[str] = []
+
+    def say(text: str) -> None:
+        spoken.append(text)
+        emit(text)
+
+    def search(query: str) -> tuple[str, list[dict[str, Any]]]:
+        vdb = get_vector_db()
+        if vdb is None or not query:
+            return "", []
+        chunks = vdb.search_chunks(query, tenant_id, top_k=settings.top_k, min_score=settings.similarity_threshold)
+        return vdb.format_context(chunks), _chunk_sources(chunks)
+
+    ctx = agent.ToolContext(
+        tenant_id=tenant_id, user_id=state.get("user_id") or "", settings=settings,
+        search_knowledge=search, extras=prompt_extras(settings.persona, memories),
+        refusal=_refusal(settings) if settings.query_only else "",
+    )
+    if endpoint is None:
+        final_answer = NOT_CONFIGURED
+        emit(final_answer)
+    else:
+        try:
+            final_answer = agent.run(
+                ctx, endpoint, recent_history(state.get("messages", []), MAX_PROMPT_TURNS), question,
+                say, lambda event: writer({"tool": event}),
+            )
+        except Exception as e:
+            logger.error(f"[工具问答]（{endpoint.label}）失败: {scrub(str(e), endpoint)}")
+            if spoken:
+                final_answer = "".join(spoken) + "\n\n（后面的查询中断了，请稍后再问一次）"
+                emit("\n\n（后面的查询中断了，请稍后再问一次）")
+            else:
+                final_answer = f"{FAILED_PREFIX}（{endpoint.label}）{scrub(str(e), endpoint)}"
+                emit(final_answer)
+    logger.info(f"[生成节点] 工具问答完成，长度: {len(final_answer)} 字，来源 {len(ctx.sources)} 条")
+    updated_messages = _append_turn_messages(state, question, final_answer, sources=ctx.sources)
+    return {"final_answer": final_answer, "messages": updated_messages, "sources": ctx.sources}
+
+
+def _generate(state: GraphState) -> dict:
     """
     【生成节点】- 调用 DeepSeek 大模型生成最终回答。
 
@@ -520,6 +647,11 @@ def generate_node(state: GraphState) -> dict:
 
     logger.info(f"[生成节点] 意图={intent}，上下文长度={len(context)} 字，记忆 {len(memories)} 条")
 
+    if intent == "CRISIS" or (intent == "COMFORT" and not settings.query_only):
+        return _comfort_answer(state, question, settings, memories, crisis=intent == "CRISIS")
+    if intent == "TOOL":
+        return _agent_answer(state, question, settings, memories)
+
     emit = _delta_emitter()
 
     # 只按资料回答时每轮都检索过，context 一定是本轮的；否则 DIRECT 轮的 context 是上一轮残留
@@ -546,7 +678,13 @@ def generate_node(state: GraphState) -> dict:
             logger.info(f"[生成节点] 回答生成完成，长度: {len(final_answer)} 字，messages 共 {len(updated_messages)} 条")
             return {"final_answer": final_answer, "messages": updated_messages}
 
-        # 真实 API 模式：调用 DeepSeek 以校园助手身份直接回答
+        # 真实 API 模式：以校园助手身份直接回答
+        endpoint = _chat_endpoint(state)
+        if endpoint is None:
+            emit(NOT_CONFIGURED)
+            updated_messages = _append_turn_messages(state, question, NOT_CONFIGURED, context="")
+            logger.warning("[生成节点] 个人、学校、平台都没有可用的对话模型")
+            return {"final_answer": NOT_CONFIGURED, "messages": updated_messages}
         try:
             system_prompt = f"""
 你是"{name}"，智悦校园的智能校园助手。
@@ -562,21 +700,14 @@ def generate_node(state: GraphState) -> dict:
             # 将 system prompt + 历史消息 + 当前问题 组装为完整对话
             api_messages = [{"role": "system", "content": system_prompt}] + history_messages + [{"role": "user", "content": question}]
 
-            response = get_deepseek().client.chat.completions.create(
-                model="deepseek-chat",
-                messages=api_messages,
-                temperature=0.8,
-                stream=True,  # 边生成边下发，首字延迟不再等整段写完
-            )
+            # 边生成边下发，首字延迟不再等整段写完
             parts: list[str] = []
-            for chunk in response:
-                piece = chunk.choices[0].delta.content
-                if piece:
-                    parts.append(piece)
-                    emit(piece)
+            for piece in get_deepseek().stream_chat(api_messages, endpoint, temperature=0.8):
+                parts.append(piece)
+                emit(piece)
             final_answer = "".join(parts)
         except Exception as e:
-            final_answer = f"抱歉，我暂时无法回答这个问题。错误信息: {str(e)}"
+            final_answer = f"{FAILED_PREFIX}（{endpoint.label}）{scrub(str(e), endpoint)}"
 
         updated_messages = _append_turn_messages(state, question, final_answer, context="")
         logger.info(f"[生成节点] 回答生成完成，长度: {len(final_answer)} 字，messages 共 {len(updated_messages)} 条")
@@ -588,7 +719,7 @@ def generate_node(state: GraphState) -> dict:
     # chat_with_context 是 generator，逐块消费：一边拼完整答案，一边下发给前端
     parts: list[str] = []
     for chunk in get_deepseek().chat_with_context(
-        context, question, persona=settings.persona, memories=memories
+        context, question, persona=settings.persona, memories=memories, endpoint=_chat_endpoint(state)
     ):
         parts.append(chunk)
         emit(chunk)
@@ -617,7 +748,12 @@ def emotion_node(state: GraphState) -> dict:
     """
     question = state.get("user_question", "")
     logger.info(f"[情感节点] 分析用户问题: \"{question[:40]}\"")
-    emotion = get_deepseek().analyze_emotion_and_reply(question)
+    try:
+        emotion = get_deepseek().analyze_emotion_and_reply(question, endpoint=_chat_endpoint(state))
+    except Exception as e:
+        # 这条分支出错不能拖垮整轮：危机回复和求助卡片都要等它跑完
+        logger.error(f"[情感节点] 分析失败，本轮不挂情绪: {e}")
+        return {"emotion_data": None}
     if isinstance(emotion, dict):
         emotion = dict(emotion)
         facts = emotion.pop("memory_facts", None)
@@ -654,8 +790,14 @@ def finalize_node(state: GraphState) -> dict:
 
     last = dict(messages[-1])
     last["emotion"] = emotion_data
+    patch: dict[str, Any] = {}
+    # 关键词没拦到、但情绪分析判出高风险：补一张求助卡片
+    if not last.get("safety") and comfort.model_flags_risk(emotion_data):
+        logger.warning("[收尾] 情绪分析判为高风险，补发求助卡片")
+        last["safety"] = patch["safety"] = comfort.safety_card(_settings(state).counseling_contact)
     messages[-1] = last
-    return {"messages": messages}
+    patch["messages"] = messages
+    return patch
 
 
 # ============================================================
@@ -698,8 +840,8 @@ def build_graph():
         }
     )
     graph.add_edge("retrieve", "generate")
-    graph.add_edge("generate", "finalize")
-    graph.add_edge("emotion", "finalize")
+    # 两条分支都到齐才收尾；分开写两条边的话，先完成的那条就会单独触发 finalize
+    graph.add_edge(["generate", "emotion"], "finalize")
     graph.add_edge("finalize", END)
 
     checkpointer = get_checkpointer()

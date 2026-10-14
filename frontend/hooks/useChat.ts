@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { migrateLegacyMemories, readSettings } from "@/lib/agent-settings";
+import { isFallbackAnswer } from "@/lib/friendly-error";
 import {
+  type ChatDone,
   type ChatMessage,
   type ChatStatus,
   addMemories,
@@ -24,6 +26,17 @@ const STAGE_LABEL: Record<ChatStatus["stage"], string> = {
 export interface UseChatOptions {
   /** 嵌入挂件：会话只存 sessionStorage、不改地址栏、不带自带密钥、不迁移记忆 */
   embedded?: boolean;
+}
+
+/** 朗读时接在回答后面，把求助电话也念出来；回答本身是报错时只念求助电话 */
+function spokenAnswer(result: ChatDone): string {
+  if (!result.safety) return result.answer;
+  const school = result.safety.school ? `学校心理咨询：${result.safety.school}。` : "";
+  if (result.answer.includes("12356")) {
+    return result.answer.includes(result.safety.school) ? result.answer : `${result.answer}\n${school}`;
+  }
+  const answer = isFallbackAnswer(result.answer) ? "" : `${result.answer}\n`;
+  return `${answer}需要帮助的话，可以拨打全国心理援助热线 12356，有立即危险请打 110 或 120。${school}`;
 }
 
 function newId() {
@@ -118,6 +131,8 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
           text,
           {
             onStatus: (next) => setStatus(STAGE_LABEL[next.stage] ?? null),
+            // 查完不改回去：工具很快时「正在查课表…」会一闪而过，留到回答开始吐字再换
+            onTool: (event) => event.state === "running" && setStatus(`正在${event.label}…`),
             onDelta: (chunk) => {
               streamed += chunk;
               setPending(streamed);
@@ -132,10 +147,11 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
                   context: result.context,
                   sources: result.sources,
                   emotion: result.emotion,
+                  safety: result.safety,
                 },
               ]);
               setPending("");
-              onAnswer?.(result.answer);
+              onAnswer?.(spokenAnswer(result));
             },
             onError: (message) => setError(message),
           },

@@ -74,6 +74,20 @@ export function WorkspacePane({ onSaved }: Props) {
                 className="field resize-y"
               />
             </label>
+            <label className="block">
+              <span className="field-label">学校心理咨询联系方式</span>
+              <textarea
+                value={settings.counselingContact}
+                onChange={(event) => update("counselingContact", event.target.value)}
+                rows={2}
+                maxLength={200}
+                placeholder="例如：心理健康教育中心 027-1234 5678，工作日 8:30–17:30，图书馆三楼"
+                className="field resize-y"
+              />
+              <span className="mt-1 block text-sm text-muted">
+                同学流露出伤害自己的念头时，会和全国心理援助热线 12356 一起出现在求助卡片里。不填就只显示全国热线。
+              </span>
+            </label>
             <label className="flex items-start gap-2.5">
               <input
                 type="checkbox"

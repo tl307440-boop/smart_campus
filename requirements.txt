@@ -13,6 +13,7 @@ fastapi>=0.115.0                # 对外 HTTP/SSE 接口层，供独立前端调
 uvicorn[standard]>=0.30.0       # ASGI 服务器
 python-multipart>=0.0.9         # FastAPI 解析 multipart 文件上传
 pyjwt>=2.8.0,<3                 # 验签前端 jose 签发的 HS256 访问令牌；上界 2.9 是 zhipuai 的约束
+cryptography>=42.0.0            # 解密学校在「AI 服务」页填的模型密钥（AES-256-GCM，Next 侧加密）
 streamlit>=1.30.0               # 旧版一体化界面（逐步由 Next.js 前端替代）
 
 

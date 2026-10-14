@@ -28,6 +28,33 @@ export interface ChatSource {
   snippet: string;
   score: number | null;
   rerank_score: number | null;
+  /** 工具问答的来源（学校通知、地图导航）带链接 */
+  url?: string;
+}
+
+/** 与后端 agent.run 推送的工具进度一一对应 */
+export interface ChatToolEvent {
+  name: string;
+  label: string;
+  state: "running" | "done";
+  ok?: boolean;
+}
+
+export type JwMode = "off" | "demo" | "zhengfang";
+
+export interface JwAccount {
+  mode: JwMode;
+  bound: boolean;
+  /** 打了码的学号 */
+  username: string;
+  boundAt: number | null;
+}
+
+/** 与后端 comfort.safety_card 一一对应 */
+export interface SafetyCardData {
+  level: "crisis";
+  hotlines: { name: string; phone: string }[];
+  school: string;
 }
 
 export interface ChatMessage {
@@ -37,6 +64,7 @@ export interface ChatMessage {
   context?: string;
   sources?: ChatSource[];
   emotion?: EmotionData | null;
+  safety?: SafetyCardData | null;
 }
 
 export interface MemoryNote {
@@ -62,6 +90,7 @@ export interface ChatDone {
   context: string;
   sources: ChatSource[];
   emotion: EmotionData | null;
+  safety: SafetyCardData | null;
 }
 
 export interface ChatStatus {
@@ -74,6 +103,7 @@ export interface ChatStatus {
 
 export interface ChatHandlers {
   onStatus?: (status: ChatStatus) => void;
+  onTool?: (event: ChatToolEvent) => void;
   onDelta?: (text: string) => void;
   onDone?: (result: ChatDone) => void;
   onError?: (message: string) => void;
@@ -117,6 +147,58 @@ export function clearDocuments() {
 
 export function fetchWorkspace() {
   return request<{ assistant_name: string; query_only: boolean }>("/api/workspace");
+}
+
+export type AiServiceName = "chat" | "reader" | "embedding" | "map" | "search" | "jw" | "news";
+
+export interface AiServiceStatus {
+  configured: boolean;
+  /** 学校自配 / 服务器 .env 的平台默认；没配时为 null */
+  source: "school" | "platform" | null;
+  model: string;
+}
+
+export type AiStatus = Record<AiServiceName, AiServiceStatus>;
+
+export function fetchAiStatus() {
+  return request<AiStatus>("/api/ai/status");
+}
+
+/** 管理员：用本校当前生效的配置真实调一次 */
+export function testAiService(service: AiServiceName) {
+  return request<{ ok: boolean; source: string; model: string }>("/api/ai/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ service }),
+  });
+}
+
+export function fetchJwAccount() {
+  return request<JwAccount>("/api/jw/account");
+}
+
+/** 需要验证码时返回 { captcha: 图片 base64 }，填好后连同账号密码再提交一次 */
+export function bindJwAccount(input: { username: string; password: string; captcha?: string }) {
+  return request<JwAccount | { captcha: string }>("/api/jw/account", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function unbindJwAccount() {
+  return request<JwAccount>("/api/jw/account", { method: "DELETE" });
+}
+
+/** FastAPI 的 HTTPException 报错体是 {"detail": "..."}，取出那句话 */
+export function errorDetail(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  try {
+    const detail = (JSON.parse(message) as { detail?: unknown }).detail;
+    return typeof detail === "string" ? detail : message;
+  } catch {
+    return message;
+  }
 }
 
 export function importDocumentUrl(url: string) {
@@ -243,6 +325,9 @@ function dispatchFrame(frame: string, handlers: ChatHandlers) {
       break;
     case "delta":
       handlers.onDelta?.((payload as { text: string }).text);
+      break;
+    case "tool":
+      handlers.onTool?.(payload as ChatToolEvent);
       break;
     case "done":
       handlers.onDone?.(payload as ChatDone);

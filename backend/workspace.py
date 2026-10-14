@@ -1,7 +1,7 @@
-"""每所学校的工作区设置与嵌入挂件配置：只读 Postgres，带短时缓存。
+"""每所学校的工作区设置、AI 服务配置与嵌入挂件配置：只读 Postgres，带短时缓存。
 
-两张表由 Next 侧 Prisma 建（frontend/prisma/schema.prisma 的 TenantSettings / EmbedConfig），
-写入也只走 Next 的管理接口。这里手写 SQL，改表名或列名必须同步。
+三张表由 Next 侧 Prisma 建（frontend/prisma/schema.prisma 的 TenantSettings / TenantAiConfig /
+EmbedConfig），写入也只走 Next 的管理接口。这里手写 SQL，改表名或列名必须同步。
 
 没配 DATABASE_URL（本地只起 FastAPI）或查询失败时一律退回默认设置，
 不让配置读取故障拖垮问答主链路。
@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg
+import secret_box
 from env_config import load_backend_env
 from logging_config import get_logger
 
@@ -33,6 +34,27 @@ class WorkspaceSettings:
     query_only: bool = False
     similarity_threshold: float = 0.0
     top_k: int = 3
+    # 学校心理咨询的联系方式，出现在求助卡片和陪伴回复里；空串表示只给全国热线
+    counseling_contact: str = ""
+
+
+@dataclass(frozen=True)
+class SchoolAi:
+    """学校在「AI 服务」页配的模型；密钥已解密，空串表示没填。"""
+
+    chat_base_url: str = ""
+    chat_model: str = ""
+    chat_key: str = ""
+    reader_base_url: str = ""
+    reader_model: str = ""
+    reader_key: str = ""
+    map_key: str = ""
+    search_key: str = ""
+    # off / demo / zhengfang
+    jw_mode: str = "off"
+    jw_cas_url: str = ""
+    jw_base_url: str = ""
+    news_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -44,6 +66,7 @@ class EmbedSettings:
 
 
 DEFAULT_SETTINGS = WorkspaceSettings()
+NO_SCHOOL_AI = SchoolAi()
 
 _cache: dict[tuple[str, str], tuple[float, Any]] = {}
 _cache_lock = threading.Lock()
@@ -85,6 +108,12 @@ def clear_cache() -> None:
         _cache.clear()
 
 
+def forget_school_ai(tenant_id: str) -> None:
+    """管理员刚保存完就点「测一下」时，不能拿缓存里的旧配置去测。"""
+    with _cache_lock:
+        _cache.pop(("ai", tenant_id), None)
+
+
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
@@ -99,22 +128,76 @@ def workspace_settings(tenant_id: str) -> WorkspaceSettings:
 
     def load() -> WorkspaceSettings:
         row = _fetch_one(
-            'SELECT "assistantName", "persona", "queryOnly", "similarityThreshold", "topK" '
+            'SELECT "assistantName", "persona", "queryOnly", "similarityThreshold", "topK", "counselingContact" '
             'FROM tenant_settings WHERE "tenantId" = %s',
             (tenant_id,),
         )
         if row is None:
             return DEFAULT_SETTINGS
-        name, persona, query_only, threshold, top_k = row
+        name, persona, query_only, threshold, top_k, counseling = row
         return WorkspaceSettings(
             assistant_name=(name or DEFAULT_SETTINGS.assistant_name).strip(),
             persona=(persona or "").strip(),
             query_only=bool(query_only),
             similarity_threshold=_clamp(float(threshold or 0.0), 0.0, 1.0),
             top_k=int(_clamp(int(top_k or DEFAULT_SETTINGS.top_k), 1, 10)),
+            counseling_contact=(counseling or "").strip(),
         )
 
     return _cached("settings", tenant_id, load, DEFAULT_SETTINGS)
+
+
+def _decrypt(tenant_id: str, token: str) -> str:
+    try:
+        return secret_box.decrypt(token or "")
+    except Exception as exc:
+        # 多半是换过 AUTH_JWT_SECRET：当作没填，退回平台默认，并提示管理员重填
+        logger.warning(f"[Workspace] {tenant_id} 的模型密钥解不开，按未配置处理: {exc}")
+        return ""
+
+
+def school_ai(tenant_id: str) -> SchoolAi:
+    """取某校自配的对话模型与长文档精读模型；没配或读库失败时全部为空。"""
+
+    def load() -> SchoolAi:
+        row = _fetch_one(
+            'SELECT "chatBaseUrl", "chatModel", "chatKey", "readerBaseUrl", "readerModel", "readerKey", '
+            '"mapKey", "searchKey", "jwMode", "jwCasUrl", "jwBaseUrl", "newsUrls" '
+            'FROM tenant_ai_configs WHERE "tenantId" = %s',
+            (tenant_id,),
+        )
+        if row is None:
+            return NO_SCHOOL_AI
+        (
+            chat_url, chat_model, chat_key, reader_url, reader_model, reader_key,
+            map_key, search_key, jw_mode, jw_cas_url, jw_base_url, news_urls,
+        ) = row
+        return SchoolAi(
+            chat_base_url=(chat_url or "").strip(),
+            chat_model=(chat_model or "").strip(),
+            chat_key=_decrypt(tenant_id, chat_key),
+            reader_base_url=(reader_url or "").strip(),
+            reader_model=(reader_model or "").strip(),
+            reader_key=_decrypt(tenant_id, reader_key),
+            map_key=_decrypt(tenant_id, map_key),
+            search_key=_decrypt(tenant_id, search_key),
+            jw_mode=(jw_mode or "off").strip(),
+            jw_cas_url=(jw_cas_url or "").strip().rstrip("/"),
+            jw_base_url=(jw_base_url or "").strip().rstrip("/"),
+            news_urls=tuple(line.strip() for line in (news_urls or "").splitlines() if line.strip()),
+        )
+
+    return _cached("ai", tenant_id, load, NO_SCHOOL_AI)
+
+
+def school_name(tenant_id: str) -> str:
+    """学校全称，用来限定地图搜索的范围；查不到时为空。"""
+
+    def load() -> str:
+        row = _fetch_one('SELECT "name" FROM tenants WHERE "id" = %s', (tenant_id,))
+        return (row[0] or "").strip() if row else ""
+
+    return _cached("name", tenant_id, load, "")
 
 
 def embed_settings(embed_id: str) -> EmbedSettings | None:

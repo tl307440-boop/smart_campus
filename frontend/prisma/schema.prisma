@@ -30,6 +30,7 @@ model Tenant {
 
   users    User[]
   settings TenantSettings?
+  aiConfig TenantAiConfig?
   embeds   EmbedConfig[]
 
   @@map("tenants")
@@ -48,11 +49,50 @@ model TenantSettings {
   similarityThreshold Float    @default(0)
   /// 每次回答引用的片段数
   topK                Int      @default(3)
+  /// 学校心理咨询的联系方式（电话、地点、时间），出现在求助卡片里；空串表示只给全国热线
+  counselingContact   String   @default("")
   updatedAt           DateTime @updatedAt
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@map("tenant_settings")
+}
+
+/// 每所学校自配的 AI 服务。FastAPI 只读（backend/workspace.py 的 school_ai），表名与列名改动要同步那边的 SQL。
+/// 密钥只存 AES-256-GCM 密文：lib/ai-config/secret-box.ts 加密，backend/secret_box.py 解密
+model TenantAiConfig {
+  tenantId      String   @id
+  /// 对话模型：意图判定、闲聊、按资料回答、情绪分析共用。网址与模型 ID 空串表示用默认值
+  chatBaseUrl   String   @default("")
+  chatModel     String   @default("")
+  /// 密文；空串表示没填，退回服务器 .env 的平台默认
+  chatKey       String   @default("")
+  /// 密钥末四位，给管理员认出是哪一把，不必解密
+  chatKeyHint   String   @default("")
+  /// 长文档精读：读整篇短文合集，摘出与问题相关的段落
+  readerBaseUrl String   @default("")
+  readerModel   String   @default("")
+  readerKey     String   @default("")
+  readerKeyHint String   @default("")
+  /// 高德 Web 服务 Key：找校园地点、算步行路线。密文，空串退回服务器 .env 的 AMAP_WEB_KEY
+  mapKey        String   @default("")
+  mapKeyHint    String   @default("")
+  /// 博查 Web Search API Key：联网搜索。密文，空串退回服务器 .env 的 BOCHA_API_KEY
+  searchKey     String   @default("")
+  searchKeyHint String   @default("")
+  /// 教务对接：off 不接 / demo 演示数据 / zhengfang 正方教务（学生绑定自己的账号）
+  jwMode        String   @default("off")
+  /// 统一身份认证（CAS）根地址，如 https://cas.whwl.edu.cn:90/cas
+  jwCasUrl      String   @default("")
+  /// 正方教务根地址，如 https://jwxt.whwl.edu.cn:8088/jwglxt
+  jwBaseUrl     String   @default("")
+  /// 学校通知、新闻列表页，一行一个；Agent 回答「最新通知」时现查
+  newsUrls      String   @default("")
+  updatedAt     DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("tenant_ai_configs")
 }
 
 /// 可嵌入外部网站的聊天挂件。访客令牌由 Next 签发，FastAPI 按 id 回查启用状态与每日上限

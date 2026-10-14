@@ -72,9 +72,12 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      # 要读学校设置里新加的列，表结构没迁移完就启动会在缓存期内退回默认设置
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
-  # ---- 建表：一次性任务，跑完退出，web 等它成功后再起 ----
+  # ---- 建表：一次性任务，跑完退出，api 和 web 都等它成功后再起 ----
   migrate:
     build:
       context: ./frontend

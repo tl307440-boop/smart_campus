@@ -3,7 +3,7 @@
 export const SETTINGS_KEY = "zhiyue.llmSettings";
 export const MEMORY_KEY = "zhiyue.memories";
 
-export type LlmProvider = "deepseek" | "kimi" | "custom";
+export type LlmProvider = "deepseek" | "kimi" | "qwen" | "glm" | "custom";
 
 export interface LlmSettings {
   provider: LlmProvider;
@@ -32,6 +32,16 @@ export const PROVIDERS: Record<
     label: "Kimi",
     baseUrl: "https://api.moonshot.cn/v1",
     model: "moonshot-v1-8k",
+  },
+  qwen: {
+    label: "通义千问",
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    model: "qwen-plus",
+  },
+  glm: {
+    label: "智谱 GLM",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    model: "glm-4-flash",
   },
 };
 

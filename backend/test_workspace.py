@@ -33,14 +33,16 @@ def test_defaults_without_database(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_row_is_mapped_and_clamped(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(workspace, "_fetch_one", lambda sql, params: ("小文", " 人设 ", True, 1.7, 99))
+    monkeypatch.setattr(
+        workspace, "_fetch_one", lambda sql, params: ("小文", " 人设 ", True, 1.7, 99, " 心理中心 027-1 ")
+    )
     settings = workspace.workspace_settings("t1")
 
-    assert settings == WorkspaceSettings("小文", "人设", True, 1.0, 10)
+    assert settings == WorkspaceSettings("小文", "人设", True, 1.0, 10, "心理中心 027-1")
 
 
 def test_result_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = MagicMock(return_value=("小文", "", False, 0.0, 3))
+    calls = MagicMock(return_value=("小文", "", False, 0.0, 3, ""))
     monkeypatch.setattr(workspace, "_fetch_one", calls)
 
     workspace.workspace_settings("t1")

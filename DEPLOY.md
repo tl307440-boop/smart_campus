@@ -31,10 +31,14 @@ rm /root/smart_campus.tar.gz
 
 ## 二、配置环境变量
 
+对话模型和长文档精读的密钥也可以不写在这里：部署好后由学校管理员在网页抽屉「AI 服务」→「改学校的配置」里填，
+按学校分别生效（加密入库，密钥由 `AUTH_JWT_SECRET` 派生，换了它要重填）。这里的是没配学校密钥时的平台默认。
+知识库向量化（`zhi_pu_API_KEY`）所有学校共用一个向量库，只能写在这里，不配就检索不到资料。
+
 ```bash
 cat > /opt/smart_campus/backend/.env << 'EOF'
 deepseek_API_key=sk-你的DeepSeek密钥
-deepseek_url=https://api.deepseek.com
+deepseek_url=https://api.deepseek.com/v1
 
 kimi_API_key=sk-你的Kimi密钥
 kimi_url=https://api.moonshot.cn/v1

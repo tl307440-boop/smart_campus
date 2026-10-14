@@ -53,5 +53,6 @@ lib/
 ## 说明
 
 - 会话 ID 存在地址栏 `?tid=` 与 localStorage，刷新后仍是同一段对话。
-- 语音播报使用浏览器 `speechSynthesis`，不经过后端；开关在右上角账户菜单「朗读回答」。
+- 语音播报使用浏览器 `speechSynthesis`，不经过后端；开关、声音和语速在抽屉「AI 服务」页的「我的偏好」，存在 localStorage。
+- 「AI 服务」页里管理员可以给本校配对话模型与长文档精读模型（`/api/admin/ai`），密钥用 `AUTH_JWT_SECRET` 派生的密钥加密后入库，读回只给末四位；连通测试走 FastAPI `/api/ai/test`。
 - 构建产物为 `output: "standalone"`，容器里直接 `node server.js`。
