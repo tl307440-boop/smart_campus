@@ -205,6 +205,27 @@ def test_jw_bind_maps_unsafe_url_and_bad_json(
     assert response.status_code == code
 
 
+def test_jw_bind_hands_captcha_to_student(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api.jw_account, "bind", MagicMock(side_effect=api.JwCaptcha("aW1n")))
+    response = client.post("/api/jw/account", json={"username": "2023001", "password": "x"}, headers=headers())
+    assert response.status_code == 200 and response.json() == {"captcha": "aW1n"}
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [(api.JwAuthError("该企业微信账号未关联学号"), 400), (api.JwError("企业微信扫码页打不开"), 502), (api.outbound.UnsafeUrlError("x"), 400)],
+)
+def test_jw_wecom_routes_map_errors(client: TestClient, monkeypatch: pytest.MonkeyPatch, error: Exception, code: int) -> None:
+    monkeypatch.setattr(api.jw_account, "wecom_start", MagicMock(side_effect=error))
+    poll = MagicMock(side_effect=error)
+    monkeypatch.setattr(api.jw_account, "wecom_poll", poll)
+    assert client.post("/api/jw/account/wecom", headers=headers()).status_code == code
+    assert client.get("/api/jw/account/wecom", params={"id": "q1"}, headers=headers()).status_code == code
+    poll.assert_called_once_with("tenant-1", "user-1", "q1")
+    assert client.get("/api/jw/account/wecom", headers=headers()).status_code == 422
+    assert client.post("/api/jw/account/wecom", headers=headers("GUEST")).status_code == 403
+
+
 def test_student_cannot_import_url(client: TestClient) -> None:
     response = client.post("/api/documents/url", json={"url": "https://a.edu.cn"}, headers=headers())
     assert response.status_code == 403

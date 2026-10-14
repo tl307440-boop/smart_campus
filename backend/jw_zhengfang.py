@@ -13,15 +13,16 @@
 from __future__ import annotations
 
 import base64
+import html
 import re
 import time
 from datetime import date
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import httpx
 from logging_config import get_logger
-from outbound import USER_AGENT, check_url, ssl_context
+from outbound import USER_AGENT, UnsafeUrlError, check_url, ssl_context
 
 logger = get_logger(__name__)
 
@@ -31,6 +32,10 @@ _FORM_ACTION = re.compile(r'<form[^>]+id="fm1"[^>]*action="([^"]*)"')
 # CAS 登录失败时页面里的报错区
 _ERROR = re.compile(r'id="(?:errormsg|msg)"[^>]*>\s*([^<\s][^<]{1,99})')
 _CURRENT_WEEK = re.compile(r'id\s*=\s*"dqzc_hide"\s+value\s*=\s*"(\d+)"')
+# CAS 登录页「第三方登录」里的企业微信按钮
+_WECOM_LINK = re.compile(r'href="(https://open\.work\.weixin\.qq\.com/wwopen/sso/qrConnect\?[^"]+)"')
+# 教务首页隐藏域里的学号
+_USER_KEY = re.compile(r'id="sessionUserKey"\s+value="(\w+)"')
 _JSON_HEADERS = {
     "X-Requested-With": "XMLHttpRequest",
     "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
@@ -118,9 +123,11 @@ class ZhengfangClient:
     def close(self) -> None:
         self._client.close()
 
+    def _service(self) -> str:
+        return f"{self.base_url}/xtgl/index_initMenu.html"
+
     def _login_url(self) -> str:
-        service = f"{self.base_url}/xtgl/index_initMenu.html"
-        return f"{self.cas_url}/login?service={quote(service, safe='')}"
+        return f"{self.cas_url}/login?service={quote(self._service(), safe='')}"
 
     def _on_jw(self, resp: httpx.Response) -> bool:
         """落到教务主机、且不是教务自己的登录页，才算有会话。"""
@@ -168,6 +175,37 @@ class ZhengfangClient:
             if _EXECUTION.search(resp.text):
                 raise JwAuthError("账号、密码或验证码不正确")
             raise JwError("统一身份认证暂时连不上，请稍后再试")
+
+    def wecom_link(self) -> str:
+        """CAS 登录页上企业微信按钮的扫码地址；回跳 CAS 后的 service 换成教务，扫完直接落到教务。"""
+        page = self._client.get(self._login_url())
+        match = _WECOM_LINK.search(page.text)
+        if match is None:
+            raise JwError("学校的统一身份认证没有开通企业微信扫码登录，请用账号密码绑定")
+        parts = urlsplit(html.unescape(match.group(1)))
+        query = dict(parse_qsl(parts.query))
+        redirect = urlsplit(query.get("redirect_uri", ""))
+        if (redirect.hostname or "").lower() != (urlsplit(self.cas_url).hostname or "").lower():
+            raise JwError("企业微信扫码回跳的不是学校统一身份认证，请用账号密码绑定")
+        query["redirect_uri"] = urlunsplit(redirect._replace(query=urlencode({**dict(parse_qsl(redirect.query)), "service": self._service()})))
+        return urlunsplit(parts._replace(query=urlencode(query)))
+
+    def wecom_login(self, redirect_uri: str, code: str, state: str, appid: str) -> str:
+        """学生在企业微信里确认后，带 code 回 CAS 换登录态；返回教务里的学号（读不到为空）。"""
+        params = urlencode({"code": code, "state": state, "appid": appid})
+        try:
+            resp: httpx.Response | None = self._client.get(f"{redirect_uri}{'&' if '?' in redirect_uri else '?'}{params}")
+        except UnsafeUrlError:
+            # CAS 坚持跳回门户等别的站：登录态已经记在 CAS 的 Cookie 里，下面再走一次教务的 service 就行
+            resp = None
+        err = _ERROR.search(resp.text) if resp is not None else None
+        if resp is None or not self._on_jw(resp):
+            resp = self._client.get(self._login_url())
+        if not self._on_jw(resp):
+            err = err or _ERROR.search(resp.text)
+            raise JwAuthError(err.group(1).strip() if err else "企业微信登录没成功，可能是你的企业微信还没关联学号，请改用账号密码绑定")
+        match = _USER_KEY.search(resp.text)
+        return match.group(1) if match else ""
 
     def _renew(self) -> None:
         """教务会话过期：带 CASTGC 再走一次 CAS 换票；CAS 也要求登录就是凭证过期了。

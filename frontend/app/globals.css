@@ -273,6 +273,24 @@ body {
   .rise-in {
     animation: fade-in 0.3s ease both;
   }
+
+  /* 扫码框里来回扫的一道粉色马克笔 */
+  .qr-scan {
+    position: absolute;
+    inset-inline: 6px;
+    top: 8%;
+    height: 10px;
+    border-radius: 999px;
+    background: var(--color-marker);
+    animation: qr-scan 2.4s ease-in-out infinite alternate;
+    pointer-events: none;
+  }
+}
+
+@keyframes qr-scan {
+  to {
+    top: calc(92% - 10px);
+  }
 }
 
 @keyframes marker-swipe {

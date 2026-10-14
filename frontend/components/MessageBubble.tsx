@@ -1,4 +1,5 @@
 import { Flower } from "@/components/DeskPet";
+import { Markdown } from "@/components/Markdown";
 import { SafetyCard } from "@/components/SafetyCard";
 import { PaperclipIcon, PencilIcon } from "@/components/SketchIcons";
 import type { ChatMessage, ChatSource } from "@/lib/api";
@@ -92,11 +93,17 @@ export function MessageBubble({ message, streaming = false, signed = false, show
 
   return (
     <div className="animate-fade-in">
-      <p className="leading-[1.75] whitespace-pre-wrap break-words">
-        {message.content}
-        {streaming && <PencilIcon size={18} className="pencil-bob ml-1 inline-block align-[-3px] text-pink" />}
-        {signed && <Flower size={20} className="flower-draw ml-1.5 inline-block align-[-4px]" />}
-      </p>
+      <Markdown
+        text={message.content}
+        tail={
+          streaming || signed ? (
+            <>
+              {streaming && <PencilIcon size={18} className="pencil-bob ml-1 inline-block align-[-3px] text-pink" />}
+              {signed && <Flower size={20} className="flower-draw ml-1.5 inline-block align-[-4px]" />}
+            </>
+          ) : null
+        }
+      />
 
       {message.safety && <SafetyCard card={message.safety} />}
 
