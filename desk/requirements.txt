@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+psycopg[binary]
+redis
+argon2-cffi
+python-dotenv
