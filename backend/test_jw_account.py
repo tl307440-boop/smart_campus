@@ -20,17 +20,24 @@ class FakeRedis:
     def get(self, key: str) -> str | None:
         return self.data.get(key)
 
-    def set(self, key: str, value: str, ex: int | None = None) -> None:
+    def set(self, key: str, value: str, ex: int | None = None, keepttl: bool = False, xx: bool = False) -> None:
+        if xx and key not in self.data:
+            return
         self.data[key] = value
         if ex:
             self.ttl[key] = ex
+        elif not keepttl:
+            self.ttl.pop(key, None)
 
-    def delete(self, *keys: str) -> None:
-        for key in keys:
-            self.data.pop(key, None)
+    def delete(self, *keys: str) -> int:
+        return sum(self.data.pop(key, None) is not None for key in keys)
 
     def incr(self, key: str) -> int:
         self.data[key] = str(int(self.data.get(key, "0")) + 1)
+        return int(self.data[key])
+
+    def decr(self, key: str) -> int:
+        self.data[key] = str(int(self.data.get(key, "0")) - 1)
         return int(self.data[key])
 
     def expire(self, key: str, seconds: int) -> None:

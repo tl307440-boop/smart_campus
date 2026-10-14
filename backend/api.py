@@ -40,7 +40,7 @@ from auth import (
 )
 from chat_stream import sse, sse_from_graph_stream
 from env_config import load_backend_env
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from graph_app import build_graph, get_vector_db
@@ -313,17 +313,42 @@ def bind_jw_account(payload: JwBind, user: MemberDep) -> dict[str, Any]:
         return jw_account.bind(user.tenant_id, user.id, payload.username.strip(), payload.password, payload.captcha.strip())
     except JwCaptcha as exc:
         return {"captcha": exc.image_base64}
-    except JwAuthError as exc:
+    except JW_ERRORS as exc:
+        raise _jw_http_error(exc) from exc
+
+
+@app.post("/api/jw/account/wecom")
+def start_jw_wecom(user: MemberDep) -> dict[str, Any]:
+    """开一张企业微信登录二维码：{"qr": PNG base64, "expiresIn": 秒}。"""
+    try:
+        return jw_account.wecom_start(user.tenant_id, user.id)
+    except JW_ERRORS as exc:
+        raise _jw_http_error(exc) from exc
+
+
+@app.get("/api/jw/account/wecom")
+def poll_jw_wecom(user: MemberDep, id: str = Query(..., max_length=64)) -> dict[str, Any]:
+    """长轮询这张二维码的扫码结果（最多挂 30 秒），没到 bound / expired 前端就接着问。"""
+    try:
+        return jw_account.wecom_poll(user.tenant_id, user.id, id)
+    except JW_ERRORS as exc:
+        raise _jw_http_error(exc) from exc
+
+
+JW_ERRORS = (JwError, httpx.HTTPError, ValueError)
+
+
+def _jw_http_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, JwAuthError):
         # 不用 401：前端会把 401 当成本站登录过期
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except JwError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail="连不上学校的统一身份认证，请稍后再试") from exc
-    except outbound.UnsafeUrlError as exc:
-        raise HTTPException(status_code=400, detail=f"学校的教务地址无法访问（{exc}），请联系管理员") from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=502, detail="学校的统一身份认证返回异常，请稍后再试") from exc
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, JwError):
+        return HTTPException(status_code=502, detail=str(exc))
+    if isinstance(exc, httpx.HTTPError):
+        return HTTPException(status_code=502, detail="连不上学校的统一身份认证，请稍后再试")
+    if isinstance(exc, outbound.UnsafeUrlError):
+        return HTTPException(status_code=400, detail=f"学校的教务地址无法访问（{exc}），请联系管理员")
+    return HTTPException(status_code=502, detail="学校的统一身份认证返回异常，请稍后再试")
 
 
 @app.delete("/api/jw/account")

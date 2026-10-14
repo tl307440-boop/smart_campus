@@ -190,6 +190,19 @@ export function unbindJwAccount() {
   return request<JwAccount>("/api/jw/account", { method: "DELETE" });
 }
 
+/** 取值与后端 jw_account.wecom_poll 一一对应 */
+export type WecomStatus = "waiting" | "scanned" | "cancelled" | "expired" | "bound";
+
+/** 企业微信扫码绑定：开一张二维码（PNG base64），id 用来轮询这一张 */
+export function startJwWecom() {
+  return request<{ id: string; qr: string; expiresIn: number }>("/api/jw/account/wecom", { method: "POST" });
+}
+
+/** 长轮询这张二维码的一轮扫码结果，最多挂 30 秒 */
+export function pollJwWecom(id: string, signal?: AbortSignal) {
+  return request<{ status: WecomStatus; account?: JwAccount }>(`/api/jw/account/wecom?id=${encodeURIComponent(id)}`, { signal });
+}
+
 /** FastAPI 的 HTTPException 报错体是 {"detail": "..."}，取出那句话 */
 export function errorDetail(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);

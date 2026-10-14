@@ -3,11 +3,15 @@
 绑定时用学生输入的账号密码登录一次，只把登录后的 Cookie 加密存进 Redis，密码用完即丢。
 Cookie 过期（CAS 的「记住我」到期，或学生改了密码）后查询会报 JwAuthError，提示学生重新绑定。
 需要验证码时，把 CAS 会话 Cookie 暂存 5 分钟，学生填好验证码后连同账号密码再提交一次。
+也可以用企业微信扫码绑定（学校 CAS 开了企业微信登录时）：二维码和 CAS 会话同样暂存 5 分钟，
+前端反复来问扫码状态，学生在企业微信里确认后，服务器拿 code 回 CAS 换登录凭证，全程不经手密码。
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
+import secrets
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -15,6 +19,7 @@ from typing import Any, Protocol
 
 import redis
 import secret_box
+import wecom_qr
 from jw_zhengfang import JwAuthError, JwCaptcha, JwError, ZhengfangClient
 from logging_config import get_logger
 from workspace import SchoolAi, school_ai
@@ -25,6 +30,8 @@ CRED_TTL = 30 * 86400
 PENDING_TTL = 300
 BIND_TRIES = 6
 BIND_WINDOW = 600
+QR_TRIES = 10
+POLLS_PER_USER = 2
 _INFO = b"smart-campus/jw-session"
 
 _client: redis.Redis | None = None
@@ -43,6 +50,18 @@ def _cred_key(tenant_id: str, user_id: str) -> str:
 
 def _pending_key(tenant_id: str, user_id: str) -> str:
     return f"jw:pending:{tenant_id}:{user_id}"
+
+
+def _qr_key(tenant_id: str, user_id: str, qr_id: str) -> str:
+    return f"jw:wecom:{tenant_id}:{user_id}:{qr_id}"
+
+
+def _limit(key: str, tries: int) -> None:
+    count = _redis().incr(key)
+    if count == 1:
+        _redis().expire(key, BIND_WINDOW)
+    if count > tries:
+        raise JwError("尝试次数太多，请 10 分钟后再试")
 
 
 def _mask(username: str) -> str:
@@ -86,11 +105,7 @@ def bind(tenant_id: str, user_id: str, username: str, password: str, captcha: st
     """登录并保存 Cookie。需要验证码时抛 JwCaptcha（带图），密码错抛 JwAuthError。"""
     # 别让我们的服务器成了替人撞库的跳板：每人 10 分钟内最多试 6 次
     tries_key = f"jw:tries:{tenant_id}:{user_id}"
-    tries = _redis().incr(tries_key)
-    if tries == 1:
-        _redis().expire(tries_key, BIND_WINDOW)
-    if tries > BIND_TRIES:
-        raise JwError("尝试次数太多，请 10 分钟后再试")
+    _limit(tries_key, BIND_TRIES)
     client = _new_client(school_ai(tenant_id))
     pending = _redis().get(_pending_key(tenant_id, user_id))
     try:
@@ -111,6 +126,65 @@ def bind(tenant_id: str, user_id: str, username: str, password: str, captcha: st
         client.close()
     logger.info("jw bound", extra={"tenant_id": tenant_id, "user_id": user_id})
     return status(tenant_id, user_id)
+
+
+def wecom_start(tenant_id: str, user_id: str) -> dict[str, Any]:
+    """开一张企业微信登录二维码，返回 {"id": 这张码的编号, "qr": PNG base64, "expiresIn": 秒}。
+
+    每张码单独暂存、轮询时带上编号：换码、切页签后旧码那一轮长轮询回来，碰不到新码。
+    """
+    _limit(f"jw:wecom-tries:{tenant_id}:{user_id}", QR_TRIES)
+    client = _new_client(school_ai(tenant_id))
+    try:
+        qr, image = wecom_qr.start(client.wecom_link())
+        pending = {"qr": qr.to_dict(), "cookies": client.export_cookies()}
+    finally:
+        client.close()
+    qr_id = secrets.token_urlsafe(12)
+    _redis().set(_qr_key(tenant_id, user_id, qr_id), secret_box.encrypt(json.dumps(pending), _INFO), ex=PENDING_TTL)
+    return {"id": qr_id, "qr": base64.b64encode(image).decode(), "expiresIn": PENDING_TTL}
+
+
+def wecom_poll(tenant_id: str, user_id: str, qr_id: str) -> dict[str, Any]:
+    """等一轮扫码结果。status：waiting / scanned / cancelled / expired / bound（附 account）。"""
+    key = _qr_key(tenant_id, user_id, qr_id)
+    raw = _redis().get(key)
+    if not raw:
+        return {"status": "expired"}
+    pending = json.loads(secret_box.decrypt(raw, _INFO))
+    qr = wecom_qr.QrLogin(**pending["qr"])
+    # 一次长轮询要占一个工作线程半分钟：每人同时最多两轮（多出来的一般是刚切走的旧码），超了直接报上一轮的状态
+    busy_key = f"jw:wecom-polls:{tenant_id}:{user_id}"
+    if _redis().incr(busy_key) > POLLS_PER_USER:
+        _redis().decr(busy_key)
+        return {"status": qr.status or "waiting"}
+    _redis().expire(busy_key, 60)
+    try:
+        state, code = wecom_qr.poll(qr)
+    finally:
+        _redis().decr(busy_key)
+    if state == "expired":
+        _redis().delete(key)
+        return {"status": state}
+    if state != "confirmed" or not code:
+        state = "scanned" if state == "confirmed" else state
+        if state != qr.status:
+            pending["qr"]["status"] = state
+            # 长轮询期间这张码可能已到期被删，xx 不让它被这一轮写回来
+            _redis().set(key, secret_box.encrypt(json.dumps(pending), _INFO), xx=True, keepttl=True)
+        return {"status": state}
+    # code 只能用一次：删得掉暂存的那一轮才去换登录态（同一张码在两个页面同时轮询时只有一个能删掉）
+    if not _redis().delete(key):
+        return {"status": "scanned"}
+    client = _new_client(school_ai(tenant_id))
+    try:
+        client.load_cookies(pending["cookies"])
+        username = client.wecom_login(qr.redirect_uri, code, qr.state, qr.appid)
+        _save(tenant_id, user_id, client, _mask(username) if username else "企业微信账号")
+    finally:
+        client.close()
+    logger.info("jw bound via wecom", extra={"tenant_id": tenant_id, "user_id": user_id})
+    return {"status": "bound", "account": status(tenant_id, user_id)}
 
 
 def unbind(tenant_id: str, user_id: str) -> None:
