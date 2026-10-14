@@ -107,6 +107,52 @@ def test_places_are_searched_around_campus_and_route_has_nav_link(monkeypatch: p
     assert calls.count("/v5/place/text 测试学院") == 1  # 学校位置只查一次
 
 
+def test_gates_come_from_input_tips_and_unmapped_places_list_campus(monkeypatch: pytest.MonkeyPatch) -> None:
+    school_tools._campus.cache_clear()
+    school_tools._campus_places.cache_clear()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path, params = request.url.path, request.url.params
+        if path == "/v5/place/text":
+            return httpx.Response(200, json={"status": "1", "pois": [{"name": "测试学院", "location": "114.40,30.72"}]})
+        if path == "/v5/place/around":
+            if params["keywords"] == "测试学院":
+                return httpx.Response(200, json={"status": "1", "pois": [
+                    {"name": "测试学院", "location": "114.40,30.72"},
+                    {"name": "测试学院报到处", "location": "114.401,30.72"},
+                    {"name": "测试学院和泽楼(4号楼)", "location": "114.402,30.72"},
+                    {"name": "测试学院校内超市店", "location": "114.402,30.72"},
+                    {"name": "瑞幸咖啡(测试学院店)", "location": "114.402,30.72"},
+                ]})
+            if params["keywords"] == "报到处":
+                return httpx.Response(200, json={"status": "1", "pois": [{"name": "测试学院报到处", "location": "114.401,30.72"}]})
+            # 地图上没有的词，周边搜索也会凑几个不相干的
+            return httpx.Response(200, json={"status": "1", "pois": [{"name": "7号仓库", "location": "114.41,30.72"}]})
+        if path == "/v3/assistant/inputtips":
+            return httpx.Response(200, json={"status": "1", "tips": [
+                {"name": "测试学院(东门)", "location": "114.403,30.72"},
+                {"name": "测试学院和润楼(1号楼)", "location": "114.404,30.72"},
+                {"name": "某奶茶(测试学院店)", "location": "114.403,30.72"},
+                {"name": "外地大学(东门)", "location": "116.30,39.90"},
+                {"name": "测试学院东门公交线", "location": []},
+            ]})
+        if path == "/v3/direction/walking":
+            return httpx.Response(200, json={"status": "1", "route": {"paths": [{"distance": "164", "duration": "120", "steps": []}]}})
+        return httpx.Response(404)
+
+    _mock(monkeypatch, handler)
+    assert [p.name for p in school_tools.find_places("k", "测试学院", "东门")] == ["测试学院(东门)"]
+    assert [p.name for p in school_tools.find_places("k", "测试学院", "测试学院东门")] == ["测试学院(东门)"]
+    assert [p.name for p in school_tools.find_places("k", "测试学院", "1号楼")] == ["测试学院和润楼(1号楼)"]
+    # 南门哪儿都没有：只剩周边搜索凑的结果，名字对不上
+    assert not any(school_tools.name_matches("南门", p) for p in school_tools.find_places("k", "测试学院", "南门"))
+    names = [school_tools.short_name(p, "测试学院") for p in school_tools.campus_places("k", "测试学院")]
+    assert names == ["报到处", "和泽楼(4号楼)", "东门"]
+    assert school_tools.walking_route("k", "测试学院", "东门", "报到处")["distance_m"] == 164
+    with pytest.raises(ToolError, match="标注过的校内地点有：报到处、和泽楼\\(4号楼\\)、东门"):
+        school_tools.walking_route("k", "测试学院", "南门", "报到处")
+
+
 def test_amap_qps_limit_is_retried_not_reported_as_quota(monkeypatch: pytest.MonkeyPatch) -> None:
     school_tools._campus.cache_clear()
     monkeypatch.setattr(school_tools.time, "sleep", lambda seconds: None)

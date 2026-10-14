@@ -4,7 +4,15 @@ import { getPrisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/auth/admin";
 import { AUTH_ERROR, authError } from "@/lib/auth/errors";
 import { encryptSecret, keyHint } from "@/lib/ai-config/secret-box";
-import { type AiConfigView, type JwMode, JW_MODES, type KeyInput, parseAiConfig } from "@/lib/ai-config/schema";
+import {
+  type AiConfigView,
+  type EmbeddingProvider,
+  EMBEDDING_PROVIDERS,
+  type JwMode,
+  JW_MODES,
+  type KeyInput,
+  parseAiConfig,
+} from "@/lib/ai-config/schema";
 
 type Row = Omit<TenantAiConfig, "tenantId" | "updatedAt">;
 
@@ -25,6 +33,11 @@ const EMPTY: Row = {
   jwCasUrl: "",
   jwBaseUrl: "",
   newsUrls: "",
+  embeddingProvider: "",
+  embeddingModel: "",
+  embeddingBaseUrl: "",
+  embeddingKey: "",
+  embeddingKeyHint: "",
 };
 
 /** 读回时密文一律不出服务端，只说有没有、末四位是什么 */
@@ -45,6 +58,15 @@ function toView(row: Row): AiConfigView {
       baseUrl: row.jwBaseUrl,
     },
     newsUrls: row.newsUrls.split("\n").filter(Boolean),
+    embedding: {
+      provider: (EMBEDDING_PROVIDERS as readonly string[]).includes(row.embeddingProvider)
+        ? (row.embeddingProvider as EmbeddingProvider)
+        : "",
+      model: row.embeddingModel,
+      baseUrl: row.embeddingBaseUrl,
+      hasKey: Boolean(row.embeddingKey),
+      keyHint: row.embeddingKeyHint,
+    },
   };
 }
 
@@ -82,12 +104,13 @@ export async function PUT(request: Request): Promise<NextResponse> {
   const parsed = parseAiConfig(body);
   if (!parsed.ok) return authError(AUTH_ERROR.INVALID_INPUT, parsed.message);
 
-  const { chat, reader, map, search, jw, newsUrls } = parsed.value;
+  const { chat, reader, map, search, jw, newsUrls, embedding } = parsed.value;
   try {
     const chatKey = keyChange(chat);
     const readerKey = keyChange(reader);
     const mapKey = keyChange(map);
     const searchKey = keyChange(search);
+    const embeddingKey = keyChange(embedding);
     const data = {
       chatBaseUrl: chat.baseUrl,
       chatModel: chat.model,
@@ -97,10 +120,14 @@ export async function PUT(request: Request): Promise<NextResponse> {
       jwCasUrl: jw.casUrl,
       jwBaseUrl: jw.baseUrl,
       newsUrls: newsUrls.join("\n"),
+      embeddingProvider: embedding.provider,
+      embeddingModel: embedding.model,
+      embeddingBaseUrl: embedding.baseUrl,
       ...(chatKey && { chatKey: chatKey.key, chatKeyHint: chatKey.hint }),
       ...(readerKey && { readerKey: readerKey.key, readerKeyHint: readerKey.hint }),
       ...(mapKey && { mapKey: mapKey.key, mapKeyHint: mapKey.hint }),
       ...(searchKey && { searchKey: searchKey.key, searchKeyHint: searchKey.hint }),
+      ...(embeddingKey && { embeddingKey: embeddingKey.key, embeddingKeyHint: embeddingKey.hint }),
     };
     const saved = await getPrisma().tenantAiConfig.upsert({
       where: { tenantId: check.tenant.id },

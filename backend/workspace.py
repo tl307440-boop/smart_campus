@@ -55,6 +55,11 @@ class SchoolAi:
     jw_cas_url: str = ""
     jw_base_url: str = ""
     news_urls: tuple[str, ...] = ()
+    # 智谱向量化密钥走 embedding_key。local / openai 只预留，后端不加载。
+    embedding_provider: str = ""
+    embedding_model: str = ""
+    embedding_base_url: str = ""
+    embedding_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -160,18 +165,39 @@ def school_ai(tenant_id: str) -> SchoolAi:
     """取某校自配的对话模型与长文档精读模型；没配或读库失败时全部为空。"""
 
     def load() -> SchoolAi:
-        row = _fetch_one(
+        params = (tenant_id,)
+        base_sql = (
             'SELECT "chatBaseUrl", "chatModel", "chatKey", "readerBaseUrl", "readerModel", "readerKey", '
             '"mapKey", "searchKey", "jwMode", "jwCasUrl", "jwBaseUrl", "newsUrls" '
-            'FROM tenant_ai_configs WHERE "tenantId" = %s',
-            (tenant_id,),
+            'FROM tenant_ai_configs WHERE "tenantId" = %s'
         )
+        try:
+            row = _fetch_one(
+                base_sql.replace(
+                    '"newsUrls" ',
+                    '"newsUrls", "embeddingProvider", "embeddingModel", "embeddingBaseUrl", "embeddingKey" ',
+                ),
+                params,
+            )
+            has_embedding = True
+        except Exception as exc:
+            # 迁移还没跑时列不存在。对话配置仍要能读，向量化先按平台默认。
+            logger.warning(f"[Workspace] 向量化配置列还没有，先用平台默认: {exc}")
+            row = _fetch_one(base_sql, params)
+            has_embedding = False
         if row is None:
             return NO_SCHOOL_AI
         (
             chat_url, chat_model, chat_key, reader_url, reader_model, reader_key,
             map_key, search_key, jw_mode, jw_cas_url, jw_base_url, news_urls,
-        ) = row
+        ) = row[:12]
+        if has_embedding:
+            embedding_provider, embedding_model, embedding_base_url, embedding_key = row[12:16]
+        else:
+            embedding_provider, embedding_model, embedding_base_url, embedding_key = "", "", "", ""
+        provider = (embedding_provider or "").strip()
+        if provider not in {"", "local", "zhipu", "openai"}:
+            provider = ""
         return SchoolAi(
             chat_base_url=(chat_url or "").strip(),
             chat_model=(chat_model or "").strip(),
@@ -185,6 +211,10 @@ def school_ai(tenant_id: str) -> SchoolAi:
             jw_cas_url=(jw_cas_url or "").strip().rstrip("/"),
             jw_base_url=(jw_base_url or "").strip().rstrip("/"),
             news_urls=tuple(line.strip() for line in (news_urls or "").splitlines() if line.strip()),
+            embedding_provider=provider,
+            embedding_model=(embedding_model or "").strip(),
+            embedding_base_url=(embedding_base_url or "").strip().rstrip("/"),
+            embedding_key=_decrypt(tenant_id, embedding_key),
         )
 
     return _cached("ai", tenant_id, load, NO_SCHOOL_AI)

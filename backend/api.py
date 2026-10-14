@@ -18,12 +18,11 @@ import memory_store
 import outbound
 import school_tools
 from ai_config import (
-    EMBEDDING_MODEL,
     READER_TIMEOUT_SECONDS,
     ModelEndpoint,
     ToolKey,
     client_for,
-    embedding_configured,
+    embedding_spec,
     map_key,
     reader_endpoint,
     school_chat_endpoint,
@@ -205,15 +204,15 @@ def _endpoint_status(endpoint: ModelEndpoint | None) -> dict[str, Any]:
 @app.get("/api/ai/status")
 def ai_status(user: MemberDep) -> dict[str, Any]:
     """本校各项 AI 服务配没配、用的是学校的还是平台的。不含任何密钥，学生也能看。"""
-    embedding = embedding_configured()
     school = school_ai(user.tenant_id)
+    spec = embedding_spec(user.tenant_id)
     return {
         "chat": _endpoint_status(school_chat_endpoint(user.tenant_id)),
         "reader": _endpoint_status(reader_endpoint(user.tenant_id)),
         "embedding": {
-            "configured": embedding,
-            "source": "platform" if embedding else None,
-            "model": EMBEDDING_MODEL,
+            "configured": spec is not None,
+            "source": spec.source if spec else None,
+            "model": spec.model if spec else "",
         },
         "map": _key_status(map_key(user.tenant_id), "高德 Web 服务"),
         "search": _key_status(search_key(user.tenant_id), "博查 Web Search"),
@@ -268,16 +267,17 @@ def test_ai_service(payload: AiServiceTest, user: AdminDep) -> dict[str, Any]:
     if payload.service in ("map", "search", "jw", "news"):
         return _test_tool(payload.service, user.tenant_id)
     if payload.service == "embedding":
-        if not embedding_configured():
-            raise HTTPException(status_code=400, detail="服务器还没配置向量化密钥（zhi_pu_API_KEY）")
-        vdb = get_vector_db()
+        spec = embedding_spec(user.tenant_id)
+        if spec is None:
+            raise HTTPException(status_code=400, detail="还没配置智谱向量化密钥。请管理员在「AI 服务」里填写，或在服务器 .env 配置 zhi_pu_API_KEY")
+        vdb = get_vector_db(user.tenant_id)
         if vdb is None:
             raise HTTPException(status_code=502, detail="向量库初始化失败，查看后端日志")
         try:
             vdb.embedding_model.embed_query("连通测试")
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"连通失败: {exc}") from exc
-        return {"ok": True, "source": "platform", "model": EMBEDDING_MODEL}
+        return {"ok": True, "source": spec.source, "model": spec.model}
 
     is_chat = payload.service == "chat"
     endpoint = school_chat_endpoint(user.tenant_id) if is_chat else reader_endpoint(user.tenant_id)

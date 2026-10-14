@@ -2,14 +2,16 @@
 
 import { useEffect, useState } from "react";
 import { PROVIDERS } from "@/lib/agent-settings";
-import type {
-  AiConfigView,
-  AiEndpointInput,
-  AiService,
-  JwConfig,
-  JwMode,
-  KeyInput,
-  KeyService,
+import {
+  LOCAL_EMBEDDING_MODELS,
+  type AiConfigView,
+  type AiEndpointInput,
+  type AiService,
+  type EmbeddingInput,
+  type JwConfig,
+  type JwMode,
+  type KeyInput,
+  type KeyService,
 } from "@/lib/ai-config/schema";
 import { type AiServiceName, type AiStatus, errorDetail, fetchAiStatus, testAiService } from "@/lib/api";
 import { fetchAiConfig, saveAiConfig } from "@/lib/workspace/client";
@@ -23,7 +25,7 @@ const DEFAULTS: Record<AiService, { baseUrl: string; model: string }> = {
 const ROWS: { service: AiServiceName; name: string; use: string }[] = [
   { service: "chat", name: "对话模型", use: "判断问题、回答、情绪分析" },
   { service: "reader", name: "长文档精读", use: "资料不多时整篇读，摘出相关段落" },
-  { service: "embedding", name: "知识库向量化", use: "资料多时按片段检索（平台统一提供）" },
+  { service: "embedding", name: "知识库向量化", use: "智谱 embedding-3，把资料切成片段再检索" },
   { service: "jw", name: "教务查询", use: "学生绑定账号后查课表、考试、成绩、空教室" },
   { service: "news", name: "学校通知", use: "从官网、教务处的列表页读最新通知" },
   { service: "map", name: "地图问路", use: "新生找教学楼、食堂、校门，规划步行路线" },
@@ -50,7 +52,9 @@ const KEY_HELP: Record<KeyService, { title: string; placeholder: string; link: s
   },
 };
 
-type Drafts = Record<AiService, AiEndpointInput> & Record<KeyService, KeyInput> & { jw: JwConfig; newsUrls: string };
+type Drafts = Record<AiService, AiEndpointInput> &
+  Record<KeyService, KeyInput> & { jw: JwConfig; newsUrls: string; embedding: EmbeddingInput };
+
 type TestState = { pending: boolean; ok?: boolean; text?: string };
 
 function toDrafts(view: AiConfigView): Drafts {
@@ -67,13 +71,20 @@ function toDrafts(view: AiConfigView): Drafts {
     search: { apiKey: "", clearKey: false },
     jw: { ...view.jw },
     newsUrls: view.newsUrls.join("\n"),
+    embedding: {
+      provider: view.embedding.provider,
+      model: view.embedding.model,
+      baseUrl: view.embedding.baseUrl,
+      apiKey: "",
+      clearKey: false,
+    },
   };
 }
 
 function statusText(service: AiServiceName, status: AiStatus[AiServiceName] | undefined): string {
   if (!status) return "读取中…";
   if (!status.configured || !status.source) {
-    if (service === "embedding") return "未配置：需要在服务器上配置";
+    if (service === "embedding") return "未配置：请管理员填写智谱密钥";
     if (service === "jw") return "关闭";
     return "未配置";
   }
@@ -187,6 +198,49 @@ function StatusDot({ ok }: { ok: boolean }) {
     >
       {ok ? "✓" : "!"}
     </span>
+  );
+}
+
+function EmbeddingForm({
+  view,
+  draft,
+  onChange,
+}: {
+  view: AiConfigView["embedding"];
+  draft: EmbeddingInput;
+  onChange: (patch: Partial<EmbeddingInput>) => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-muted">
+        和对话模型一样，写在这个管理员账号里，加密保存。填了就用学校自己的智谱密钥，不填用服务器上的。向量计算在智谱那边，这台机器只存切好的片段。
+      </p>
+      <label className="block">
+        <span className="field-label">智谱 API 密钥（embedding-3）</span>
+        <input
+          type="password"
+          value={draft.apiKey}
+          onChange={(event) => onChange({ apiKey: event.target.value, clearKey: false, provider: "zhipu" })}
+          autoComplete="off"
+          placeholder={view.hasKey ? `已保存 ···${view.keyHint || "****"}，留空不改` : "留空则用服务器上的智谱密钥"}
+          className="field"
+        />
+      </label>
+      {view.hasKey && (
+        <label className="flex items-center gap-2 text-sm text-muted">
+          <input
+            type="checkbox"
+            checked={draft.clearKey}
+            onChange={(event) => onChange({ clearKey: event.target.checked, apiKey: "", provider: "" })}
+            className="size-4 accent-pink"
+          />
+          清除已保存的密钥（改用服务器上的）
+        </label>
+      )}
+      <p className="text-sm text-muted">
+        开源模型先留着，暂不启用：{LOCAL_EMBEDDING_MODELS.map((item) => item.label).join("、")}。不打进镜像，也不会在服务器上加载。
+      </p>
+    </div>
   );
 }
 
@@ -322,6 +376,7 @@ export function SchoolAiSettings({ isAdmin }: { isAdmin: boolean }) {
       for (const service of ["chat", "reader", "map", "search"] as const) {
         if (saved[service].hasKey || status?.[service].configured) await runTest(service);
       }
+      await runTest("embedding");
       if (saved.newsUrls.length) await runTest("news");
       if (saved.jw.mode !== "off") await runTest("jw");
       setStatus(await fetchAiStatus());
@@ -381,6 +436,16 @@ export function SchoolAiSettings({ isAdmin }: { isAdmin: boolean }) {
           <p className="mt-1 text-sm text-muted">
             填了就用学校自己的模型，不填用平台默认。密钥加密保存，保存后只显示末四位。
           </p>
+          <fieldset className="mt-4 border-t border-dashed border-rule pt-3">
+            <legend className="pr-2 font-display text-base">知识库向量化</legend>
+            <EmbeddingForm
+              view={view.embedding}
+              draft={drafts.embedding}
+              onChange={(patch) =>
+                setDrafts((prev) => prev && { ...prev, embedding: { ...prev.embedding, ...patch } })
+              }
+            />
+          </fieldset>
           {(["chat", "reader"] as const).map((service) => (
             <fieldset key={service} className="mt-4 border-t border-dashed border-rule pt-3">
               <legend className="pr-2 font-display text-base">{service === "chat" ? "对话模型" : "长文档精读"}</legend>

@@ -12,14 +12,15 @@ import glob
 import os
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
 
 from env_config import backend_dir, chroma_persist_dir
 from file_service import FileService
 from logging_config import get_logger
+from ai_config import embedding_spec
 from tenancy import GLOBAL_TENANT, is_visible_to, normalize_tenant
-from vector_service import VectorRAGService
+from vector_service import VectorRAGService, document_content_hash, open_store, peek_store
 from web_import import fetch_page
 
 logger = get_logger(__name__)
@@ -96,6 +97,10 @@ class KnowledgeBase:
         # 键是 (租户, 文档名)：不同学校可以有同名文档
         self._documents: dict[tuple[str, str], DocumentInfo] = {}
         self._short_texts: dict[tuple[str, str], str] = {}
+        self._texts: dict[tuple[str, str], str] = {}
+        self._hashes: dict[tuple[str, str], str] = {}
+        self._indexing: set[str] = set()
+        self._index_locks: dict[str, threading.Lock] = {}
         self._autoloaded = False
 
     # ---------- 向量库 ----------
@@ -119,7 +124,15 @@ class KnowledgeBase:
                 doc for (owner, _), doc in self._documents.items()
                 if is_visible_to(owner, tenant_id)
             ]
-        return sorted(visible, key=lambda d: d.name)
+        visible.sort(key=lambda doc: doc.name)
+        if self._vector_db_failed:
+            return visible
+        spec = embedding_spec(tenant_id)
+        store = peek_store(spec.collection_name) if spec is not None else None
+        marked = [self._with_index_flag(doc, store) for doc in visible]
+        if spec is not None and any(not doc.indexed for doc in marked):
+            self._schedule_index(tenant_id)
+        return marked
 
     def short_corpus(self, tenant_id: str, budget: int = KIMI_CORPUS_BUDGET) -> str:
         """拼接该租户可见的短文全文，作为 Kimi 精读路径的输入。
@@ -207,9 +220,11 @@ class KnowledgeBase:
         要重启进程才会重新索引，还会白白重跑一遍 embedding。
         """
         tenant = normalize_tenant(tenant_id)
-        vdb = self.vector_db
-        if vdb is not None:
-            vdb.clear_tenant(tenant)
+        if not self._vector_db_failed:
+            spec = embedding_spec(tenant)
+            store = open_store(spec) if spec is not None else None
+            if store is not None:
+                store.clear_tenant(tenant)
 
         uploads_dir = _uploads_dir(tenant)
         if os.path.isdir(uploads_dir):
@@ -222,6 +237,8 @@ class KnowledgeBase:
             for key in [k for k in self._documents if k[0] == tenant]:
                 self._documents.pop(key, None)
                 self._short_texts.pop(key, None)
+                self._texts.pop(key, None)
+                self._hashes.pop(key, None)
 
     def _load_uploads(self, uploads_root: str) -> None:
         """uploads/ 下每个子目录是一个租户。"""
@@ -295,26 +312,78 @@ class KnowledgeBase:
         self, name: str, content: str, source: str, tenant_id: str
     ) -> DocumentInfo:
         tenant = normalize_tenant(tenant_id)
-        indexed = False
-        vdb = self.vector_db
-        if vdb is not None:
-            try:
-                vdb.index_document(content, name, tenant)
-                indexed = True
-            except Exception as exc:
-                logger.error(f"[Knowledge] 建立索引失败 {name}: {exc}")
-
         info = DocumentInfo(
-            name=name, chars=len(content), indexed=indexed, source=source, tenant_id=tenant
+            name=name, chars=len(content), indexed=False, source=source, tenant_id=tenant
         )
         key = (tenant, name)
         with self._lock:
             self._documents[key] = info
+            self._texts[key] = content
+            self._hashes[key] = document_content_hash(content)
             if len(content) < LONG_DOC_CHARS:
                 self._short_texts[key] = content
             else:
                 self._short_texts.pop(key, None)
         return info
+
+    def ensure_indexed(self, tenant_id: str) -> None:
+        """把这所学校能看到的文档写进它选的向量库。同一模型只建一次，检索前也会调用。"""
+        if self._vector_db_failed:
+            return
+        spec = embedding_spec(tenant_id)
+        if spec is None:
+            return
+        with self._tenant_index_lock(tenant_id):
+            store = open_store(spec)
+            if store is None:
+                return
+            with self._lock:
+                pending = [
+                    (owner, name, self._texts[(owner, name)])
+                    for owner, name in self._documents
+                    if is_visible_to(owner, tenant_id) and (owner, name) in self._texts
+                ]
+            for owner, name, text in pending:
+                try:
+                    store.index_document(text, name, owner)
+                except Exception as exc:
+                    logger.error(f"[Knowledge] 建立索引失败 {name}: {exc}")
+
+    def _schedule_index(self, tenant_id: str) -> None:
+        with self._lock:
+            if tenant_id in self._indexing:
+                return
+            self._indexing.add(tenant_id)
+
+        def run() -> None:
+            try:
+                self.ensure_indexed(tenant_id)
+            finally:
+                with self._lock:
+                    self._indexing.discard(tenant_id)
+
+        threading.Thread(target=run, name=f"index-{tenant_id}", daemon=True).start()
+
+    def _tenant_index_lock(self, tenant_id: str) -> threading.Lock:
+        with self._lock:
+            lock = self._index_locks.get(tenant_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._index_locks[tenant_id] = lock
+            return lock
+
+    def _with_index_flag(self, doc: DocumentInfo, store: VectorRAGService | None) -> DocumentInfo:
+        indexed = False
+        if store is not None:
+            expected = self._hashes.get((doc.tenant_id, doc.name))
+            try:
+                indexed = (
+                    expected is not None
+                    and store.get_indexed_content_hash(doc.name, doc.tenant_id) == expected
+                )
+            except Exception as exc:
+                logger.warning(f"[Knowledge] 读取索引状态失败 {doc.name}: {exc}")
+        return replace(doc, indexed=indexed)
 
 
 def _strip_frontmatter(text: str) -> str:

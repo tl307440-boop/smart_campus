@@ -9,6 +9,9 @@ export function useDocuments() {
   const [documents, setDocuments] = useState<DocumentInfo[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  const [indexStalled, setIndexStalled] = useState(false);
+  const indexPending = documents.length > 0 && documents.some((doc) => !doc.indexed);
+
   const reload = useCallback(async () => {
     const docs = await fetchDocuments().catch(() => null);
     if (docs) {
@@ -32,5 +35,22 @@ export function useDocuments() {
     };
   }, []);
 
-  return { documents, loadError, reload };
+  useEffect(() => {
+    if (!indexPending) {
+      setIndexStalled(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setIndexStalled(true), 120_000);
+    return () => window.clearTimeout(timer);
+  }, [indexPending]);
+
+  useEffect(() => {
+    if (!indexPending || indexStalled) return;
+    const timer = window.setInterval(() => {
+      void reload();
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [indexPending, indexStalled, reload]);
+
+  return { documents, loadError, reload, indexPending, indexStalled };
 }

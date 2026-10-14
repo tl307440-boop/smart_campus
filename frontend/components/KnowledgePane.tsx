@@ -17,7 +17,7 @@ function splitPath(name: string): [string, string] {
 
 /** 抽屉页「知识库」，只给老师和管理员：上传、网页导入、文档清单、清空。 */
 export function KnowledgePane() {
-  const { documents, loadError, reload } = useDocuments();
+  const { documents, loadError, reload, indexPending, indexStalled } = useDocuments();
   const [notice, setNotice] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [url, setUrl] = useState("");
@@ -73,7 +73,9 @@ export function KnowledgePane() {
 
   return (
     <section>
-      <PaneTitle title="知识库">回答会从这些资料里找依据。上传后会自动切片建索引。</PaneTitle>
+      <PaneTitle title="知识库">
+        回答会从这些资料里找依据。索引用「服务」里配置的智谱密钥，打开本页就会切片。
+      </PaneTitle>
 
       <input
         ref={fileInput}
@@ -108,6 +110,16 @@ export function KnowledgePane() {
           导入
         </button>
       </form>
+      {indexPending && !indexStalled && (
+        <p className="mt-3 text-sm text-muted" role="status">
+          正在用智谱建立索引，完成前这一列显示未索引。
+        </p>
+      )}
+      {indexStalled && (
+        <p className="mt-3 text-sm text-muted" role="status">
+          索引还没完成。到「服务」里对「知识库向量化」点测一下，多半是智谱密钥还没填。
+        </p>
+      )}
       {(notice ?? loadError) && (
         <p className="mt-3 text-[0.9375rem] break-all text-muted" role="status">
           {notice ?? loadError}

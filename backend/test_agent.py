@@ -100,9 +100,12 @@ def test_unmapped_campus_place_falls_back_to_school_location(monkeypatch: pytest
     monkeypatch.setattr(agent, "school_name", lambda tenant_id: "测试学院")
     monkeypatch.setattr(agent.school_tools, "find_places", lambda key, school, name, limit=5: [])
     monkeypatch.setattr(agent.school_tools, "campus", lambda key, school: campus)
+    gate = agent.school_tools.Place("测试学院(东门)", "", 114.41, 30.72)
+    monkeypatch.setattr(agent.school_tools, "campus_places", lambda key, school: [gate])
     ctx = _ctx()
     result = agent._place(ctx, {"name": "南门"})
     assert result["places"] == [] and result["campus"]["map_link"] == campus.link
+    assert result["mapped_on_campus"] == [{"name": "东门", "map_link": gate.link}]
     assert "学校资料" in result["note"] and ctx.sources[0]["url"] == campus.link
 
 

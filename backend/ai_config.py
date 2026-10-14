@@ -24,6 +24,13 @@ DEFAULT_CHAT_MODEL = "deepseek-chat"
 DEFAULT_READER_BASE_URL = "https://api.moonshot.cn/v1"
 DEFAULT_READER_MODEL = "kimi-k2-0905-preview"
 EMBEDDING_MODEL = "embedding-3"
+# 只预留名字，不加载、不打进镜像。2 核 2G 的机器装上 PyTorch 容易把内存吃满。
+RESERVED_LOCAL_EMBEDDING_MODELS = (
+    "BAAI/bge-small-zh-v1.5",
+    "BAAI/bge-base-zh-v1.5",
+    "BAAI/bge-m3",
+)
+EmbeddingProvider = Literal["local", "zhipu", "openai"]
 
 Source = Literal["personal", "school", "platform"]
 SOURCE_LABEL: dict[str, str] = {"personal": "个人密钥", "school": "学校配置", "platform": "平台默认"}
@@ -162,9 +169,38 @@ def search_key(tenant_id: str) -> ToolKey | None:
     return _tool_key(school_ai(tenant_id).search_key, "BOCHA_API_KEY")
 
 
-def embedding_configured() -> bool:
-    """向量化是平台级的：所有学校共用一个向量库，换模型维度就对不上。"""
-    return bool(_env_key("zhi_pu_API_KEY"))
+@dataclass(frozen=True)
+class EmbeddingSpec:
+    """智谱 embedding-3。计算在智谱那边，这台机器只存切片后的向量。"""
+
+    provider: EmbeddingProvider
+    model: str
+    base_url: str
+    api_key: str
+    source: Source
+
+    @property
+    def collection_name(self) -> str:
+        return "campus_knowledge"
+
+
+def embedding_spec(tenant_id: str) -> EmbeddingSpec | None:
+    """学校管理员在「AI 服务」里填的智谱密钥 > 服务器 .env。
+
+    local / openai 只是预留（名单见 RESERVED_LOCAL_EMBEDDING_MODELS），看到也当成没选，
+    避免在服务器上加载开源模型。
+    """
+    school = school_ai(tenant_id)
+    key = school.embedding_key or _env_key("zhi_pu_API_KEY")
+    if not key:
+        return None
+    source: Source = "school" if school.embedding_key else "platform"
+    return EmbeddingSpec("zhipu", EMBEDDING_MODEL, "", key, source)
+
+
+def embedding_configured(tenant_id: str) -> bool:
+    """这所学校现在能不能做向量检索。"""
+    return embedding_spec(tenant_id) is not None
 
 
 @lru_cache(maxsize=32)

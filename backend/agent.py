@@ -268,13 +268,20 @@ def _place(ctx: ToolContext, args: dict[str, Any]) -> Any:
         "places": [{"name": p.name, "address": p.address, "map_link": p.link} for p in places],
         "search_link": school_tools.search_link(f"{school} {name}".strip()),
     }
-    if not places:
+    if not any(school_tools.name_matches(name, p, school) for p in places):
         # 地图上常常只标了学校本身，没标校内的楼和门：至少能带新生先到学校
         campus = school_tools.campus(key, school)
         if campus:
             ctx.cite(f"高德地图·{campus.name}", campus.link, campus.address)
             result["campus"] = {"name": campus.name, "address": campus.address, "map_link": campus.link}
-        result["note"] = f"地图上没有标注「{name}」，校内的具体位置以学校资料（search_knowledge）为准，可以先导航到学校"
+        mapped = school_tools.campus_places(key, school)
+        if mapped:
+            result["mapped_on_campus"] = [{"name": school_tools.short_name(p, school), "map_link": p.link} for p in mapped[:30]]
+        result["note"] = (
+            f"地图上没有名字对得上「{name}」的地点，places 里如果有结果也只是附近相近的，未必是要找的。"
+            "mapped_on_campus 是学校在地图上标注过的校内地点，可以据此推荐最接近的"
+            "（比如问的门没标，就说标了哪几个门）；校内具体位置以学校资料（search_knowledge）为准，也可以先导航到学校"
+        )
     return result
 
 

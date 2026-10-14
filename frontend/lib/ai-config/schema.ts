@@ -38,9 +38,29 @@ export interface JwConfig {
 
 export const NEWS_URLS_MAX = 10;
 
+export const EMBEDDING_PROVIDERS = ["", "local", "zhipu", "openai"] as const;
+export type EmbeddingProvider = (typeof EMBEDDING_PROVIDERS)[number];
+
+/** 与 backend/ai_config.py 的 RESERVED_LOCAL_EMBEDDING_MODELS 保持一致。只展示，不加载。 */
+export const LOCAL_EMBEDDING_MODELS = [
+  { id: "BAAI/bge-small-zh-v1.5", label: "bge-small-zh" },
+  { id: "BAAI/bge-base-zh-v1.5", label: "bge-base-zh" },
+  { id: "BAAI/bge-m3", label: "bge-m3" },
+] as const;
+
+export interface EmbeddingInput {
+  /** 空串或 zhipu 都走智谱；local / openai 只预留，后端不加载 */
+  provider: EmbeddingProvider;
+  model: string;
+  baseUrl: string;
+  apiKey: string;
+  clearKey: boolean;
+}
+
 export interface AiConfigInput extends Record<AiService, AiEndpointInput>, Record<KeyService, KeyInput> {
   jw: JwConfig;
   newsUrls: string[];
+  embedding: EmbeddingInput;
 }
 
 export interface AiEndpointView {
@@ -55,9 +75,18 @@ export interface KeyView {
   keyHint: string;
 }
 
+export interface EmbeddingView {
+  provider: EmbeddingProvider;
+  model: string;
+  baseUrl: string;
+  hasKey: boolean;
+  keyHint: string;
+}
+
 export interface AiConfigView extends Record<AiService, AiEndpointView>, Record<KeyService, KeyView> {
   jw: JwConfig;
   newsUrls: string[];
+  embedding: EmbeddingView;
 }
 
 const SERVICE_NAME: Record<AiService | KeyService, string> = {
@@ -169,6 +198,45 @@ function normalizePublicUrl(raw: string): string | null {
   return trimmed;
 }
 
+function parseEmbedding(raw: unknown): ValidationResult<EmbeddingInput> {
+  const source = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+  const provider = (EMBEDDING_PROVIDERS as readonly unknown[]).includes(source.provider)
+    ? (source.provider as EmbeddingProvider)
+    : "";
+  const model = typeof source.model === "string" ? source.model.trim() : "";
+  const apiKey = typeof source.apiKey === "string" ? source.apiKey.trim() : "";
+  const baseUrl = normalizeBaseUrl(typeof source.baseUrl === "string" ? source.baseUrl : "");
+
+  if (model.length > MODEL_MAX || /\s/.test(model)) {
+    return { ok: false, message: `向量模型 ID 不能含空格，且不超过 ${MODEL_MAX} 字符` };
+  }
+  if (apiKey.length > API_KEY_MAX || /\s/.test(apiKey)) {
+    return { ok: false, message: "向量化密钥不能含空格，且不超过 300 字符" };
+  }
+  if (provider === "zhipu" && model && model !== "embedding-3") {
+    return { ok: false, message: "智谱向量化目前只用 embedding-3" };
+  }
+  let embeddingBaseUrl = "";
+  if (provider === "openai") {
+    if (baseUrl === null || !baseUrl || baseUrl.length > BASE_URL_MAX) {
+      return { ok: false, message: "向量化接口网址需要是 https 公网地址" };
+    }
+    if (!model) return { ok: false, message: "兼容接口需要填写模型 ID" };
+    embeddingBaseUrl = baseUrl;
+  }
+  const localModel = LOCAL_EMBEDDING_MODELS.some((item) => item.id === model) ? model : "";
+  return {
+    ok: true,
+    value: {
+      provider,
+      model: provider === "local" ? localModel : provider === "openai" ? model : provider === "zhipu" ? "embedding-3" : "",
+      baseUrl: embeddingBaseUrl,
+      apiKey,
+      clearKey: source.clearKey === true,
+    },
+  };
+}
+
 export function parseAiConfig(body: unknown): ValidationResult<AiConfigInput> {
   if (typeof body !== "object" || body === null) return { ok: false, message: "请求体格式不正确" };
   const source = body as Record<string, unknown>;
@@ -184,8 +252,18 @@ export function parseAiConfig(body: unknown): ValidationResult<AiConfigInput> {
   if (!jw.ok) return jw;
   const newsUrls = parseNewsUrls(source.newsUrls);
   if (!newsUrls.ok) return newsUrls;
+  const embedding = parseEmbedding(source.embedding);
+  if (!embedding.ok) return embedding;
   return {
     ok: true,
-    value: { chat: chat.value, reader: reader.value, map: map.value, search: search.value, jw: jw.value, newsUrls: newsUrls.value },
+    value: {
+      chat: chat.value,
+      reader: reader.value,
+      map: map.value,
+      search: search.value,
+      jw: jw.value,
+      newsUrls: newsUrls.value,
+      embedding: embedding.value,
+    },
   };
 }
