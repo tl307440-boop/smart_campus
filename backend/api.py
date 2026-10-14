@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
+import desk_log
 import httpx
 import jw_account
 import memory_store
@@ -465,6 +466,10 @@ def chat(payload: ChatRequest, user: CurrentUserDep) -> StreamingResponse:
     enforce_chat_quota(user.id)
     if user.is_guest:
         _enforce_guest_quota(user)
+    try:
+        desk_log.remember_question(user.tenant_id, "" if user.is_guest else user.id, payload.question)
+    except Exception:
+        logger.warning("提问记录没写上")
     return StreamingResponse(
         _chat_events(
             scoped_thread_id(user, payload.thread_id),

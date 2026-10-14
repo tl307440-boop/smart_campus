@@ -93,9 +93,36 @@ services:
     environment:
       DATABASE_URL: postgresql://campus:${POSTGRES_PASSWORD:?请在 .env 设置 POSTGRES_PASSWORD}@postgres:5432/smart_campus
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?请在 .env 设置 AUTH_JWT_SECRET}
+      # 站点上的 /desk 转到旁边这个进程。不写进前端构建参数，改地址不用重新打包页面。
+      DESK_UPSTREAM: http://desk:8300
     depends_on:
       api:
         condition: service_started
+      migrate:
+        condition: service_completed_successfully
+      desk:
+        condition: service_started
+    restart: unless-stopped
+
+  # 平台小本子。学校站点的 /desk 会转到这里；8300 是同一本，安全组放行后也能直接开。
+  desk:
+    image: smart_campus-desk:latest
+    build:
+      context: .
+      dockerfile: desk/Dockerfile
+      args:
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
+    ports:
+      - "8300:8300"
+    environment:
+      REDIS_URL: redis://redis:6379
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?请在 .env 设置 AUTH_JWT_SECRET}
+      DATABASE_URL: postgresql://campus:${POSTGRES_PASSWORD:?请在 .env 设置 POSTGRES_PASSWORD}@postgres:5432/smart_campus
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped

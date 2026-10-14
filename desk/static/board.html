@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>平台小本子</title>
+  <link rel="stylesheet" href="__ROOT__/assets/desk.css" />
+</head>
+<body>
+  <svg width="0" height="0" aria-hidden="true">
+    <filter id="ink-wobble" x="-12%" y="-12%" width="124%" height="124%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="2" seed="7" result="noise" />
+      <feDisplacementMap in="SourceGraphic" in2="noise" scale="2.6" />
+    </filter>
+  </svg>
+  <main class="wrap">
+    <section class="paper">
+      <header class="head">
+        <div>
+          <h1>平台小本子</h1>
+          <p class="you"><span id="school">__SCHOOL__</span> · <span id="who">__NAME__</span></p>
+        </div>
+        <form method="post" action="__ROOT__/logout">
+          <button class="btn ghost" type="submit">合上</button>
+        </form>
+      </header>
+      <nav class="tabs" role="tablist" aria-label="小本子分页">
+        <button type="button" role="tab" data-tab="online" aria-selected="true">
+          <svg class="scribble" viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true"><path d="M8 22C6 9 30 3 55 4s40 6 38 17-30 15-52 14S9 31 12 18" fill="none" stroke="#e8487e" stroke-width="2.4" stroke-linecap="round" /></svg>
+          在线
+        </button>
+        <button type="button" role="tab" data-tab="questions" aria-selected="false">
+          <svg class="scribble" viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true"><path d="M8 22C6 9 30 3 55 4s40 6 38 17-30 15-52 14S9 31 12 18" fill="none" stroke="#e8487e" stroke-width="2.4" stroke-linecap="round" /></svg>
+          提问
+        </button>
+        <button type="button" role="tab" data-tab="actions" aria-selected="false">
+          <svg class="scribble" viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true"><path d="M8 22C6 9 30 3 55 4s40 6 38 17-30 15-52 14S9 31 12 18" fill="none" stroke="#e8487e" stroke-width="2.4" stroke-linecap="round" /></svg>
+          操作
+        </button>
+      </nav>
+      <p class="note" id="blurb">最近 5 分钟有动静的人。关掉页面、没有新动作的，过几分钟会从这里消失。</p>
+      <p class="empty" id="empty" hidden>现在没有人在线</p>
+      <ul class="list" id="rows"></ul>
+      <p class="status" id="status"></p>
+    </section>
+  </main>
+  <script>
+    const blurbs = {
+      online: "最近 5 分钟有动静的人。关掉页面、没有新动作的，过几分钟会从这里消失。",
+      questions: "从这次更新之后记下的提问，不含回答。",
+      actions: "查课表、联网搜索、找地点这些。登录和上传还不在这一页。"
+    };
+    const empties = {
+      online: "现在没有人在线",
+      questions: "还没有人提问",
+      actions: "还没有操作记录"
+    };
+    const tabs = document.querySelectorAll("[role=tab]");
+    const blurb = document.getElementById("blurb");
+    const empty = document.getElementById("empty");
+    const rows = document.getElementById("rows");
+    const status = document.getElementById("status");
+    let feed = { online: [], questions: [], actions: [] };
+    let current = sessionStorage.getItem("desk-tab") || "online";
+    let timer = 0;
+
+    function line(parent, className, text) {
+      const node = document.createElement("p");
+      node.className = className;
+      node.textContent = text;
+      parent.appendChild(node);
+      return node;
+    }
+
+    function show(tab) {
+      current = tab;
+      sessionStorage.setItem("desk-tab", tab);
+      tabs.forEach((button) => button.setAttribute("aria-selected", button.dataset.tab === tab ? "true" : "false"));
+      blurb.textContent = blurbs[tab];
+      rows.replaceChildren();
+      const items = feed[tab] || [];
+      empty.hidden = items.length > 0;
+      empty.textContent = empties[tab];
+      items.forEach((item) => {
+        const li = document.createElement("li");
+        if (tab === "actions" && item.ok === false) li.className = "fail";
+        const who = document.createElement("p");
+        who.className = "who";
+        const name = document.createElement("strong");
+        name.textContent = item.name || "未命名";
+        who.appendChild(name);
+        const meta = [item.studentNo, item.role].filter(Boolean).join(" · ");
+        if (meta) {
+          const span = document.createElement("span");
+          span.textContent = " " + meta;
+          who.appendChild(span);
+        }
+        li.appendChild(who);
+        line(li, "when", tab === "online" ? item.ago : item.time);
+        if (tab === "online") line(li, "what", item.what || "");
+        if (tab === "questions") line(li, "text", item.text + (item.cut ? "（后面截断了）" : ""));
+        if (tab === "actions") line(li, "text", item.ok === false && item.error ? item.text + " · " + item.error : item.text);
+        rows.appendChild(li);
+      });
+    }
+
+    async function load() {
+      try {
+        const response = await fetch("__ROOT__/api/feed", { headers: { accept: "application/json" } });
+        if (response.status === 401) {
+          location.assign("__ROOT__/");
+          return;
+        }
+        if (!response.ok) throw new Error("bad");
+        feed = await response.json();
+        status.textContent = "刚刚看过";
+        show(current);
+      } catch (error) {
+        status.textContent = "这一页暂时读不到";
+      }
+    }
+
+    function arm() {
+      clearInterval(timer);
+      if (!document.hidden) timer = setInterval(load, 15000);
+    }
+
+    tabs.forEach((button) => button.addEventListener("click", () => show(button.dataset.tab)));
+    document.addEventListener("visibilitychange", () => {
+      arm();
+      if (!document.hidden) load();
+    });
+    show(blurbs[current] ? current : "online");
+    load();
+    arm();
+  </script>
+</body>
+</html>

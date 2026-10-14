@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 40
     env:
       ECS_HOST: ${{ secrets.ECS_HOST }}
-      IMAGES: smart_campus-api:latest smart_campus-migrate:latest smart_campus-web:latest
+      IMAGES: smart_campus-api:latest smart_campus-migrate:latest smart_campus-web:latest smart_campus-desk:latest
     steps:
       - uses: actions/checkout@v4
 
@@ -57,6 +57,7 @@ jobs:
           docker build --target migrator -t smart_campus-migrate:latest frontend
           docker build --build-arg NEXT_PUBLIC_API_BASE="${PUBLIC_API_BASE}" \
             -t smart_campus-web:latest frontend
+          docker build -f desk/Dockerfile -t smart_campus-desk:latest .
           docker image ls smart_campus-*
 
       # docker load 时新旧镜像同时在盘上，峰值约 8GB，先清掉旧构建缓存和悬空镜像腾空间
@@ -106,10 +107,27 @@ jobs:
           docker builder prune -af >/dev/null
           df -h / | tail -n 1
           # 首次启动要把维基和预置文档向量化，健康检查给足时间
+          api_ok=0
           for i in $(seq 1 30); do
-            if curl -fsS --max-time 5 http://127.0.0.1:8001/api/health; then echo; exit 0; fi
+            if curl -fsS --max-time 5 http://127.0.0.1:8001/api/health; then echo; api_ok=1; break; fi
             sleep 10
           done
-          dc -f docker-compose.aliyun.yml logs --tail 80 api
-          exit 1
+          if [ "$api_ok" != 1 ]; then
+            dc -f docker-compose.aliyun.yml logs --tail 80 api
+            exit 1
+          fi
+          if ! curl -fsS --max-time 5 http://127.0.0.1:8300/health; then
+            dc -f docker-compose.aliyun.yml logs --tail 80 desk
+            exit 1
+          fi
+          desk_ok=0
+          for i in $(seq 1 15); do
+            if curl -fsSL --max-time 5 http://127.0.0.1/desk | grep -q "平台小本子"; then desk_ok=1; break; fi
+            sleep 4
+          done
+          if [ "$desk_ok" != 1 ]; then
+            dc -f docker-compose.aliyun.yml logs --tail 40 desk web
+            exit 1
+          fi
+          exit 0
           EOF

@@ -26,6 +26,7 @@ EMBED = EmbedSettings(id="embed-1", tenant_id="tenant-1", daily_limit=50, enable
 @pytest.fixture(autouse=True)
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AUTH_JWT_SECRET", SECRET)
+    monkeypatch.setattr(api.desk_log, "remember_question", lambda *args, **kwargs: None)
     monkeypatch.setattr(auth, "embed_settings", lambda eid: EMBED if eid == EMBED.id else None)
     monkeypatch.setattr(api, "embed_settings", lambda eid: EMBED if eid == EMBED.id else None)
     monkeypatch.setattr(api, "enforce_chat_quota", lambda user_id: None)
@@ -118,6 +119,37 @@ def test_guest_chat_drops_byok_and_memory(client: TestClient, monkeypatch: pytes
     assert captured["user_id"] == ""
     assert captured["tenant_id"] == "tenant-1"
     quota.assert_called_once_with("embed-1", 50)
+
+
+def test_chat_records_the_question_before_answering(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, str] = {}
+
+    def fake_events(thread_id, question, tenant_id, llm=None, user_id=""):
+        yield "event: done\ndata: {}\n\n"
+
+    def record(tenant_id: str, user_id: str, question: str) -> None:
+        seen["tenant_id"] = tenant_id
+        seen["user_id"] = user_id
+        seen["question"] = question
+
+    monkeypatch.setattr(api, "_chat_events", fake_events)
+    monkeypatch.setattr(api.desk_log, "remember_question", record)
+    response = client.post("/api/chat", json={"thread_id": "t-1", "question": "今天开门了吗"}, headers=headers())
+    assert response.status_code == 200
+    assert seen == {"tenant_id": "tenant-1", "user_id": "user-1", "question": "今天开门了吗"}
+
+
+def test_chat_still_answers_when_the_question_log_breaks(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_events(thread_id, question, tenant_id, llm=None, user_id=""):
+        yield "event: done\ndata: {}\n\n"
+
+    def broken(tenant_id: str, user_id: str, question: str) -> None:
+        raise RuntimeError("redis gone")
+
+    monkeypatch.setattr(api, "_chat_events", fake_events)
+    monkeypatch.setattr(api.desk_log, "remember_question", broken)
+    response = client.post("/api/chat", json={"thread_id": "t-1", "question": "还在吗"}, headers=headers())
+    assert response.status_code == 200
 
 
 def test_member_chat_keeps_user_id(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
