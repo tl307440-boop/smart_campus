@@ -4,19 +4,9 @@ import { getPrisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/auth/admin";
 import { AUTH_ERROR, authError } from "@/lib/auth/errors";
 import { encryptSecret, keyHint } from "@/lib/ai-config/secret-box";
-import { type AiConfigView, type AiEndpointInput, parseAiConfig } from "@/lib/ai-config/schema";
+import { type AiConfigView, type JwMode, JW_MODES, type KeyInput, parseAiConfig } from "@/lib/ai-config/schema";
 
-type Row = Pick<
-  TenantAiConfig,
-  | "chatBaseUrl"
-  | "chatModel"
-  | "chatKey"
-  | "chatKeyHint"
-  | "readerBaseUrl"
-  | "readerModel"
-  | "readerKey"
-  | "readerKeyHint"
->;
+type Row = Omit<TenantAiConfig, "tenantId" | "updatedAt">;
 
 const EMPTY: Row = {
   chatBaseUrl: "",
@@ -27,6 +17,14 @@ const EMPTY: Row = {
   readerModel: "",
   readerKey: "",
   readerKeyHint: "",
+  mapKey: "",
+  mapKeyHint: "",
+  searchKey: "",
+  searchKeyHint: "",
+  jwMode: "off",
+  jwCasUrl: "",
+  jwBaseUrl: "",
+  newsUrls: "",
 };
 
 /** 读回时密文一律不出服务端，只说有没有、末四位是什么 */
@@ -39,11 +37,19 @@ function toView(row: Row): AiConfigView {
       hasKey: Boolean(row.readerKey),
       keyHint: row.readerKeyHint,
     },
+    map: { hasKey: Boolean(row.mapKey), keyHint: row.mapKeyHint },
+    search: { hasKey: Boolean(row.searchKey), keyHint: row.searchKeyHint },
+    jw: {
+      mode: (JW_MODES as readonly string[]).includes(row.jwMode) ? (row.jwMode as JwMode) : "off",
+      casUrl: row.jwCasUrl,
+      baseUrl: row.jwBaseUrl,
+    },
+    newsUrls: row.newsUrls.split("\n").filter(Boolean),
   };
 }
 
 /** 填了新密钥就换，勾了清除就清，都没有就保持原样（不出现在 update 里） */
-function keyChange(input: AiEndpointInput): { key: string; hint: string } | null {
+function keyChange(input: KeyInput): { key: string; hint: string } | null {
   if (input.clearKey) return { key: "", hint: "" };
   if (input.apiKey) return { key: encryptSecret(input.apiKey), hint: keyHint(input.apiKey) };
   return null;
@@ -76,17 +82,25 @@ export async function PUT(request: Request): Promise<NextResponse> {
   const parsed = parseAiConfig(body);
   if (!parsed.ok) return authError(AUTH_ERROR.INVALID_INPUT, parsed.message);
 
-  const { chat, reader } = parsed.value;
+  const { chat, reader, map, search, jw, newsUrls } = parsed.value;
   try {
     const chatKey = keyChange(chat);
     const readerKey = keyChange(reader);
+    const mapKey = keyChange(map);
+    const searchKey = keyChange(search);
     const data = {
       chatBaseUrl: chat.baseUrl,
       chatModel: chat.model,
       readerBaseUrl: reader.baseUrl,
       readerModel: reader.model,
+      jwMode: jw.mode,
+      jwCasUrl: jw.casUrl,
+      jwBaseUrl: jw.baseUrl,
+      newsUrls: newsUrls.join("\n"),
       ...(chatKey && { chatKey: chatKey.key, chatKeyHint: chatKey.hint }),
       ...(readerKey && { readerKey: readerKey.key, readerKeyHint: readerKey.hint }),
+      ...(mapKey && { mapKey: mapKey.key, mapKeyHint: mapKey.hint }),
+      ...(searchKey && { searchKey: searchKey.key, searchKeyHint: searchKey.hint }),
     };
     const saved = await getPrisma().tenantAiConfig.upsert({
       where: { tenantId: check.tenant.id },

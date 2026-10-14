@@ -131,6 +131,8 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
           text,
           {
             onStatus: (next) => setStatus(STAGE_LABEL[next.stage] ?? null),
+            // 查完不改回去：工具很快时「正在查课表…」会一闪而过，留到回答开始吐字再换
+            onTool: (event) => event.state === "running" && setStatus(`正在${event.label}…`),
             onDelta: (chunk) => {
               streamed += chunk;
               setPending(streamed);

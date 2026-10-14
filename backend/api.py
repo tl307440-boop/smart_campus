@@ -11,16 +11,23 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
+import httpx
+import jw_account
 import memory_store
+import outbound
+import school_tools
 from ai_config import (
     EMBEDDING_MODEL,
     READER_TIMEOUT_SECONDS,
     ModelEndpoint,
+    ToolKey,
     client_for,
     embedding_configured,
+    map_key,
     reader_endpoint,
     school_chat_endpoint,
     scrub,
+    search_key,
 )
 from auth import (
     AdminDep,
@@ -37,6 +44,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from graph_app import build_graph, get_vector_db
+from jw_zhengfang import JwAuthError, JwCaptcha, JwError
 from knowledge import knowledge_base
 from llm_request import LlmRequest, stream_with_llm_request
 from logging_config import get_logger, setup_logging
@@ -44,7 +52,7 @@ from openai import OpenAI
 from pydantic import BaseModel, Field, field_validator
 from rate_limit import enforce_chat_quota, enforce_embed_quota
 from web_import import UnsafeUrlError
-from workspace import embed_settings, forget_school_ai, workspace_settings
+from workspace import embed_settings, forget_school_ai, school_ai, school_name, workspace_settings
 
 logger = get_logger(__name__)
 
@@ -106,7 +114,13 @@ class LlmConfig(BaseModel):
 
 
 class AiServiceTest(BaseModel):
-    service: Literal["chat", "reader", "embedding"]
+    service: Literal["chat", "reader", "embedding", "map", "search", "jw", "news"]
+
+
+class JwBind(BaseModel):
+    username: str = Field(..., min_length=1, max_length=40)
+    password: str = Field(..., min_length=1, max_length=100)
+    captcha: str = Field(default="", max_length=10)
 
 
 class ChatRequest(BaseModel):
@@ -191,6 +205,7 @@ def _endpoint_status(endpoint: ModelEndpoint | None) -> dict[str, Any]:
 def ai_status(user: MemberDep) -> dict[str, Any]:
     """本校各项 AI 服务配没配、用的是学校的还是平台的。不含任何密钥，学生也能看。"""
     embedding = embedding_configured()
+    school = school_ai(user.tenant_id)
     return {
         "chat": _endpoint_status(school_chat_endpoint(user.tenant_id)),
         "reader": _endpoint_status(reader_endpoint(user.tenant_id)),
@@ -199,13 +214,58 @@ def ai_status(user: MemberDep) -> dict[str, Any]:
             "source": "platform" if embedding else None,
             "model": EMBEDDING_MODEL,
         },
+        "map": _key_status(map_key(user.tenant_id), "高德 Web 服务"),
+        "search": _key_status(search_key(user.tenant_id), "博查 Web Search"),
+        "jw": {"configured": school.jw_mode != "off", "source": "school" if school.jw_mode != "off" else None, "model": school.jw_mode},
+        "news": {"configured": bool(school.news_urls), "source": "school" if school.news_urls else None, "model": f"{len(school.news_urls)} 个网址"},
     }
+
+
+def _key_status(key: ToolKey | None, name: str) -> dict[str, Any]:
+    return {"configured": key is not None, "source": key.source if key else None, "model": name}
+
+
+def _test_tool(service: str, tenant_id: str) -> dict[str, Any]:
+    """地图、搜索、教务、通知的连通测试：都是真调一次最便宜的接口。"""
+    school = school_ai(tenant_id)
+    try:
+        if service == "map":
+            key = map_key(tenant_id)
+            if key is None:
+                raise HTTPException(status_code=400, detail="还没配置：先填好高德 Key 并保存")
+            places = school_tools.find_places(key.key, school_name(tenant_id), "图书馆", 1)
+            return {"ok": True, "source": key.source, "model": f"找到「{places[0].name}」" if places else "Key 可用，没搜到图书馆"}
+        if service == "search":
+            key = search_key(tenant_id)
+            if key is None:
+                raise HTTPException(status_code=400, detail="还没配置：先填好博查 Key 并保存")
+            results = school_tools.web_search(key.key, school_name(tenant_id) or "大学", 1)
+            return {"ok": True, "source": key.source, "model": f"返回 {len(results)} 条结果"}
+        if service == "news":
+            items = school_tools.school_news(school.news_urls)
+            return {"ok": True, "source": "school", "model": f"最新：{items[0]['title'][:24]}" if items else "没解析到文章"}
+        if school.jw_mode == "off":
+            raise HTTPException(status_code=400, detail="教务查询是关闭的")
+        if school.jw_mode == "zhengfang":
+            jw_account.probe(tenant_id)
+        return {"ok": True, "source": "school", "model": "演示数据" if school.jw_mode == "demo" else "统一身份认证可访问"}
+    except (school_tools.ToolError, JwError) as exc:
+        raise HTTPException(status_code=502, detail=f"连通失败: {exc}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"连通失败: 网络错误 {type(exc).__name__}") from exc
+    except outbound.UnsafeUrlError as exc:
+        raise HTTPException(status_code=400, detail=f"连通失败: {exc}") from exc
+    except ValueError as exc:
+        # 对方返回的不是预期的 JSON（比如维护页）
+        raise HTTPException(status_code=502, detail="连通失败: 对方返回的内容无法解析") from exc
 
 
 @app.post("/api/ai/test")
 def test_ai_service(payload: AiServiceTest, user: AdminDep) -> dict[str, Any]:
     """用本校当前生效的配置真实调一次。管理员刚保存完就会点它，所以先丢掉缓存。"""
     forget_school_ai(user.tenant_id)
+    if payload.service in ("map", "search", "jw", "news"):
+        return _test_tool(payload.service, user.tenant_id)
     if payload.service == "embedding":
         if not embedding_configured():
             raise HTTPException(status_code=400, detail="服务器还没配置向量化密钥（zhi_pu_API_KEY）")
@@ -235,6 +295,41 @@ def test_ai_service(payload: AiServiceTest, user: AdminDep) -> dict[str, Any]:
             status_code=502, detail=f"连通失败（{endpoint.label}）: {scrub(str(exc), endpoint)}"
         ) from exc
     return {"ok": True, "source": endpoint.source, "model": endpoint.model}
+
+
+# ============================================================
+# 教务账号绑定（只存登录后的 Cookie，不存密码）
+# ============================================================
+
+@app.get("/api/jw/account")
+def get_jw_account(user: MemberDep) -> dict[str, Any]:
+    return jw_account.status(user.tenant_id, user.id)
+
+
+@app.post("/api/jw/account")
+def bind_jw_account(payload: JwBind, user: MemberDep) -> dict[str, Any]:
+    """需要验证码时返回 {"captcha": 图片 base64}，学生填好后连同账号密码再提交一次。"""
+    try:
+        return jw_account.bind(user.tenant_id, user.id, payload.username.strip(), payload.password, payload.captcha.strip())
+    except JwCaptcha as exc:
+        return {"captcha": exc.image_base64}
+    except JwAuthError as exc:
+        # 不用 401：前端会把 401 当成本站登录过期
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except JwError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="连不上学校的统一身份认证，请稍后再试") from exc
+    except outbound.UnsafeUrlError as exc:
+        raise HTTPException(status_code=400, detail=f"学校的教务地址无法访问（{exc}），请联系管理员") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail="学校的统一身份认证返回异常，请稍后再试") from exc
+
+
+@app.delete("/api/jw/account")
+def unbind_jw_account(user: MemberDep) -> dict[str, Any]:
+    jw_account.unbind(user.tenant_id, user.id)
+    return jw_account.status(user.tenant_id, user.id)
 
 
 # ============================================================

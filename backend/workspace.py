@@ -48,6 +48,13 @@ class SchoolAi:
     reader_base_url: str = ""
     reader_model: str = ""
     reader_key: str = ""
+    map_key: str = ""
+    search_key: str = ""
+    # off / demo / zhengfang
+    jw_mode: str = "off"
+    jw_cas_url: str = ""
+    jw_base_url: str = ""
+    news_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -154,13 +161,17 @@ def school_ai(tenant_id: str) -> SchoolAi:
 
     def load() -> SchoolAi:
         row = _fetch_one(
-            'SELECT "chatBaseUrl", "chatModel", "chatKey", "readerBaseUrl", "readerModel", "readerKey" '
+            'SELECT "chatBaseUrl", "chatModel", "chatKey", "readerBaseUrl", "readerModel", "readerKey", '
+            '"mapKey", "searchKey", "jwMode", "jwCasUrl", "jwBaseUrl", "newsUrls" '
             'FROM tenant_ai_configs WHERE "tenantId" = %s',
             (tenant_id,),
         )
         if row is None:
             return NO_SCHOOL_AI
-        chat_url, chat_model, chat_key, reader_url, reader_model, reader_key = row
+        (
+            chat_url, chat_model, chat_key, reader_url, reader_model, reader_key,
+            map_key, search_key, jw_mode, jw_cas_url, jw_base_url, news_urls,
+        ) = row
         return SchoolAi(
             chat_base_url=(chat_url or "").strip(),
             chat_model=(chat_model or "").strip(),
@@ -168,9 +179,25 @@ def school_ai(tenant_id: str) -> SchoolAi:
             reader_base_url=(reader_url or "").strip(),
             reader_model=(reader_model or "").strip(),
             reader_key=_decrypt(tenant_id, reader_key),
+            map_key=_decrypt(tenant_id, map_key),
+            search_key=_decrypt(tenant_id, search_key),
+            jw_mode=(jw_mode or "off").strip(),
+            jw_cas_url=(jw_cas_url or "").strip().rstrip("/"),
+            jw_base_url=(jw_base_url or "").strip().rstrip("/"),
+            news_urls=tuple(line.strip() for line in (news_urls or "").splitlines() if line.strip()),
         )
 
     return _cached("ai", tenant_id, load, NO_SCHOOL_AI)
+
+
+def school_name(tenant_id: str) -> str:
+    """学校全称，用来限定地图搜索的范围；查不到时为空。"""
+
+    def load() -> str:
+        row = _fetch_one('SELECT "name" FROM tenants WHERE "id" = %s', (tenant_id,))
+        return (row[0] or "").strip() if row else ""
+
+    return _cached("name", tenant_id, load, "")
 
 
 def embed_settings(embed_id: str) -> EmbedSettings | None:

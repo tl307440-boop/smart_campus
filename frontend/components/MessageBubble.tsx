@@ -28,7 +28,7 @@ function Slip({ index, title, full, score, tilt = 0, children }: {
 }) {
   return (
     <details
-      className="sketch rotate-(--tilt) bg-paper transition-[rotate] duration-150 open:basis-full open:rotate-0"
+      className="sketch max-w-full rotate-(--tilt) bg-paper transition-[rotate] duration-150 open:basis-full open:rotate-0"
       style={{ "--tilt": `${tilt}deg` } as React.CSSProperties}
     >
       <summary className="flex cursor-pointer list-none items-center gap-2 py-1.5 pr-3 pl-7 text-sm [&::-webkit-details-marker]:hidden">
@@ -56,14 +56,19 @@ function SourceSlips({ sources }: { sources: ChatSource[] }) {
             key={`${source.index}-${source.source}`}
             tilt={i % 2 ? 0.8 : -0.6}
             index={source.index}
-            title={sourceTitle(source.source)}
+            title={source.url ? source.source : sourceTitle(source.source)}
             full={source.source}
             score={scoreLabel(source)}
           >
             {source.snippet ? (
-              <p className="whitespace-pre-wrap">{source.snippet}…</p>
+              <p className="whitespace-pre-wrap">{source.snippet}{source.url ? "" : "…"}</p>
             ) : (
-              <p>整篇精读，未截取片段。</p>
+              !source.url && <p>整篇精读，未截取片段。</p>
+            )}
+            {source.url && (
+              <a href={source.url} target="_blank" rel="noreferrer" className="mt-1 inline-block break-all text-ink underline decoration-dashed underline-offset-2">
+                打开链接
+              </a>
             )}
           </Slip>
         ))}

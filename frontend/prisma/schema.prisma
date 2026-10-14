@@ -74,6 +74,20 @@ model TenantAiConfig {
   readerModel   String   @default("")
   readerKey     String   @default("")
   readerKeyHint String   @default("")
+  /// 高德 Web 服务 Key：找校园地点、算步行路线。密文，空串退回服务器 .env 的 AMAP_WEB_KEY
+  mapKey        String   @default("")
+  mapKeyHint    String   @default("")
+  /// 博查 Web Search API Key：联网搜索。密文，空串退回服务器 .env 的 BOCHA_API_KEY
+  searchKey     String   @default("")
+  searchKeyHint String   @default("")
+  /// 教务对接：off 不接 / demo 演示数据 / zhengfang 正方教务（学生绑定自己的账号）
+  jwMode        String   @default("off")
+  /// 统一身份认证（CAS）根地址，如 https://cas.whwl.edu.cn:90/cas
+  jwCasUrl      String   @default("")
+  /// 正方教务根地址，如 https://jwxt.whwl.edu.cn:8088/jwglxt
+  jwBaseUrl     String   @default("")
+  /// 学校通知、新闻列表页，一行一个；Agent 回答「最新通知」时现查
+  newsUrls      String   @default("")
   updatedAt     DateTime @updatedAt
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)

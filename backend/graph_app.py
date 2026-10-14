@@ -51,6 +51,7 @@ from langgraph.graph import END, START, StateGraph
 # 将 backend 目录加入 Python 路径，确保 import 能找到同级模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import agent
 import comfort
 import memory_store
 from ai_config import ModelEndpoint, chat_endpoint, client_for, reader_endpoint, scrub
@@ -351,7 +352,14 @@ def intent_node(state: GraphState) -> dict:
 
     # --- 使用 DeepSeek 做极速意图分类 ---
     # 非流式调用（不带 stream=True），直接获取完整响应，速度快
-    system_prompt = """
+    endpoint = None if get_deepseek().use_mock else _chat_endpoint(state)
+    tools_on = endpoint is not None and agent.has_live_tools(
+        state.get("tenant_id") or GLOBAL_TENANT, state.get("user_id") or "", _settings(state)
+    )
+    tool_rule = """
+4. 如果要查【本人的课表、考试安排、成绩、空教室】，或问【学校最新的通知/新闻/活动】，或问【校园里某个地方在哪、怎么走】，或需要【联网查最新信息】，返回：TOOL
+""" if tools_on else ""
+    system_prompt = f"""
 你是一个意图分类器。请判断用户的问题属于以下哪个类别：
 
 1. 如果问题涉及【校园教务、规章制度、奖学金、学籍管理、学生手册、课程安排、考试规定、宿舍管理、图书馆规则】等需要查阅学校资料才能准确回答的内容，返回：RAG
@@ -359,11 +367,9 @@ def intent_node(state: GraphState) -> dict:
 2. 如果用户在【倾诉情绪、诉说压力或烦恼、心情低落、人际或感情困扰】，想被倾听和安慰，返回：COMFORT
 
 3. 如果问题是【日常闲聊、打招呼、自我介绍、通用知识】等不需要查阅学校资料就能回答的内容，返回：DIRECT
-
-只返回一个词：RAG、COMFORT 或 DIRECT。不要返回任何其他内容。
+{tool_rule}
+只返回一个词：RAG、COMFORT{"、TOOL" if tools_on else ""} 或 DIRECT。不要返回任何其他内容。
 """
-
-    endpoint = None if get_deepseek().use_mock else _chat_endpoint(state)
 
     # --- Mock 模式或没配对话模型：用关键词规则做快速分类，不调用 API ---
     if endpoint is None:
@@ -397,7 +403,10 @@ def intent_node(state: GraphState) -> dict:
                 max_tokens=10,    # 只需一个词，限制 token 消耗
             )
             raw_result = response.choices[0].message.content.strip().upper()
-            intent = "RAG" if "RAG" in raw_result else "COMFORT" if "COMFORT" in raw_result else "DIRECT"
+            if tools_on and "TOOL" in raw_result:
+                intent = "TOOL"
+            else:
+                intent = "RAG" if "RAG" in raw_result else "COMFORT" if "COMFORT" in raw_result else "DIRECT"
 
         except Exception as e:
             # API 调用失败时，默认走 RAG 路径（保守策略）；明显在倾诉的除外
@@ -426,8 +435,9 @@ def route_query(state: GraphState) -> str:
     """
     intent = state.get("intent", "RAG")
 
-    # 高危表达任何设置下都直接回应；「只按资料回答」的学校不走闲聊和倾诉：一律先检索，查不到就拒答
-    if intent == "CRISIS":
+    # 高危表达任何设置下都直接回应；「只按资料回答」的学校不走闲聊和倾诉：一律先检索，查不到就拒答。
+    # 工具问答自己会按需查知识库，不必先检索
+    if intent in ("CRISIS", "TOOL"):
         target = "generate"
     elif intent == "RAG" or _settings(state).query_only:
         target = "retrieve"
@@ -554,6 +564,52 @@ def _comfort_answer(state: GraphState, question: str, settings: WorkspaceSetting
     return {"final_answer": final_answer, "messages": updated_messages, "safety": card}
 
 
+def _agent_answer(state: GraphState, question: str, settings: WorkspaceSettings, memories: list[str]) -> dict:
+    """工具问答：模型自己决定查教务、通知、地图还是知识库。工具进度以 {"tool": ...} 推给前端。"""
+    emit = _delta_emitter()
+    writer = get_stream_writer()
+    tenant_id = state.get("tenant_id") or GLOBAL_TENANT
+    endpoint = _chat_endpoint(state)
+    spoken: list[str] = []
+
+    def say(text: str) -> None:
+        spoken.append(text)
+        emit(text)
+
+    def search(query: str) -> tuple[str, list[dict[str, Any]]]:
+        vdb = get_vector_db()
+        if vdb is None or not query:
+            return "", []
+        chunks = vdb.search_chunks(query, tenant_id, top_k=settings.top_k, min_score=settings.similarity_threshold)
+        return vdb.format_context(chunks), _chunk_sources(chunks)
+
+    ctx = agent.ToolContext(
+        tenant_id=tenant_id, user_id=state.get("user_id") or "", settings=settings,
+        search_knowledge=search, extras=prompt_extras(settings.persona, memories),
+        refusal=_refusal(settings) if settings.query_only else "",
+    )
+    if endpoint is None:
+        final_answer = NOT_CONFIGURED
+        emit(final_answer)
+    else:
+        try:
+            final_answer = agent.run(
+                ctx, endpoint, recent_history(state.get("messages", []), MAX_PROMPT_TURNS), question,
+                say, lambda event: writer({"tool": event}),
+            )
+        except Exception as e:
+            logger.error(f"[工具问答]（{endpoint.label}）失败: {scrub(str(e), endpoint)}")
+            if spoken:
+                final_answer = "".join(spoken) + "\n\n（后面的查询中断了，请稍后再问一次）"
+                emit("\n\n（后面的查询中断了，请稍后再问一次）")
+            else:
+                final_answer = f"{FAILED_PREFIX}（{endpoint.label}）{scrub(str(e), endpoint)}"
+                emit(final_answer)
+    logger.info(f"[生成节点] 工具问答完成，长度: {len(final_answer)} 字，来源 {len(ctx.sources)} 条")
+    updated_messages = _append_turn_messages(state, question, final_answer, sources=ctx.sources)
+    return {"final_answer": final_answer, "messages": updated_messages, "sources": ctx.sources}
+
+
 def _generate(state: GraphState) -> dict:
     """
     【生成节点】- 调用 DeepSeek 大模型生成最终回答。
@@ -593,6 +649,8 @@ def _generate(state: GraphState) -> dict:
 
     if intent == "CRISIS" or (intent == "COMFORT" and not settings.query_only):
         return _comfort_answer(state, question, settings, memories, crisis=intent == "CRISIS")
+    if intent == "TOOL":
+        return _agent_answer(state, question, settings, memories)
 
     emit = _delta_emitter()
 

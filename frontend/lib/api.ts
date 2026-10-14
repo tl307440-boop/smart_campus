@@ -28,6 +28,26 @@ export interface ChatSource {
   snippet: string;
   score: number | null;
   rerank_score: number | null;
+  /** 工具问答的来源（学校通知、地图导航）带链接 */
+  url?: string;
+}
+
+/** 与后端 agent.run 推送的工具进度一一对应 */
+export interface ChatToolEvent {
+  name: string;
+  label: string;
+  state: "running" | "done";
+  ok?: boolean;
+}
+
+export type JwMode = "off" | "demo" | "zhengfang";
+
+export interface JwAccount {
+  mode: JwMode;
+  bound: boolean;
+  /** 打了码的学号 */
+  username: string;
+  boundAt: number | null;
 }
 
 /** 与后端 comfort.safety_card 一一对应 */
@@ -83,6 +103,7 @@ export interface ChatStatus {
 
 export interface ChatHandlers {
   onStatus?: (status: ChatStatus) => void;
+  onTool?: (event: ChatToolEvent) => void;
   onDelta?: (text: string) => void;
   onDone?: (result: ChatDone) => void;
   onError?: (message: string) => void;
@@ -128,7 +149,7 @@ export function fetchWorkspace() {
   return request<{ assistant_name: string; query_only: boolean }>("/api/workspace");
 }
 
-export type AiServiceName = "chat" | "reader" | "embedding";
+export type AiServiceName = "chat" | "reader" | "embedding" | "map" | "search" | "jw" | "news";
 
 export interface AiServiceStatus {
   configured: boolean;
@@ -150,6 +171,23 @@ export function testAiService(service: AiServiceName) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ service }),
   });
+}
+
+export function fetchJwAccount() {
+  return request<JwAccount>("/api/jw/account");
+}
+
+/** 需要验证码时返回 { captcha: 图片 base64 }，填好后连同账号密码再提交一次 */
+export function bindJwAccount(input: { username: string; password: string; captcha?: string }) {
+  return request<JwAccount | { captcha: string }>("/api/jw/account", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function unbindJwAccount() {
+  return request<JwAccount>("/api/jw/account", { method: "DELETE" });
 }
 
 /** FastAPI 的 HTTPException 报错体是 {"detail": "..."}，取出那句话 */
@@ -287,6 +325,9 @@ function dispatchFrame(frame: string, handlers: ChatHandlers) {
       break;
     case "delta":
       handlers.onDelta?.((payload as { text: string }).text);
+      break;
+    case "tool":
+      handlers.onTool?.(payload as ChatToolEvent);
       break;
     case "done":
       handlers.onDone?.(payload as ChatDone);

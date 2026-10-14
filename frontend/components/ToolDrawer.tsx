@@ -3,11 +3,12 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { CloseIcon } from "@/components/SketchIcons";
 
-export type ToolTab = "service" | "memory" | "knowledge" | "workspace" | "embeds";
+export type ToolTab = "service" | "memory" | "jw" | "knowledge" | "workspace" | "embeds";
 
 export const TAB_LABEL: Record<ToolTab, string> = {
   service: "AI 服务",
   memory: "记忆",
+  jw: "教务账号",
   knowledge: "知识库",
   workspace: "工作区",
   embeds: "挂件",

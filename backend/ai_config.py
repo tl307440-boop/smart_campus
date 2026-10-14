@@ -133,6 +133,35 @@ def reader_endpoint(tenant_id: str) -> ModelEndpoint | None:
     return platform_reader_endpoint()
 
 
+@dataclass(frozen=True)
+class ToolKey:
+    """高德、博查这类只有一把 Key 的服务。"""
+
+    key: str
+    source: Source
+
+    @property
+    def label(self) -> str:
+        return SOURCE_LABEL[self.source]
+
+
+def _tool_key(school_value: str, env_name: str) -> ToolKey | None:
+    if school_value:
+        return ToolKey(school_value, "school")
+    platform = _env_key(env_name)
+    return ToolKey(platform, "platform") if platform else None
+
+
+def map_key(tenant_id: str) -> ToolKey | None:
+    """高德 Web 服务 Key：学校配的 > 服务器 .env 的 AMAP_WEB_KEY。"""
+    return _tool_key(school_ai(tenant_id).map_key, "AMAP_WEB_KEY")
+
+
+def search_key(tenant_id: str) -> ToolKey | None:
+    """博查 Web Search API Key：学校配的 > 服务器 .env 的 BOCHA_API_KEY。"""
+    return _tool_key(school_ai(tenant_id).search_key, "BOCHA_API_KEY")
+
+
 def embedding_configured() -> bool:
     """向量化是平台级的：所有学校共用一个向量库，换模型维度就对不上。"""
     return bool(_env_key("zhi_pu_API_KEY"))
@@ -152,8 +181,9 @@ def client_for(
     return _client(endpoint.api_key, endpoint.base_url, timeout, retries)
 
 
-def scrub(detail: str, endpoint: ModelEndpoint | None) -> str:
+def scrub(detail: str, endpoint: ModelEndpoint | ToolKey | None) -> str:
     """上游报错有时会回显密钥，写进回答或日志前抹掉。"""
-    if endpoint and endpoint.api_key and endpoint.api_key in detail:
-        return detail.replace(endpoint.api_key, "***")
+    secret = getattr(endpoint, "api_key", "") or getattr(endpoint, "key", "")
+    if secret and secret in detail:
+        return detail.replace(secret, "***")
     return detail

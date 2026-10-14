@@ -7,6 +7,7 @@ import { Composer } from "@/components/Composer";
 import { DeskPet } from "@/components/DeskPet";
 import { EmbedPane } from "@/components/EmbedAdmin";
 import { ErrorNote } from "@/components/ErrorNote";
+import { JwAccountPane } from "@/components/JwAccountPane";
 import { KnowledgePane } from "@/components/KnowledgePane";
 import { MessageBubble } from "@/components/MessageBubble";
 import { SuggestedQuestions } from "@/components/SuggestedQuestions";
@@ -84,7 +85,7 @@ export default function ChatPage() {
     logout();
   }
 
-  const tabs: ToolTab[] = ["service", "memory", ...(isStaff ? (["knowledge"] as const) : []), ...(isAdmin ? (["workspace", "embeds"] as const) : [])];
+  const tabs: ToolTab[] = ["service", "memory", "jw", ...(isStaff ? (["knowledge"] as const) : []), ...(isAdmin ? (["workspace", "embeds"] as const) : [])];
   const noteProps = { canDebug: isStaff, canConfigure: isAdmin, onOpenService: openService };
 
   return (
@@ -157,6 +158,7 @@ export default function ChatPage() {
         <div key={`${drawer.tab}-${drawer.n}`}>
           {drawer.tab === "service" && <ServicePane isAdmin={isAdmin} />}
           {drawer.tab === "memory" && <MemoryPane />}
+          {drawer.tab === "jw" && <JwAccountPane />}
           {drawer.tab === "knowledge" && isStaff && <KnowledgePane />}
           {drawer.tab === "workspace" && isAdmin && <WorkspacePane onSaved={loadWorkspace} />}
           {drawer.tab === "embeds" && isAdmin && <EmbedPane />}

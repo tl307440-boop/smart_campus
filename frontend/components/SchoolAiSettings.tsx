@@ -2,7 +2,15 @@
 
 import { useEffect, useState } from "react";
 import { PROVIDERS } from "@/lib/agent-settings";
-import type { AiConfigView, AiEndpointInput, AiService } from "@/lib/ai-config/schema";
+import type {
+  AiConfigView,
+  AiEndpointInput,
+  AiService,
+  JwConfig,
+  JwMode,
+  KeyInput,
+  KeyService,
+} from "@/lib/ai-config/schema";
 import { type AiServiceName, type AiStatus, errorDetail, fetchAiStatus, testAiService } from "@/lib/api";
 import { fetchAiConfig, saveAiConfig } from "@/lib/workspace/client";
 
@@ -16,11 +24,33 @@ const ROWS: { service: AiServiceName; name: string; use: string }[] = [
   { service: "chat", name: "对话模型", use: "判断问题、回答、情绪分析" },
   { service: "reader", name: "长文档精读", use: "资料不多时整篇读，摘出相关段落" },
   { service: "embedding", name: "知识库向量化", use: "资料多时按片段检索（平台统一提供）" },
+  { service: "jw", name: "教务查询", use: "学生绑定账号后查课表、考试、成绩、空教室" },
+  { service: "news", name: "学校通知", use: "从官网、教务处的列表页读最新通知" },
+  { service: "map", name: "地图问路", use: "新生找教学楼、食堂、校门，规划步行路线" },
+  { service: "search", name: "联网搜索", use: "学校资料里没有的最新信息" },
 ];
 
 const SOURCE_TEXT = { school: "学校配置", platform: "平台默认" } as const;
+const JW_MODE_TEXT: Record<JwMode, string> = { off: "关闭", demo: "演示数据", zhengfang: "正方教务" };
 
-type Drafts = Record<AiService, AiEndpointInput>;
+const KEY_HELP: Record<KeyService, { title: string; placeholder: string; link: string; linkText: string; tips: string }> = {
+  map: {
+    title: "高德地图 Key",
+    placeholder: "32 位字母数字",
+    link: "https://console.amap.com/dev/key/app",
+    linkText: "去高德开放平台申请",
+    tips: "控制台 → 应用管理 → 创建应用 → 添加 Key，服务平台选「Web 服务」。个人实名认证后免费：路径规划每月 15 万次、地点搜索每月 5000 次。",
+  },
+  search: {
+    title: "博查搜索 Key",
+    placeholder: "sk-…",
+    link: "https://open.bochaai.com/",
+    linkText: "去博查开放平台申请",
+    tips: "注册后在「API KEY 管理」里创建。新用户有免费额度，用完约 3.6 分一次，预付费。",
+  },
+};
+
+type Drafts = Record<AiService, AiEndpointInput> & Record<KeyService, KeyInput> & { jw: JwConfig; newsUrls: string };
 type TestState = { pending: boolean; ok?: boolean; text?: string };
 
 function toDrafts(view: AiConfigView): Drafts {
@@ -30,7 +60,121 @@ function toDrafts(view: AiConfigView): Drafts {
     apiKey: "",
     clearKey: false,
   });
-  return { chat: draft("chat"), reader: draft("reader") };
+  return {
+    chat: draft("chat"),
+    reader: draft("reader"),
+    map: { apiKey: "", clearKey: false },
+    search: { apiKey: "", clearKey: false },
+    jw: { ...view.jw },
+    newsUrls: view.newsUrls.join("\n"),
+  };
+}
+
+function statusText(service: AiServiceName, status: AiStatus[AiServiceName] | undefined): string {
+  if (!status) return "读取中…";
+  if (!status.configured || !status.source) {
+    if (service === "embedding") return "未配置：需要在服务器上配置";
+    if (service === "jw") return "关闭";
+    return "未配置";
+  }
+  const detail = service === "jw" ? JW_MODE_TEXT[status.model as JwMode] ?? status.model : status.model;
+  return `${SOURCE_TEXT[status.source]} · ${detail}`;
+}
+
+function KeyForm({
+  service,
+  view,
+  draft,
+  onChange,
+}: {
+  service: KeyService;
+  view: AiConfigView[KeyService];
+  draft: KeyInput;
+  onChange: (patch: Partial<KeyInput>) => void;
+}) {
+  const help = KEY_HELP[service];
+  return (
+    <div className="space-y-2">
+      <p className="text-sm text-muted">
+        {help.tips}{" "}
+        <a href={help.link} target="_blank" rel="noreferrer" className="underline decoration-dashed underline-offset-2">
+          {help.linkText}
+        </a>
+      </p>
+      <label className="block">
+        <span className="field-label">{help.title}</span>
+        <input
+          type="password"
+          value={draft.apiKey}
+          onChange={(event) => onChange({ apiKey: event.target.value, clearKey: false })}
+          autoComplete="off"
+          placeholder={view.hasKey ? `已保存 ···${view.keyHint || "****"}，留空不改` : `${help.placeholder}，先空着也行`}
+          className="field"
+        />
+      </label>
+      {view.hasKey && (
+        <label className="flex items-center gap-2 text-sm text-muted">
+          <input
+            type="checkbox"
+            checked={draft.clearKey}
+            onChange={(event) => onChange({ clearKey: event.target.checked, apiKey: "" })}
+            className="size-4 accent-pink"
+          />
+          清除已保存的 Key
+        </label>
+      )}
+    </div>
+  );
+}
+
+function JwForm({ draft, onChange }: { draft: JwConfig; onChange: (patch: Partial<JwConfig>) => void }) {
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="教务查询方式">
+        {(Object.keys(JW_MODE_TEXT) as JwMode[]).map((mode) => (
+          <button
+            key={mode}
+            type="button"
+            role="radio"
+            aria-checked={draft.mode === mode}
+            onClick={() => onChange({ mode })}
+            className={`btn btn-sm ${draft.mode === mode ? "btn-primary" : ""}`}
+          >
+            {JW_MODE_TEXT[mode]}
+          </button>
+        ))}
+      </div>
+      <p className="text-sm text-muted">
+        {draft.mode === "demo"
+          ? "不连真实教务，所有学生看到同一份样例课表，用来演示。"
+          : draft.mode === "zhengfang"
+            ? "学生在「工具 → 教务账号」用统一身份认证账号绑定，只保存登录凭证、不保存密码，只做查询。正式开放前请取得教务处、信息中心同意。"
+            : "关闭后助手不会查个人课表、考试和成绩。"}
+      </p>
+      {draft.mode === "zhengfang" && (
+        <>
+          <label className="block">
+            <span className="field-label">统一身份认证（CAS）地址</span>
+            <input
+              value={draft.casUrl}
+              onChange={(event) => onChange({ casUrl: event.target.value })}
+              placeholder="https://cas.xxx.edu.cn/cas"
+              className="field"
+            />
+          </label>
+          <label className="block">
+            <span className="field-label">正方教务地址</span>
+            <input
+              value={draft.baseUrl}
+              onChange={(event) => onChange({ baseUrl: event.target.value })}
+              placeholder="https://jwxt.xxx.edu.cn/jwglxt"
+              className="field"
+            />
+          </label>
+        </>
+      )}
+    </div>
+  );
 }
 
 function StatusDot({ ok }: { ok: boolean }) {
@@ -170,13 +314,16 @@ export function SchoolAiSettings({ isAdmin }: { isAdmin: boolean }) {
     setSaving(true);
     setNotice(null);
     try {
-      const saved = await saveAiConfig(drafts);
+      const newsUrls = drafts.newsUrls.split("\n").map((line) => line.trim()).filter(Boolean);
+      const saved = await saveAiConfig({ ...drafts, newsUrls });
       setView(saved);
       setDrafts(toDrafts(saved));
       // 后端把学校配置缓存 60 秒，测试接口会先丢掉缓存，所以先测再读状态
-      for (const service of ["chat", "reader"] as const) {
+      for (const service of ["chat", "reader", "map", "search"] as const) {
         if (saved[service].hasKey || status?.[service].configured) await runTest(service);
       }
+      if (saved.newsUrls.length) await runTest("news");
+      if (saved.jw.mode !== "off") await runTest("jw");
       setStatus(await fetchAiStatus());
       setNotice("已保存。");
     } catch (err) {
@@ -209,15 +356,7 @@ export function SchoolAiSettings({ isAdmin }: { isAdmin: boolean }) {
               <div className="min-w-0 flex-1">
                 <p className="leading-snug">
                   {name}
-                  <span className="ml-2 text-sm text-muted">
-                    {!item
-                      ? "读取中…"
-                      : item.configured && item.source
-                        ? `${SOURCE_TEXT[item.source]} · ${item.model}`
-                        : service === "embedding"
-                          ? "未配置：需要在服务器上配置"
-                          : "未配置"}
-                  </span>
+                  <span className="ml-2 text-sm text-muted">{statusText(service, item)}</span>
                 </p>
                 <p className="text-sm text-muted">{use}</p>
                 {test?.text && (
@@ -246,6 +385,37 @@ export function SchoolAiSettings({ isAdmin }: { isAdmin: boolean }) {
             <fieldset key={service} className="mt-4 border-t border-dashed border-rule pt-3">
               <legend className="pr-2 font-display text-base">{service === "chat" ? "对话模型" : "长文档精读"}</legend>
               <EndpointForm
+                service={service}
+                view={view[service]}
+                draft={drafts[service]}
+                onChange={(patch) => setDrafts((prev) => prev && { ...prev, [service]: { ...prev[service], ...patch } })}
+              />
+            </fieldset>
+          ))}
+          <fieldset className="mt-4 border-t border-dashed border-rule pt-3">
+            <legend className="pr-2 font-display text-base">教务查询</legend>
+            <JwForm
+              draft={drafts.jw}
+              onChange={(patch) => setDrafts((prev) => prev && { ...prev, jw: { ...prev.jw, ...patch } })}
+            />
+          </fieldset>
+          <fieldset className="mt-4 border-t border-dashed border-rule pt-3">
+            <legend className="pr-2 font-display text-base">学校通知来源</legend>
+            <label className="block">
+              <span className="field-label">列表页网址，一行一个（官网首页、教务处首页、通知公告栏目都行）</span>
+              <textarea
+                value={drafts.newsUrls}
+                onChange={(event) => setDrafts((prev) => prev && { ...prev, newsUrls: event.target.value })}
+                rows={3}
+                placeholder={"https://www.xxx.edu.cn/\nhttps://jwc.xxx.edu.cn/"}
+                className="field"
+              />
+            </label>
+          </fieldset>
+          {(["map", "search"] as const).map((service) => (
+            <fieldset key={service} className="mt-4 border-t border-dashed border-rule pt-3">
+              <legend className="pr-2 font-display text-base">{service === "map" ? "地图问路" : "联网搜索"}</legend>
+              <KeyForm
                 service={service}
                 view={view[service]}
                 draft={drafts[service]}

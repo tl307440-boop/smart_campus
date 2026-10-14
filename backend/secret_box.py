@@ -20,20 +20,21 @@ _INFO = b"tenant-ai-config:v1"
 _NONCE_BYTES = 12
 
 
-def _key() -> bytes:
+def _key(info: bytes = _INFO) -> bytes:
     secret = os.getenv("AUTH_JWT_SECRET", "").strip()
     if not secret:
         raise ValueError("缺少 AUTH_JWT_SECRET，无法解密学校的模型密钥")
-    return HKDF(algorithm=SHA256(), length=32, salt=_SALT, info=_INFO).derive(secret.encode())
+    return HKDF(algorithm=SHA256(), length=32, salt=_SALT, info=info).derive(secret.encode())
 
 
-def encrypt(plain: str) -> str:
+def encrypt(plain: str, info: bytes = _INFO) -> str:
+    """info 区分用途：不同用途派生出不同的密钥，一处密文泄露解不开另一处。"""
     nonce = os.urandom(_NONCE_BYTES)
-    body = AESGCM(_key()).encrypt(nonce, plain.encode(), None)
+    body = AESGCM(_key(info)).encrypt(nonce, plain.encode(), None)
     return PREFIX + base64.urlsafe_b64encode(nonce + body).decode().rstrip("=")
 
 
-def decrypt(token: str) -> str:
+def decrypt(token: str, info: bytes = _INFO) -> str:
     """空串原样返回（没填密钥）；格式不对或被篡改时抛 ValueError / InvalidTag。
 
     Example:
@@ -47,4 +48,4 @@ def decrypt(token: str) -> str:
     data = token[len(PREFIX):]
     raw = base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
     nonce, body = raw[:_NONCE_BYTES], raw[_NONCE_BYTES:]
-    return AESGCM(_key()).decrypt(nonce, body, None).decode()
+    return AESGCM(_key(info)).decrypt(nonce, body, None).decode()

@@ -67,12 +67,22 @@ def test_secret_box_rejects_tampering_and_other_secret(monkeypatch: pytest.Monke
 
 def test_school_ai_decrypts_row_and_drops_bad_ciphertext(monkeypatch: pytest.MonkeyPatch) -> None:
     good = secret_box.encrypt("sk-school")
+    map_key = secret_box.encrypt("amap-key")
     monkeypatch.setattr(
         workspace, "_fetch_one",
-        lambda sql, params: (" https://api.x.com/v1 ", "m1", good, "", "", "v1.broken"),
+        lambda sql, params: (
+            " https://api.x.com/v1 ", "m1", good, "", "", "v1.broken",
+            map_key, "", "zhengfang", "https://cas.x.edu.cn:90/cas/", " https://jw.x.edu.cn/jwglxt ",
+            "https://www.x.edu.cn/a.htm\n\n https://jwc.x.edu.cn/b.htm ",
+        ),
     )
     school = workspace.school_ai("t1")
-    assert school == SchoolAi("https://api.x.com/v1", "m1", "sk-school", "", "", "")
+    assert school == SchoolAi(
+        "https://api.x.com/v1", "m1", "sk-school", "", "", "",
+        map_key="amap-key", jw_mode="zhengfang",
+        jw_cas_url="https://cas.x.edu.cn:90/cas", jw_base_url="https://jw.x.edu.cn/jwglxt",
+        news_urls=("https://www.x.edu.cn/a.htm", "https://jwc.x.edu.cn/b.htm"),
+    )
 
 
 # ---------- 选用优先级 ----------
