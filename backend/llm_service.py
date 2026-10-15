@@ -13,6 +13,13 @@ FAILED_PREFIX = "抱歉，我暂时无法回答这个问题。错误信息:"
 RAG_FAILED_PREFIX = "deepseek 回复失败："
 NOT_CONFIGURED = f"{FAILED_PREFIX} 还没有可用的对话模型（未配置），请管理员在「AI 服务」页填好学校的模型密钥。"
 
+# 闲聊与知识库两条路径手上没有教务工具：被问到个人数据时必须拒绝编造
+PERSONAL_DATA_RULE = """
+你没有任何渠道知道这个学生的成绩、课表、考试安排、学分和排名。被问到这些而手上没有查询结果时，
+不要给出任何具体的课程名、分数、时间、教室或数字，直接说你这边查不到，请他在「工具 → 教务账号」里绑定后再问一次，或去教务系统查看。
+同样，不确定的、会随时间变化的事实（今年的日期、政策、价格）不要凭记忆给出具体数字，说明需要以学校最新通知为准。
+"""
+
 
 def prompt_extras(persona: str = "", memories: list[str] | None = None) -> str:
     """闲聊与知识库两条路径共用的提示词尾巴：学校人设 + 用户记忆。"""
@@ -152,7 +159,7 @@ class DeepSeekService:
         【参考资料】:
         {context}
         """
-        system_prompt += prompt_extras(persona, memories)
+        system_prompt += PERSONAL_DATA_RULE + prompt_extras(persona, memories)
         if self.use_mock:
             yield f"【deepseek】这是一个模拟回复。{user_question}的解释是"
             return

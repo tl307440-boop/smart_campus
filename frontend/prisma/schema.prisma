@@ -28,10 +28,12 @@ model Tenant {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  users    User[]
-  settings TenantSettings?
-  aiConfig TenantAiConfig?
-  embeds   EmbedConfig[]
+  users          User[]
+  settings       TenantSettings?
+  aiConfig       TenantAiConfig?
+  embeds         EmbedConfig[]
+  chatSessions   ChatSession[]
+  chatTombstones ChatSessionTombstone[]
 
   @@map("tenants")
 }
@@ -148,8 +150,74 @@ model User {
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
+  chatSessions   ChatSession[]
+  chatTombstones ChatSessionTombstone[]
+
   /// 学号只在同一学校内唯一
   @@unique([tenantId, studentNo])
   @@index([tenantId])
   @@map("users")
+}
+
+/// 一次对话。只由 FastAPI 读写（backend/chat_history.py 手写 SQL），表名与列名改动要同步那边。
+/// 访客（嵌入挂件）的对话不进这张表，只在 Redis 里
+model ChatSession {
+  /// 等于前端的 thread_id（UUID）
+  id            String   @id
+  tenantId      String
+  userId        String
+  /// 第一条提问的前 40 个字
+  title         String   @default("新的对话")
+  /// 更早轮次的滚动摘要，组装提示词时注入；列表查询不读它
+  summary       String   @default("")
+  /// 摘要已覆盖到的最大 seq
+  summarizedSeq Int      @default(0)
+  createdAt     DateTime @default(now())
+  /// 每成功一轮由 FastAPI 显式更新，列表按它倒序
+  updatedAt     DateTime @default(now())
+
+  tenant   Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages ChatMessage[]
+
+  @@index([tenantId, userId, updatedAt(sort: Desc)])
+  @@map("chat_sessions")
+}
+
+/// 会话里的一条消息。一轮成功 = 连续两条：用户 seq=2k-1，助手 seq=2k
+model ChatMessage {
+  id        String   @id
+  sessionId String
+  seq       Int
+  /// user / assistant
+  role      String
+  content   String
+  /// 助手回答时检索到的资料原文
+  context   String   @default("")
+  /// 来源卡片
+  sources   Json     @default("[]")
+  /// 工具查出的表格（空教室、成绩等），前端原样画出来
+  tables    Json     @default("[]")
+  emotion   Json?
+  safety    Json?
+  createdAt DateTime @default(now())
+
+  session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, seq])
+  @@map("chat_messages")
+}
+
+/// 删除标记：用户删过的会话。有它在，Redis 里残留的快照不会再被补回库里
+model ChatSessionTombstone {
+  tenantId  String
+  userId    String
+  threadId  String
+  deletedAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([tenantId, userId, threadId])
+  @@map("chat_session_tombstones")
 }

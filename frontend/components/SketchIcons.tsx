@@ -90,3 +90,58 @@ export function CloseIcon(props: IconProps) {
     </Svg>
   );
 }
+
+export function CopyIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M8.6 8.4h10.1l-.2 11.4H8.4z" />
+      <path d="M15.4 8.2V4.4H5.3l.2 11.3h2.8" />
+    </Svg>
+  );
+}
+
+export function CheckIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4.6 12.8l4.6 4.4L19.6 6.4" />
+    </Svg>
+  );
+}
+
+export function RedoIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M19.2 11.6a7.3 7.3 0 1 1-2.3-5.1" />
+      <path d="M17.6 3.6l-.5 3.4-3.4-.3" />
+    </Svg>
+  );
+}
+
+export function HistoryIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M5.4 4.4h11.4c.8 0 1.4.6 1.4 1.4l-.2 14H6.6c-.8 0-1.4-.6-1.4-1.4z" />
+      <path d="M8.6 9.2h6.2M8.6 12.6h6.4M8.6 16h3.8" />
+    </Svg>
+  );
+}
+
+export function TrashIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4.6 6.8h14.8" />
+      <path d="M9.4 6.6l.6-2.4h4l.6 2.4" />
+      <path d="M6.4 7l1 12.6h9.3l.9-12.5" />
+      <path d="M10.2 10.6l.3 5.6M13.8 10.6l-.2 5.6" />
+    </Svg>
+  );
+}
+
+export function ArrowDownIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M12.1 4.4l-.2 14.8" />
+      <path d="M6.2 13.6l5.8 5.8 5.9-6" />
+    </Svg>
+  );
+}

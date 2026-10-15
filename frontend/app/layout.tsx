@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import { AuthGuard } from "@/components/AuthGuard";
+import { ToastProvider } from "@/components/Toast";
 import { AuthProvider } from "@/lib/auth/context";
 import "./globals.css";
 
@@ -30,9 +31,11 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             <feDisplacementMap in="SourceGraphic" in2="noise" scale="2.6" />
           </filter>
         </svg>
-        <AuthProvider>
-          <AuthGuard>{children}</AuthGuard>
-        </AuthProvider>
+        <ToastProvider>
+          <AuthProvider>
+            <AuthGuard>{children}</AuthGuard>
+          </AuthProvider>
+        </ToastProvider>
       </body>
     </html>
   );

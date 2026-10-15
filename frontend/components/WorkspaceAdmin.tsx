@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useToast } from "@/components/Toast";
 import { PaneTitle } from "@/components/ToolDrawer";
 import { type WorkspaceSettings, fetchWorkspaceSettings, saveWorkspaceSettings } from "@/lib/workspace/client";
 
@@ -18,6 +19,7 @@ export function WorkspacePane({ onSaved }: Props) {
   const [settings, setSettings] = useState<WorkspaceSettings | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const toast = useToast();
 
   useEffect(() => {
     let cancelled = false;
@@ -43,10 +45,10 @@ export function WorkspacePane({ onSaved }: Props) {
     setSaving(true);
     try {
       setSettings(await saveWorkspaceSettings(settings));
-      setNotice("已保存，约一分钟内对新提问生效");
+      toast.success("已保存，约一分钟内对新提问生效");
       onSaved?.();
     } catch (err) {
-      setNotice(errorText(err, "保存失败"));
+      toast.error(`没保存上：${errorText(err, "保存失败")}`);
     } finally {
       setSaving(false);
     }
@@ -102,7 +104,8 @@ export function WorkspacePane({ onSaved }: Props) {
             </label>
             <label className="block">
               <span className="field-label">
-                相似度阈值 <span className="text-ink tabular-nums">{settings.similarityThreshold.toFixed(2)}</span>
+                检索严格程度
+                <span className="ml-2 text-[0.8125rem] tabular-nums">相似度阈值 {settings.similarityThreshold.toFixed(2)}</span>
               </span>
               <input
                 type="range"
@@ -113,9 +116,15 @@ export function WorkspacePane({ onSaved }: Props) {
                 onChange={(event) => update("similarityThreshold", Number(event.target.value))}
                 className="mt-2 w-full accent-pink"
               />
+              <span className="flex justify-between text-[0.8125rem] text-muted">
+                <span>宽松：多找一些，可能不太相关</span>
+                <span>严格：只要最贴切的</span>
+              </span>
             </label>
-            <label className="block w-40">
-              <span className="field-label">引用片段数</span>
+            <label className="block w-56">
+              <span className="field-label">
+                每次参考几段资料<span className="ml-2 text-[0.8125rem]">top_k</span>
+              </span>
               <input
                 type="number"
                 min={1}
@@ -124,6 +133,7 @@ export function WorkspacePane({ onSaved }: Props) {
                 onChange={(event) => update("topK", Number(event.target.value))}
                 className="field tabular-nums"
               />
+              <span className="mt-1 block text-[0.8125rem] text-muted">多了回答更全，但会变慢</span>
             </label>
           </div>
           <div className="mt-6 flex flex-wrap items-center gap-3">

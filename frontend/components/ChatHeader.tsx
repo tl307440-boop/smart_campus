@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { NewPageIcon, PouchIcon } from "@/components/SketchIcons";
+import { HistoryIcon, NewPageIcon, PouchIcon } from "@/components/SketchIcons";
 import type { AuthUser } from "@/lib/auth/session";
 
 interface Props {
@@ -11,6 +11,8 @@ interface Props {
   isStaff: boolean;
   threadId: string | null;
   onNewSession: () => void;
+  /** 没有会话列表（嵌入挂件、没配数据库）时不传，按钮不显示 */
+  onOpenHistory?: () => void;
   onOpenTools: () => void;
   onLogout: () => void;
 }
@@ -68,9 +70,14 @@ function AccountMenu({ user, isStaff, threadId, onLogout }: Pick<Props, "user" |
 }
 
 /** 纸页页头：助手名 + 学校，右边是新的一页、工具（窄屏）和账户菜单。 */
-export function ChatHeader({ assistantName, user, onNewSession, onOpenTools, ...menu }: Props) {
+export function ChatHeader({ assistantName, user, onNewSession, onOpenHistory, onOpenTools, ...menu }: Props) {
   return (
     <header className="flex items-center gap-2 border-b-2 border-ink px-4 py-2.5 sm:px-6">
+      {onOpenHistory && (
+        <button type="button" onClick={onOpenHistory} className="btn btn-icon btn-sm" aria-label="历史对话" title="历史对话">
+          <HistoryIcon size={18} />
+        </button>
+      )}
       <div className="min-w-0 flex-1">
         <p className="truncate font-display text-xl leading-tight sm:text-2xl">{assistantName}</p>
         {user && <p className="truncate text-[0.8125rem] text-muted">{user.tenantName} · 智悦校园</p>}

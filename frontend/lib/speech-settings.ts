@@ -88,9 +88,10 @@ export function useChineseVoices(): { supported: boolean; voices: SpeechSynthesi
   return { supported, voices };
 }
 
-export function speakText(text: string, settings: SpeechSettings): void {
+/** 返回这次朗读，调用方要在念完时改按钮状态可以监听它的 end；浏览器不支持时返回 null */
+export function speakText(text: string, settings: SpeechSettings): SpeechSynthesisUtterance | null {
   const synth = window.speechSynthesis;
-  if (!synth) return;
+  if (!synth) return null;
   synth.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = "zh-CN";
@@ -98,4 +99,17 @@ export function speakText(text: string, settings: SpeechSettings): void {
   const voice = settings.voiceURI ? synth.getVoices().find((item) => item.voiceURI === settings.voiceURI) : undefined;
   if (voice) utterance.voice = voice;
   synth.speak(utterance);
+  return utterance;
+}
+
+/** 念出来之前去掉 Markdown 记号，免得把「星号星号」读出来；链接只念文字 */
+export function speakableText(markdown: string): string {
+  return markdown
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/^\s*\|?[\s:|-]+\|?\s*$/gm, "")
+    .replace(/[*_`~#>|]/g, "")
+    .replace(/\n{2,}/g, "\n")
+    .trim();
 }

@@ -57,15 +57,38 @@ export interface SafetyCardData {
   school: string;
 }
 
+/** 与后端 agent.ToolContext.table 一一对应：空列已被后端去掉，单元格都是字符串 */
+export interface ChatTable {
+  title: string;
+  columns: { key: string; label: string }[];
+  rows: Record<string, string>[];
+  /** 工具查到的总行数；比 rows 多说明后端截断了 */
+  total: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: Role;
   content: string;
   context?: string;
   sources?: ChatSource[];
+  tables?: ChatTable[];
   emotion?: EmotionData | null;
   safety?: SafetyCardData | null;
+  /** 这一轮查过的工具，只在前端内存里，刷新后没有 */
+  tools?: ChatToolEvent[];
 }
+
+/** 会话列表的一行，与后端 api.SessionSummary 一一对应 */
+export interface SessionSummary {
+  thread_id: string;
+  title: string;
+  /** ISO 时间 */
+  updated_at: string;
+}
+
+/** 会话已删除或不属于当前账号时，后端统一回 404 */
+export class SessionGoneError extends Error {}
 
 export interface MemoryNote {
   id: string;
@@ -89,6 +112,7 @@ export interface ChatDone {
   intent: string;
   context: string;
   sources: ChatSource[];
+  tables: ChatTable[];
   emotion: EmotionData | null;
   safety: SafetyCardData | null;
 }
@@ -116,19 +140,44 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
-    throw new Error(detail || `请求失败（${response.status}）`);
+    throw new ApiError(response.status, detail || `请求失败（${response.status}）`);
   }
+  if (response.status === NO_CONTENT) return undefined as T;
   return (await response.json()) as T;
+}
+
+const NO_CONTENT = 204;
+const NOT_FOUND = 404;
+
+/** message 仍是后端原始报错体，errorDetail() 照旧能取出那句话 */
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
 }
 
 export function createSession() {
   return request<{ thread_id: string }>("/api/sessions", { method: "POST" });
 }
 
-export function fetchMessages(threadId: string) {
-  return request<Omit<ChatMessage, "id">[]>(
-    `/api/sessions/${encodeURIComponent(threadId)}/messages`,
-  );
+export async function fetchMessages(threadId: string) {
+  try {
+    return await request<Omit<ChatMessage, "id">[]>(`/api/sessions/${encodeURIComponent(threadId)}/messages`);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === NOT_FOUND) throw new SessionGoneError(errorDetail(err));
+    throw err;
+  }
+}
+
+export function listSessions() {
+  return request<SessionSummary[]>("/api/sessions");
+}
+
+export function deleteSession(threadId: string) {
+  return request<void>(`/api/sessions/${encodeURIComponent(threadId)}`, { method: "DELETE" });
 }
 
 export function fetchDocuments() {
@@ -277,14 +326,17 @@ export async function streamChat(
   handlers: ChatHandlers,
   signal?: AbortSignal,
   llm?: LlmChatConfig,
+  /** 重新生成 / 改了再问：被替换掉的最后一轮的原提问 */
+  replaceQuestion?: string,
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ thread_id: threadId, question, llm }),
+    body: JSON.stringify({ thread_id: threadId, question, llm, replace_question: replaceQuestion }),
     signal,
   });
 
+  if (response.status === NOT_FOUND) throw new SessionGoneError(await response.text().catch(() => ""));
   if (!response.ok || !response.body) {
     handlers.onError?.(`连接后端失败（${response.status}）`);
     return;

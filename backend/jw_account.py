@@ -74,6 +74,7 @@ class JwSource(Protocol):
     def grades(self, xnm: str = "", xqm: str = "") -> list[dict[str, str]]: ...
     def exams(self, xnm: str, xqm: str) -> list[dict[str, str]]: ...
     def free_rooms(self, xnm: str, xqm: str, campus_id: str, week: int, weekday: int, periods: list[int]) -> list[dict[str, str]]: ...
+    def academia(self) -> dict[str, Any]: ...
 
 
 def _new_client(school: SchoolAi) -> ZhengfangClient:
@@ -263,4 +264,15 @@ class DemoJw:
         return [{"course": "高等数学（演示）", "time": "2027-01-08(09:00-11:00)", "room": "1号教学楼 101", "campus": "", "name": "期末考试", "seat": "12"}]
 
     def free_rooms(self, xnm: str, xqm: str, campus_id: str, week: int, weekday: int, periods: list[int]) -> list[dict[str, str]]:
-        return [{"room": f"1号教学楼 {n}（演示）", "type": "多媒体教室", "seats": "120"} for n in (102, 205, 306)]
+        return [{"room": f"1号教学楼 {n}（演示）", "building": "1号教学楼", "type": "多媒体教室", "seats": "120"} for n in (102, 205, 306)]
+
+    def academia(self) -> dict[str, Any]:
+        return {
+            "gpa": 3.21,
+            "plan": {"total": 48, "passed": 30, "failed": 1, "not_taken": 12, "in_progress": 5, "extra_passed": 2, "extra_failed": 0},
+            "categories": [
+                {"name": "通识必修课（演示）", "required": 40.0, "earned": 32.0, "missing": 8.0},
+                {"name": "专业必修课（演示）", "required": 60.0, "earned": 35.5, "missing": 24.5},
+                {"name": "专业选修课（演示）", "required": 20.0, "earned": 8.0, "missing": 12.0},
+            ],
+        }

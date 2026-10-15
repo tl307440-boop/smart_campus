@@ -94,8 +94,25 @@ class FakeSchool:
                 return httpx.Response(200, json={"items": [
                     {"cdmc": "1-201", "cdlbmc": "多媒体教室", "zws": 120},
                     {"cdmc": "篮球场", "cdlbmc": "运动场", "zws": 0},
+                    # 有的学校类别只写「多媒体」，以前按「教室」二字过滤会把它整个丢掉
+                    {"cdmc": "3-105", "jxlmc": "三教", "cdlbmc": "多媒体", "zws": 60},
                 ]})
+            if url.path == "/jwglxt/xsxy/xsxyqk_cxXsxyqkIndex.html":
+                return httpx.Response(200, text=ACADEMIA_PAGE)
         return httpx.Response(404)
+
+
+# 学业情况页的骨架：顶部提示框 + 每类课程一行学分说明，后面跟一个装课程明细的 span
+ACADEMIA_PAGE = """<html><body>
+<div id="alertBox" class="alert alert-info">
+  平均学分绩点(GPA)：3.21
+  计划总课程 48 门通过 30 门, 未通过 1 门；未修 12 门；在读 5 门；计划外：通过 2 门，未通过 0 门
+</div>
+var a = "通识必修课&nbsp;&nbsp;要求学分:40.0&nbsp;获得学分:32.0&nbsp;未获得学分:8.0";
+<span id='showKcA1'></span>
+var b = "专业选修课&nbsp;&nbsp;要求学分:20.0&nbsp;获得学分:0&nbsp;未获得学分:20.0";
+<span id='showKcB2'></span>
+</body></html>"""
 
 
 @pytest.fixture(autouse=True)
@@ -115,7 +132,27 @@ def test_login_posts_reversed_rsa_password_to_form_action_and_queries() -> None:
     assert table["periods"][0] == {"period": "1", "start": "08:00", "end": "08:45"}
     assert table["campus_id"] == "2"
     rooms = client.free_rooms("2026", "3", "2", 7, 3, [1, 2])
-    assert rooms == [{"room": "1-201", "type": "多媒体教室", "seats": "120"}]
+    assert rooms == [{"room": "1-201", "building": "", "type": "多媒体教室", "seats": "120"}, {"room": "3-105", "building": "三教", "type": "多媒体", "seats": "60"}]
+
+
+def test_academia_parses_summary_and_category_credits() -> None:
+    client = _client(FakeSchool())
+    client.login("2023001", "secret")
+    data = client.academia()
+    assert data["gpa"] == 3.21
+    assert data["plan"] == {"total": 48, "passed": 30, "failed": 1, "not_taken": 12, "in_progress": 5, "extra_passed": 2, "extra_failed": 0}
+    assert data["categories"] == [
+        {"name": "通识必修课", "required": 40.0, "earned": 32.0, "missing": 8.0},
+        {"name": "专业选修课", "required": 20.0, "earned": 0.0, "missing": 20.0},
+    ]
+
+
+def test_academia_surfaces_school_notice(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(FakeSchool())
+    client.login("2023001", "secret")
+    monkeypatch.setattr(client, "_page", lambda path, params: '<div class="alert alert-danger">学业情况查询暂未开放</div>')
+    with pytest.raises(JwError, match="暂未开放"):
+        client.academia()
 
 
 def test_wrong_password_reports_cas_message() -> None:

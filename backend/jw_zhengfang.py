@@ -1,4 +1,4 @@
-"""正方教务（zfsoft）连接器：替学生登录，查课表、考试、成绩、空教室。
+"""正方教务（zfsoft）连接器：替学生登录，查课表、考试、成绩、空教室、学业情况。
 
 登录走学校的统一身份认证（CAS）：
   1. GET 登录页，拿到隐藏的 execution 和会话 Cookie；
@@ -21,6 +21,7 @@ from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import httpx
+from bs4 import BeautifulSoup
 from logging_config import get_logger
 from outbound import USER_AGENT, UnsafeUrlError, check_url, ssl_context
 
@@ -41,6 +42,21 @@ _JSON_HEADERS = {
     "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
 }
 _PAGE = {"_search": "false", "queryModel.currentPage": "1", "queryModel.sortName": "", "queryModel.sortOrder": "asc", "time": "0"}
+# 空教室结果里剔掉的场地类别：上不了自习的
+_NOT_STUDY_ROOMS = ("运动", "体育", "球场", "操场", "田径", "游泳", "办公", "会议", "仓库", "宿舍")
+# 学业情况页：顶部提示框（去掉空白后）与各类课程的学分行，写法沿用 openschoolcn/zfn_api
+_DECIMAL = re.compile(r"\d+\.\d*")
+_ACADEMIA_PLAN = re.compile(r"计划总课程(\d+)门通过(\d+)门?.*未通过(\d+)门?.*未修(\d+)?.*在读(\d+)门?.*计划外?.*通过(\d+)门?.*未通过(\d+)门")
+_ACADEMIA_CATEGORY = re.compile(
+    r"\"(.*)&nbsp.*要求学分.*:(\d+\.\d*|0|&nbsp;).*获得学分.*:(\d+\.\d*|0| ).*未获得学分.*:(\d+\.\d*|0| )[\s\S]*?<span id='showKc(.*)'></span>"
+)
+
+
+def _credit(text: str) -> float | None:
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 class JwError(Exception):
@@ -235,16 +251,18 @@ class ZhengfangClient:
 
     # ---------------- 只读查询 ----------------
 
-    def current_week(self) -> int | None:
-        resp = self._client.get(
-            f"{self.base_url}/kbcx/xskbcxMobile_cxTimeTableIndex.html", params={"gnmkdm": "Y2105", "layout": "default"}
-        )
+    def _page(self, path: str, params: dict[str, str]) -> str:
+        """GET 一个教务页面；被跳转过（会话失效后经 CAS 绕回来）就续一次会话再取。"""
+        url = f"{self.base_url}{path}"
+        resp = self._client.get(url, params=params)
         if not self._on_jw(resp) or resp.history:
             self._renew()
-            resp = self._client.get(
-                f"{self.base_url}/kbcx/xskbcxMobile_cxTimeTableIndex.html", params={"gnmkdm": "Y2105", "layout": "default"}
-            )
-        match = _CURRENT_WEEK.search(resp.text)
+            resp = self._client.get(url, params=params)
+        return resp.text
+
+    def current_week(self) -> int | None:
+        page = self._page("/kbcx/xskbcxMobile_cxTimeTableIndex.html", {"gnmkdm": "Y2105", "layout": "default"})
+        match = _CURRENT_WEEK.search(page)
         return int(match.group(1)) if match else None
 
     def timetable(self, xnm: str, xqm: str) -> dict[str, Any]:
@@ -298,7 +316,11 @@ class ZhengfangClient:
         ]
 
     def free_rooms(self, xnm: str, xqm: str, campus_id: str, week: int, weekday: int, periods: list[int]) -> list[dict[str, str]]:
-        """空教室：周次、星期、节次都用位图传（第 n 项 = 1 << (n-1)）。只留教室和机房。"""
+        """空教室：周次、星期、节次都用位图传（第 n 项 = 1 << (n-1)）。
+
+        场地类别各校叫法不一（「多媒体」「普通教室」「智慧教室」都有），所以只剔掉明显不能上自习的场地，
+        类别为空的照样保留。
+        """
         data = self._query(
             "/cdjy/cdjy_cxKxcdlb.html",
             {
@@ -311,7 +333,39 @@ class ZhengfangClient:
         )
         rows = data.get("items", []) if isinstance(data, dict) else []
         return [
-            {"room": r.get("cdmc", ""), "type": r.get("cdlbmc", ""), "seats": str(r.get("zws", ""))}
+            {"room": r.get("cdmc", ""), "building": r.get("jxlmc", "") or "", "type": r.get("cdlbmc", "") or "", "seats": str(r.get("zws", ""))}
             for r in rows
-            if any(word in str(r.get("cdlbmc", "")) for word in ("教室", "机房", "实验"))
+            if not any(word in str(r.get("cdlbmc") or "") for word in _NOT_STUDY_ROOMS)
         ]
+
+    def academia(self) -> dict[str, Any]:
+        """学业情况（gnmkdm=N105515）：平均绩点、培养计划内外的课程通过情况、各类课程要求学分与已获学分。
+
+        页面是 HTML，没有 JSON 接口；解析方式与 openschoolcn/zfn_api 的 get_academia 一致。
+        各类课程的逐门明细要每类再发一次请求，这里不取：问到具体哪门课时由成绩工具回答。
+        """
+        page = self._page("/xsxy/xsxyqk_cxXsxyqkIndex.html", {"gnmkdm": "N105515", "layout": "default"})
+        soup = BeautifulSoup(page, "html.parser")
+        danger = soup.select_one("div.alert-danger")
+        if danger is not None:
+            raise JwError(danger.get_text(" ", strip=True)[:100] or "学业情况暂时查不了")
+        alert = soup.select_one("div#alertBox")
+        summary = "".join((alert.get_text() if alert else "").split())
+        if not summary and "showKc" not in page:
+            raise JwError("教务没有返回学业情况，可能本校没开放这个查询")
+        gpa = _DECIMAL.search(summary)
+        result: dict[str, Any] = {"gpa": float(gpa.group(0)) if gpa else None, "plan": None, "categories": []}
+        plan = _ACADEMIA_PLAN.search(summary)
+        if plan:
+            total, passed, failed, missed, studying, extra_passed, extra_failed = (int(n or 0) for n in plan.groups())
+            result["plan"] = {"total": total, "passed": passed, "failed": failed, "not_taken": missed, "in_progress": studying,
+                              "extra_passed": extra_passed, "extra_failed": extra_failed}
+        seen: set[str] = set()
+        for name, required, earned, missing, anchor in _ACADEMIA_CATEGORY.findall(page):
+            name = html.unescape(name).strip()
+            # 贪婪匹配会从页头的长串里误抓到「主修」「某级某专业」这类根节点，名字太长、锚点不干净或重复的跳过
+            if not name or len(name) > 20 or "span" in anchor or name in seen:
+                continue
+            seen.add(name)
+            result["categories"].append({"name": name, "required": _credit(required), "earned": _credit(earned), "missing": _credit(missing)})
+        return result

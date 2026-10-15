@@ -101,6 +101,71 @@ def test_keyword_fallback_without_model(monkeypatch: pytest.MonkeyPatch) -> None
     assert graph_app.intent_node({"user_question": "补考什么时候", "tenant_id": "t1"}) == {"intent": "RAG"}
 
 
+def _tools(monkeypatch: pytest.MonkeyPatch, *names: str) -> MagicMock:
+    tools = [MagicMock() for _ in names]
+    for tool, name in zip(tools, names):
+        tool.name = name
+    monkeypatch.setattr(graph_app.agent, "available_tools", lambda tenant, user, settings: tools)
+    client = MagicMock()
+    client.return_value.chat.completions.create.return_value.choices = [MagicMock(message=MagicMock(content="DIRECT"))]
+    monkeypatch.setattr(graph_app, "client_for", client)
+    return client
+
+
+def test_personal_data_questions_skip_the_classifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    _model(monkeypatch)
+    _settings(monkeypatch)
+    client = _tools(monkeypatch, "jw_grades", "jw_timetable", "web_search")
+
+    assert graph_app.intent_node({"user_question": "我上学期绩点多少", "tenant_id": "t1", "user_id": "u"}) == {"intent": "TOOL"}
+    assert graph_app.intent_node({"user_question": "2026 年考研国家线出了吗", "tenant_id": "t1", "user_id": "u"}) == {"intent": "TOOL"}
+    client.assert_not_called()
+
+
+def test_short_follow_up_stays_on_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    _model(monkeypatch)
+    _settings(monkeypatch)
+    client = _tools(monkeypatch, "jw_free_rooms", "campus_map")
+
+    assert graph_app.intent_node({"user_question": "那四教呢", "tenant_id": "t1", "intent": "TOOL"}) == {"intent": "TOOL"}
+    assert graph_app.intent_node({"user_question": "那四教呢", "tenant_id": "t1", "intent": "RAG"}) == {"intent": "DIRECT"}
+    client.assert_called_once()
+
+
+def test_venting_about_grades_is_not_routed_to_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    _model(monkeypatch)
+    _settings(monkeypatch)
+    client = _tools(monkeypatch, "jw_grades", "jw_timetable")
+    client.return_value.chat.completions.create.return_value.choices = [MagicMock(message=MagicMock(content="COMFORT"))]
+
+    assert graph_app.intent_node({"user_question": "成绩出来了好难过想哭", "tenant_id": "t1"}) == {"intent": "COMFORT"}
+
+
+def _turns(count: int, size: int) -> list[dict]:
+    messages = []
+    for index in range(count):
+        messages += [{"role": "user", "content": f"问{index}"}, {"role": "assistant", "content": "答" * size}]
+    return messages
+
+
+def test_history_is_cut_by_characters_but_keeps_min_turns() -> None:
+    history = graph_app.budgeted_history(_turns(10, 1000), max_turns=10, max_chars=2500, min_turns=2)
+    assert [m["content"] for m in history if m["role"] == "user"] == ["问8", "问9"]
+
+    short = graph_app.budgeted_history(_turns(12, 10), max_turns=10, max_chars=6000, min_turns=2)
+    assert len(short) == 20 and short[0] == {"role": "user", "content": "问2"}
+
+    huge = graph_app.budgeted_history(_turns(3, 9000), max_turns=10, max_chars=100, min_turns=2)
+    assert [m["role"] for m in huge] == ["user", "assistant", "user", "assistant"]
+
+
+def test_summary_goes_before_recent_turns() -> None:
+    history = graph_app.prompt_history({"messages": _turns(1, 5), "summary": "学生读大三，在找空教室"})
+    assert history[0]["role"] == "system" and "在找空教室" in history[0]["content"]
+    assert history[1:] == [{"role": "user", "content": "问0"}, {"role": "assistant", "content": "答" * 5}]
+    assert graph_app.prompt_history({"messages": _turns(1, 5), "summary": "  "})[0]["role"] == "user"
+
+
 def test_crisis_is_answered_even_when_school_only_answers_from_documents(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch, query_only=True)
     assert graph_app.route_query({"intent": "CRISIS", "tenant_id": "t1"}) == "generate"

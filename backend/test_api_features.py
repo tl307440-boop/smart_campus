@@ -30,6 +30,8 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(auth, "embed_settings", lambda eid: EMBED if eid == EMBED.id else None)
     monkeypatch.setattr(api, "embed_settings", lambda eid: EMBED if eid == EMBED.id else None)
     monkeypatch.setattr(api, "enforce_chat_quota", lambda user_id: None)
+    # 默认不碰真实库；需要库的用例自己打开
+    monkeypatch.setattr(api.chat_history, "enabled", lambda: False)
 
 
 @pytest.fixture
@@ -100,7 +102,7 @@ def test_workspace_is_readable_by_guest(client: TestClient, monkeypatch: pytest.
 def test_guest_chat_drops_byok_and_memory(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_events(thread_id, question, tenant_id, llm=None, user_id=""):
+    def fake_events(thread_id, question, tenant_id, llm=None, user_id="", session_id="", replace_question=None):
         captured.update(thread_id=thread_id, llm=llm, user_id=user_id, tenant_id=tenant_id)
         yield "event: done\ndata: {}\n\n"
 
@@ -124,7 +126,7 @@ def test_guest_chat_drops_byok_and_memory(client: TestClient, monkeypatch: pytes
 def test_chat_records_the_question_before_answering(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, str] = {}
 
-    def fake_events(thread_id, question, tenant_id, llm=None, user_id=""):
+    def fake_events(thread_id, question, tenant_id, llm=None, user_id="", session_id="", replace_question=None):
         yield "event: done\ndata: {}\n\n"
 
     def record(tenant_id: str, user_id: str, question: str) -> None:
@@ -140,7 +142,7 @@ def test_chat_records_the_question_before_answering(client: TestClient, monkeypa
 
 
 def test_chat_still_answers_when_the_question_log_breaks(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_events(thread_id, question, tenant_id, llm=None, user_id=""):
+    def fake_events(thread_id, question, tenant_id, llm=None, user_id="", session_id="", replace_question=None):
         yield "event: done\ndata: {}\n\n"
 
     def broken(tenant_id: str, user_id: str, question: str) -> None:
@@ -155,7 +157,7 @@ def test_chat_still_answers_when_the_question_log_breaks(client: TestClient, mon
 def test_member_chat_keeps_user_id(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_events(thread_id, question, tenant_id, llm=None, user_id=""):
+    def fake_events(thread_id, question, tenant_id, llm=None, user_id="", session_id="", replace_question=None):
         captured["user_id"] = user_id
         yield "event: done\ndata: {}\n\n"
 
@@ -194,6 +196,229 @@ def test_remember_command_ignored_for_guest(monkeypatch: pytest.MonkeyPatch) -> 
 
     list(api._chat_events("t:g:1", "记住：我读大三", "tenant-1", user_id=""))
     adder.assert_not_called()
+
+
+# ---------- 会话历史 ----------
+
+
+def _history_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api.chat_history, "enabled", lambda: True)
+
+
+def _fake_graph(messages: list[dict]) -> MagicMock:
+    graph = MagicMock()
+    graph.get_state.return_value = MagicMock(values={"messages": messages})
+    return graph
+
+
+QUESTION = {"role": "user", "content": "图书馆几点关门"}
+ANSWER = {"role": "assistant", "content": "晚上十点", "sources": [], "tables": []}
+
+
+def test_session_list_is_scoped_and_empty_for_guest(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import datetime, timezone
+
+    _history_on(monkeypatch)
+    lister = MagicMock(return_value=[api.chat_history.SessionInfo("s1", "图书馆几点关门", datetime(2026, 10, 15, tzinfo=timezone.utc))])
+    monkeypatch.setattr(api.chat_history, "list_sessions", lister)
+
+    response = client.get("/api/sessions?limit=20", headers=headers())
+    assert response.json() == [{"thread_id": "s1", "title": "图书馆几点关门", "updated_at": "2026-10-15T00:00:00+00:00"}]
+    lister.assert_called_once_with("tenant-1", "user-1", 20)
+
+    assert client.get("/api/sessions", headers=headers("GUEST")).json() == []
+    assert client.get("/api/sessions?limit=500", headers=headers()).status_code == 422
+
+
+def test_messages_prefer_database(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _history_on(monkeypatch)
+    monkeypatch.setattr(api.chat_history, "load_messages", lambda t, u, s: [QUESTION, {**ANSWER, "tables": [{"title": "空教室"}]}])
+    monkeypatch.setattr(api, "build_graph", MagicMock(side_effect=AssertionError("不该读 Redis")))
+
+    body = client.get("/api/sessions/s1/messages", headers=headers()).json()
+    assert [m["content"] for m in body] == ["图书馆几点关门", "晚上十点"]
+    assert body[1]["tables"] == [{"title": "空教室"}]
+
+
+def test_deleted_session_is_404(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _history_on(monkeypatch)
+    monkeypatch.setattr(api.chat_history, "load_messages", lambda t, u, s: None)
+    monkeypatch.setattr(api.chat_history, "is_blocked", lambda t, u, s: True)
+    monkeypatch.setattr(api, "_chat_events", MagicMock(side_effect=AssertionError("不该开始回答")))
+
+    assert client.get("/api/sessions/s1/messages", headers=headers()).status_code == 404
+    assert client.post("/api/chat", json={"thread_id": "s1", "question": "在吗"}, headers=headers()).status_code == 404
+
+
+def test_redis_only_session_is_backfilled_without_failed_turns(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _history_on(monkeypatch)
+    failed = {"role": "assistant", "content": f"{api.FAILED_PREFIX} 超时"}
+    monkeypatch.setattr(api.chat_history, "load_messages", lambda t, u, s: None)
+    monkeypatch.setattr(api.chat_history, "is_blocked", lambda t, u, s: False)
+    monkeypatch.setattr(api, "build_graph", lambda: _fake_graph([{"role": "user", "content": "在吗"}, failed, QUESTION, ANSWER]))
+    backfill = MagicMock(return_value=True)
+    monkeypatch.setattr(api.chat_history, "backfill", backfill)
+
+    body = client.get("/api/sessions/s1/messages", headers=headers()).json()
+
+    assert len(body) == 4
+    backfill.assert_called_once_with("tenant-1", "user-1", "s1", [QUESTION, ANSWER])
+
+
+def test_messages_fall_back_to_redis_when_database_breaks(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _history_on(monkeypatch)
+    monkeypatch.setattr(api.chat_history, "load_messages", MagicMock(side_effect=OSError("db down")))
+    monkeypatch.setattr(api, "build_graph", lambda: _fake_graph([QUESTION, ANSWER]))
+
+    assert len(client.get("/api/sessions/s1/messages", headers=headers()).json()) == 2
+
+
+def test_guest_messages_only_read_redis(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _history_on(monkeypatch)
+    monkeypatch.setattr(api.chat_history, "load_messages", MagicMock(side_effect=AssertionError("访客不进库")))
+    monkeypatch.setattr(api, "build_graph", lambda: _fake_graph([QUESTION, ANSWER]))
+
+    assert len(client.get("/api/sessions/s1/messages", headers=headers("GUEST")).json()) == 2
+
+
+def test_delete_session_writes_tombstone_and_drops_redis(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _history_on(monkeypatch)
+    deleter = MagicMock(side_effect=lambda t, u, s: s == "s1")
+    monkeypatch.setattr(api.chat_history, "delete_session", deleter)
+    graph = _fake_graph([])
+    monkeypatch.setattr(api, "build_graph", lambda: graph)
+
+    assert client.delete("/api/sessions/s1", headers=headers()).status_code == 204
+    graph.checkpointer.delete_thread.assert_called_once_with("tenant-1:user-1:s1")
+    assert client.delete("/api/sessions/other", headers=headers()).status_code == 404
+    assert client.delete("/api/sessions/s1", headers=headers("GUEST")).status_code == 403
+
+
+def test_member_chat_passes_session_id_only_with_database(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_events(thread_id, question, tenant_id, llm=None, user_id="", session_id="", replace_question=None):
+        captured["session_id"] = session_id
+        yield "event: done\ndata: {}\n\n"
+
+    monkeypatch.setattr(api, "_chat_events", fake_events)
+    client.post("/api/chat", json={"thread_id": "s1", "question": "你好"}, headers=headers())
+    assert captured["session_id"] == ""
+
+    _history_on(monkeypatch)
+    monkeypatch.setattr(api.chat_history, "is_blocked", lambda t, u, s: False)
+    client.post("/api/chat", json={"thread_id": "s1", "question": "你好"}, headers=headers())
+    assert captured["session_id"] == "s1"
+
+
+def _stream_graph(final_messages: list[dict], order: list[str]) -> MagicMock:
+    graph = _fake_graph(final_messages)
+
+    def stream(input_state, config, stream_mode):
+        order.append("stream")
+        yield ("updates", {"finalize": {"final_answer": final_messages[-1]["content"]}})
+
+    graph.stream.side_effect = stream
+    return graph
+
+
+def test_successful_turn_is_saved_before_done(monkeypatch: pytest.MonkeyPatch) -> None:
+    _history_on(monkeypatch)
+    order: list[str] = []
+    monkeypatch.setattr(api.knowledge_base, "short_corpus", lambda tid: "")
+    monkeypatch.setattr(api.chat_history, "summary", lambda t, u, s: "学生读大三")
+    monkeypatch.setattr(api.chat_history, "record_turn", lambda *args: order.append("record") or 2)
+    scheduled = MagicMock()
+    monkeypatch.setattr(api.session_summary, "schedule", scheduled)
+    graph = _stream_graph([QUESTION, ANSWER], order)
+    monkeypatch.setattr(api, "build_graph", lambda: graph)
+
+    for frame in api._chat_events("tenant-1:user-1:s1", "图书馆几点关门", "tenant-1", user_id="user-1", session_id="s1"):
+        if frame.startswith("event: done"):
+            order.append("done")
+
+    assert order == ["stream", "record", "done"]
+    assert graph.stream.call_args.args[0]["summary"] == "学生读大三"
+    scheduled.assert_called_once()
+
+
+def test_failed_turn_is_not_saved(monkeypatch: pytest.MonkeyPatch) -> None:
+    _history_on(monkeypatch)
+    monkeypatch.setattr(api.knowledge_base, "short_corpus", lambda tid: "")
+    monkeypatch.setattr(api.chat_history, "summary", lambda t, u, s: "")
+    recorder = MagicMock()
+    monkeypatch.setattr(api.chat_history, "record_turn", recorder)
+    failed = {"role": "assistant", "content": api.NOT_CONFIGURED}
+    monkeypatch.setattr(api, "build_graph", lambda: _stream_graph([QUESTION, failed], []))
+
+    list(api._chat_events("tenant-1:user-1:s1", "图书馆几点关门", "tenant-1", user_id="user-1", session_id="s1"))
+    recorder.assert_not_called()
+
+
+def _rewind_graph(messages: list[dict]) -> MagicMock:
+    graph = _stream_graph([*messages], [])
+    graph.get_state.return_value = MagicMock(values={"messages": messages})
+    return graph
+
+
+def test_regenerate_drops_last_turn_everywhere(monkeypatch: pytest.MonkeyPatch) -> None:
+    _history_on(monkeypatch)
+    monkeypatch.setattr(api.knowledge_base, "short_corpus", lambda tid: "")
+    monkeypatch.setattr(api.chat_history, "summary", lambda t, u, s: "")
+    monkeypatch.setattr(api.chat_history, "record_turn", lambda *args: None)
+    dropper = MagicMock(return_value=True)
+    monkeypatch.setattr(api.chat_history, "drop_last_turn", dropper)
+    earlier = [{"role": "user", "content": "在吗"}, {"role": "assistant", "content": "在"}]
+    graph = _rewind_graph([*earlier, QUESTION, ANSWER])
+    monkeypatch.setattr(api, "build_graph", lambda: graph)
+
+    list(api._chat_events("tenant-1:user-1:s1", "图书馆几点关门", "tenant-1", user_id="user-1",
+                          session_id="s1", replace_question="图书馆几点关门"))
+
+    graph.update_state.assert_called_once()
+    assert graph.update_state.call_args.args[1] == {"messages": earlier}
+    dropper.assert_called_once_with("tenant-1", "user-1", "s1", "图书馆几点关门")
+
+
+def test_rewind_ignores_a_question_that_is_not_last(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api.knowledge_base, "short_corpus", lambda tid: "")
+    graph = _rewind_graph([QUESTION, ANSWER])
+    monkeypatch.setattr(api, "build_graph", lambda: graph)
+
+    list(api._chat_events("t:g:1", "别的", "tenant-1", replace_question="早就问过的"))
+    graph.update_state.assert_not_called()
+
+
+def test_resending_a_failed_turn_keeps_database_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    _history_on(monkeypatch)
+    monkeypatch.setattr(api.knowledge_base, "short_corpus", lambda tid: "")
+    monkeypatch.setattr(api.chat_history, "summary", lambda t, u, s: "")
+    monkeypatch.setattr(api.chat_history, "record_turn", lambda *args: None)
+    dropper = MagicMock()
+    monkeypatch.setattr(api.chat_history, "drop_last_turn", dropper)
+    failed = {"role": "assistant", "content": f"{api.FAILED_PREFIX} 超时"}
+    graph = _rewind_graph([QUESTION, failed])
+    monkeypatch.setattr(api, "build_graph", lambda: graph)
+
+    list(api._chat_events("tenant-1:user-1:s1", "图书馆几点关门", "tenant-1", user_id="user-1",
+                          session_id="s1", replace_question="图书馆几点关门"))
+
+    assert graph.update_state.call_args.args[1] == {"messages": []}
+    dropper.assert_not_called()
+
+
+def test_empty_redis_is_restored_from_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    _history_on(monkeypatch)
+    monkeypatch.setattr(api.knowledge_base, "short_corpus", lambda tid: "")
+    monkeypatch.setattr(api.chat_history, "summary", lambda t, u, s: "")
+    monkeypatch.setattr(api.chat_history, "recent_messages", lambda t, u, s, limit: [QUESTION, ANSWER])
+    monkeypatch.setattr(api.chat_history, "record_turn", lambda *args: None)
+    graph = _stream_graph([QUESTION, ANSWER], [])
+    graph.get_state.side_effect = [MagicMock(values={}), MagicMock(values={"messages": [QUESTION, ANSWER]})]
+    monkeypatch.setattr(api, "build_graph", lambda: graph)
+
+    list(api._chat_events("tenant-1:user-1:s1", "那周末呢", "tenant-1", user_id="user-1", session_id="s1"))
+    assert graph.stream.call_args.args[0]["messages"] == [QUESTION, ANSWER]
 
 
 # ---------- 网页导入 ----------

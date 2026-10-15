@@ -13,6 +13,10 @@ interface Props {
   onOpenService?: () => void;
   /** 这一轮回答没出来，但情绪分析判出了高风险：求助卡片照样要给 */
   safety?: SafetyCardData | null;
+  /** 用同一个问题再问一次；登录过期这类重试也没用的错误不显示按钮 */
+  onRetry?: () => void;
+  /** 同一个问题连着失败了几次，合成一张卡片显示 */
+  repeat?: number;
 }
 
 const DEBUG_HINT = {
@@ -23,7 +27,16 @@ const DEBUG_HINT = {
 } as const;
 
 /** 出错时的小纸条：学生只看到发生了什么、该找谁；原文折在「技术细节」里且只给管理员。 */
-export function ErrorNote({ raw, embedded = false, canDebug = false, canConfigure = false, onOpenService, safety }: Props) {
+export function ErrorNote({
+  raw,
+  embedded = false,
+  canDebug = false,
+  canConfigure = false,
+  onOpenService,
+  safety,
+  onRetry,
+  repeat = 1,
+}: Props) {
   const failure = describeFailure(raw, embedded);
   const source = failure.kind === "service" ? failedModelSource(raw) : null;
   // 报错里带着「（个人密钥）」：确实是本人自带的那把出了问题，不是学校的
@@ -42,12 +55,28 @@ export function ErrorNote({ raw, embedded = false, canDebug = false, canConfigur
         !
       </span>
       <div className="min-w-0 flex-1 pt-0.5">
-        <p className="font-display text-lg leading-snug">{failure.title}</p>
+        <p className="font-display text-lg leading-snug">
+          {failure.title}
+          {repeat > 1 && (
+            <span className="ml-2 align-middle font-body text-sm text-muted tabular-nums" aria-label={`连续 ${repeat} 次`}>
+              ×{repeat}
+            </span>
+          )}
+        </p>
         <p className="mt-0.5 text-[0.9375rem] text-muted">{hint}</p>
-        {action && onOpenService && (
-          <button type="button" onClick={onOpenService} className="btn btn-sm mt-2.5">
-            {action}
-          </button>
+        {((onRetry && failure.kind !== "session") || (action && onOpenService)) && (
+          <div className="mt-2.5 flex flex-wrap gap-2">
+            {onRetry && failure.kind !== "session" && (
+              <button type="button" onClick={onRetry} className="btn btn-sm">
+                再试一次
+              </button>
+            )}
+            {action && onOpenService && (
+              <button type="button" onClick={onOpenService} className="btn btn-sm">
+                {action}
+              </button>
+            )}
+          </div>
         )}
         {canDebug && (
           <details className="mt-2 text-sm text-muted">
