@@ -86,6 +86,85 @@ def test_unknown_week_is_flagged_and_ungraded_courses_skip_gpa(monkeypatch: pyte
     assert agent._grades(_ctx(), {})["credit_weighted_gpa"] == 4.0
 
 
+def test_multi_row_results_become_tables_and_model_is_told_not_to_repeat(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(jw_account, "school_ai", lambda tenant_id: SchoolAi(jw_mode="demo"))
+    ctx = _ctx(date(2026, 10, 12))
+    grades = agent._grades(ctx, {})
+    assert grades["display"] == agent.TABLE_SHOWN
+    table = ctx.tables[0]
+    assert table["title"] == "成绩" and table["total"] == 2
+    assert [c["key"] for c in table["columns"]] == ["term", "course", "score", "credit", "gpa", "type"]
+    assert table["rows"][0]["course"] == "高等数学（演示）" and table["rows"][0]["score"] == "88"
+
+
+def test_table_drops_columns_that_are_empty_everywhere() -> None:
+    ctx = _ctx()
+    ctx.table("空教室", [("room", "教室"), ("building", "教学楼")], [{"room": "1-101", "building": ""}, {"room": "1-102"}])
+    assert ctx.tables[0]["columns"] == [{"key": "room", "label": "教室"}]
+    assert ctx.tables[0]["rows"] == [{"room": "1-101"}, {"room": "1-102"}]
+
+
+def test_free_rooms_says_so_when_building_matches_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(jw_account, "school_ai", lambda tenant_id: SchoolAi(jw_mode="demo"))
+    ctx = _ctx(date(2026, 10, 12))
+    hit = agent._free_rooms(ctx, {"building": "1号教学楼"})
+    assert hit["count"] == 3 and "building_not_found" not in hit
+    miss = agent._free_rooms(_ctx(date(2026, 10, 12)), {"building": "图书馆"})
+    assert miss["count"] == 3 and "图书馆" in miss["building_not_found"]
+
+
+def test_free_rooms_tells_model_about_truncation_but_table_keeps_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(jw_account, "school_ai", lambda tenant_id: SchoolAi(jw_mode="demo"))
+    many = [{"room": f"1-{n}", "building": "", "type": "多媒体", "seats": "60"} for n in range(100, 160)]
+    monkeypatch.setattr(jw_account.DemoJw, "free_rooms", lambda self, *args: many)
+    ctx = _ctx(date(2026, 10, 12))
+    result = agent._free_rooms(ctx, {})
+    assert len(result["rooms"]) == agent.ROOMS_FOR_MODEL and "60" in result["truncated"]
+    assert len(ctx.tables[0]["rows"]) == 60
+
+
+def test_empty_grades_carry_a_no_fabrication_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(jw_account, "school_ai", lambda tenant_id: SchoolAi(jw_mode="demo"))
+    monkeypatch.setattr(jw_account.DemoJw, "grades", lambda self, xnm="", xqm="": [])
+    ctx = _ctx()
+    result = agent._grades(ctx, {})
+    assert "不要编造" in result["note"] and ctx.tables == []
+
+
+def test_graduation_progress_reports_category_credits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(jw_account, "school_ai", lambda tenant_id: SchoolAi(jw_mode="demo"))
+    ctx = _ctx()
+    result = agent._graduation(ctx, {})
+    assert result["plan"]["failed"] == 1 and result["display"] == agent.TABLE_SHOWN
+    assert ctx.tables[0]["rows"][1] == {"name": "专业必修课（演示）", "required": "60.0", "earned": "35.5", "missing": "24.5"}
+    assert ctx.sources[0]["source"] == "教务系统·学业情况"
+
+
+@pytest.mark.parametrize(
+    ("question", "names", "expected"),
+    [
+        ("我这学期成绩怎么样", {"jw_grades"}, True),
+        ("明天有课吗", {"jw_grades"}, True),
+        ("哪里有空教室", {"jw_grades"}, True),
+        ("我成绩怎么样", set(), False),  # 学校没开教务：交给分类器
+        ("今年国家奖学金什么时候评", {"web_search"}, True),
+        ("2027 年寒假几号放", {"web_search"}, True),
+        ("你好呀", {"jw_grades", "web_search", "school_news"}, False),
+        ("最近有什么讲座", {"school_news"}, True),
+    ],
+)
+def test_needs_tools(question: str, names: set[str], expected: bool) -> None:
+    assert agent.needs_tools(question, names) is expected
+
+
+def test_prompt_mentions_web_search_only_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agent, "school_name", lambda tenant_id: "测试大学")
+    search = agent.Tool("web_search", "", "", agent._obj(), lambda c, a: None)
+    assert "先调用 web_search" in agent.system_prompt(_ctx(), [search])
+    prompt = agent.system_prompt(_ctx(), [])
+    assert "先调用 web_search" not in prompt and "学校没开联网搜索" in prompt
+
+
 def test_query_only_school_gets_refusal_rule(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(agent, "school_name", lambda tenant_id: "测试大学")
     ctx = _ctx()
@@ -122,7 +201,7 @@ def test_tools_follow_school_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
     _gate(monkeypatch, SchoolAi(jw_mode="demo", news_urls=("https://jwc.test.edu.cn/",)), True, True)
     names = {t.name for t in agent.available_tools("t1", "u1", WorkspaceSettings())}
-    assert {"jw_timetable", "jw_grades", "school_news", "read_notice", "campus_place", "walking_route", "web_search"} <= names
+    assert {"jw_timetable", "jw_grades", "jw_graduation", "school_news", "read_notice", "campus_place", "walking_route", "web_search"} <= names
     # 挂件访客没有账号：没有教务工具
     assert not any(n.startswith("jw_") for n in (t.name for t in agent.available_tools("t1", "", WorkspaceSettings())))
     # 只按资料回答：不开放联网搜索

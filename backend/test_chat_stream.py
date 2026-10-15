@@ -77,9 +77,10 @@ def test_done_is_always_last_and_complete() -> None:
         "intent": "DIRECT",
         "context": "",
         "sources": [],
-        "emotion": {"risk_level": 1},
-        "safety": None,
-    }
+            "emotion": {"risk_level": 1},
+            "safety": None,
+            "tables": [],
+        }
 
 
 def test_safety_card_from_generate_or_finalize_reaches_done() -> None:

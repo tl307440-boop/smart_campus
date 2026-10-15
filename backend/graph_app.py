@@ -58,7 +58,7 @@ from ai_config import ModelEndpoint, chat_endpoint, client_for, embedding_spec, 
 from env_config import load_backend_env
 from kimi_extract_service import KimiExtractService
 from knowledge import KIMI_CORPUS_BUDGET
-from llm_service import FAILED_PREFIX, NOT_CONFIGURED, DeepSeekService, prompt_extras
+from llm_service import FAILED_PREFIX, NOT_CONFIGURED, PERSONAL_DATA_RULE, DeepSeekService, prompt_extras
 from logging_config import get_logger
 from tenancy import GLOBAL_TENANT
 from vector_service import VectorRAGService, open_store
@@ -134,6 +134,12 @@ class GraphState(TypedDict):
     # ---- 本轮的求助卡片（comfort.safety_card），没有则为 None ----
     safety: dict[str, Any] | None
 
+    # ---- 本轮工具查出的表格（agent.ToolContext.table），原样给前端 ----
+    tables: list[dict[str, Any]]
+
+    # ---- 本会话更早轮次的滚动摘要（chat_history），每轮由 api 从库里读出来放进输入 ----
+    summary: str
+
 
 # ============================================================
 # 第三步：懒加载服务实例（首次使用时才初始化，避免 import 时网络/SSL 报错）
@@ -148,8 +154,16 @@ _compiled_graph = None
 
 # 会话里保留的对话轮数（一轮 = user + assistant 两条）
 MAX_STORED_TURNS = _env_int("MAX_STORED_TURNS", 30)
-# 每次请求实际发给模型的轮数，比存储的更少，用来压 token 成本
+# 每次请求实际发给模型的轮数上限，比存储的更少，用来压 token 成本
 MAX_PROMPT_TURNS = _env_int("MAX_PROMPT_TURNS", 10)
+# 发给模型的历史按字数封顶：一轮 40 行的表格回答顶得上十轮闲聊，只按轮数管不住
+MAX_PROMPT_CHARS = _env_int("MAX_PROMPT_CHARS", 6000)
+# 字数再超也至少带上最近这几轮，否则「那上学期呢」这种追问接不上
+MIN_PROMPT_TURNS = 2
+# 上一轮查过工具、这一轮又很短（「那上学期呢」「下周呢」），多半是接着查
+FOLLOW_UP_CHARS = 12
+# 闲聊的随机性：再高就开始编具体数字了
+DIRECT_TEMPERATURE = 0.5
 # 情感分析顺带抽出的个人事实是否自动写进长期记忆
 MEMORY_AUTO_EXTRACT = os.getenv("MEMORY_AUTO_EXTRACT", "true").strip().lower() in {"1", "true", "yes", "on"}
 # 不连任何模型、全部用模拟数据（本地演示）。线上必须关着，否则学生拿到的是假回答
@@ -178,8 +192,9 @@ def _append_turn_messages(
     context: str = "",
     sources: list[dict[str, Any]] | None = None,
     safety: dict[str, Any] | None = None,
+    tables: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """将本轮 user/assistant 写入 messages；assistant 附带 context/sources 便于 UI 恢复。
+    """将本轮 user/assistant 写入 messages；assistant 附带 context/sources/tables 便于 UI 恢复。
 
     只保留最近 MAX_STORED_TURNS 轮：不裁剪的话 Redis 里的 state 会随会话
     无限膨胀，每轮读写的快照也越来越大。
@@ -194,6 +209,8 @@ def _append_turn_messages(
     }
     if safety:
         assistant["safety"] = safety
+    if tables:
+        assistant["tables"] = tables
     updated_messages.append(assistant)
     return updated_messages[-(MAX_STORED_TURNS * 2):]
 
@@ -266,6 +283,35 @@ def recent_history(messages: list[dict[str, Any]], max_turns: int) -> list[dict[
         if role in ("user", "assistant") and content:
             trimmed.append({"role": role, "content": content})
     return trimmed[-(max_turns * 2):]
+
+
+def budgeted_history(
+    messages: list[dict[str, Any]], max_turns: int, max_chars: int, min_turns: int = MIN_PROMPT_TURNS
+) -> list[dict[str, Any]]:
+    """从最新一轮往回取，字数超过 max_chars 就停；但至少 min_turns 轮，至多 max_turns 轮。"""
+    kept: list[dict[str, Any]] = []
+    total = turns = 0
+    for msg in reversed(recent_history(messages, max_turns)):
+        size = len(msg["content"])
+        if turns >= min_turns and total + size > max_chars:
+            break
+        kept.append(msg)
+        total += size
+        turns += msg["role"] == "user"
+    # 停在一轮中间时，最早那条是没有提问的回答，去掉
+    if kept and kept[-1]["role"] == "assistant":
+        kept.pop()
+    return kept[::-1]
+
+
+def prompt_history(state: GraphState) -> list[dict[str, Any]]:
+    """三条回答路径共用的上下文：更早轮次的摘要（有的话）+ 按字数封顶的最近几轮原文。"""
+    history = budgeted_history(state.get("messages", []), MAX_PROMPT_TURNS, MAX_PROMPT_CHARS)
+    summary = (state.get("summary") or "").strip()
+    if not summary:
+        return history
+    note = f"这是本次对话更早部分的摘要，帮你接上前面说过的事，不要逐字复述给学生：\n{summary}"
+    return [{"role": "system", "content": note}, *history]
 
 
 def get_deepseek() -> DeepSeekService:
@@ -357,9 +403,17 @@ def intent_node(state: GraphState) -> dict:
     # --- 使用 DeepSeek 做极速意图分类 ---
     # 非流式调用（不带 stream=True），直接获取完整响应，速度快
     endpoint = None if get_deepseek().use_mock else _chat_endpoint(state)
-    tools_on = endpoint is not None and agent.has_live_tools(
-        state.get("tenant_id") or GLOBAL_TENANT, state.get("user_id") or "", _settings(state)
-    )
+    tool_names = {
+        t.name for t in agent.available_tools(state.get("tenant_id") or GLOBAL_TENANT, state.get("user_id") or "", _settings(state))
+    } if endpoint is not None else set()
+    tools_on = len(tool_names) > 1
+
+    # --- 确定要查工具的问题不交给分类模型：被它判成闲聊，模型就会编一份假成绩 ---
+    if tools_on and not comfort.looks_like_venting(question):
+        follow_up = state.get("intent") == "TOOL" and len(question.strip()) <= FOLLOW_UP_CHARS
+        if follow_up or agent.needs_tools(question, tool_names):
+            logger.info(f"[意图判定] {'接着上一轮查' if follow_up else '命中工具词表'}，直接走 TOOL")
+            return {"intent": "TOOL"}
     tool_rule = """
 4. 如果要查【本人的课表、考试安排、成绩、空教室】，或问【学校最新的通知/新闻/活动】，或问【校园里某个地方在哪、怎么走】，或需要【联网查最新信息】，返回：TOOL
 """ if tools_on else ""
@@ -530,6 +584,7 @@ def generate_node(state: GraphState) -> dict:
     """【生成节点】见 _generate。state 存在 Redis 里，每轮都写一次 safety，上一轮的求助卡片才不会留到这一轮。"""
     out = _generate(state)
     out.setdefault("safety", None)
+    out.setdefault("tables", [])
     return out
 
 
@@ -547,7 +602,7 @@ def _comfort_answer(state: GraphState, question: str, settings: WorkspaceSetting
         system_prompt = comfort.comfort_prompt(settings.assistant_name, crisis, contact) + prompt_extras(settings.persona, memories)
         api_messages = (
             [{"role": "system", "content": system_prompt}]
-            + recent_history(state.get("messages", []), MAX_PROMPT_TURNS)
+            + prompt_history(state)
             + [{"role": "user", "content": question}]
         )
         parts: list[str] = []
@@ -599,7 +654,7 @@ def _agent_answer(state: GraphState, question: str, settings: WorkspaceSettings,
     else:
         try:
             final_answer = agent.run(
-                ctx, endpoint, recent_history(state.get("messages", []), MAX_PROMPT_TURNS), question,
+                ctx, endpoint, prompt_history(state), question,
                 say, lambda event: writer({"tool": event}),
             )
         except Exception as e:
@@ -610,9 +665,9 @@ def _agent_answer(state: GraphState, question: str, settings: WorkspaceSettings,
             else:
                 final_answer = f"{FAILED_PREFIX}（{endpoint.label}）{scrub(str(e), endpoint)}"
                 emit(final_answer)
-    logger.info(f"[生成节点] 工具问答完成，长度: {len(final_answer)} 字，来源 {len(ctx.sources)} 条")
-    updated_messages = _append_turn_messages(state, question, final_answer, sources=ctx.sources)
-    return {"final_answer": final_answer, "messages": updated_messages, "sources": ctx.sources}
+    logger.info(f"[生成节点] 工具问答完成，长度: {len(final_answer)} 字，来源 {len(ctx.sources)} 条，表格 {len(ctx.tables)} 张")
+    updated_messages = _append_turn_messages(state, question, final_answer, sources=ctx.sources, tables=ctx.tables)
+    return {"final_answer": final_answer, "messages": updated_messages, "sources": ctx.sources, "tables": ctx.tables}
 
 
 def _generate(state: GraphState) -> dict:
@@ -695,19 +750,18 @@ def _generate(state: GraphState) -> dict:
 你是"{name}"，智悦校园的智能校园助手。
 你性格温暖、友善、幽默，像一个贴心的学长/学姐。
 请用自然、亲切的语气回答用户的问题。
-如果用户问的是校园相关问题但你没有具体资料，请礼貌地建议他们使用 /read 命令加载相关文档。
+如果用户问的是校园相关问题但你没有具体资料，请如实说明，建议他换个说法再问，或去问辅导员。
 请根据对话历史理解用户的上下文，比如用户之前告诉过你他的名字，你应该记住并使用。
-""" + prompt_extras(settings.persona, memories)
-            # 从 Redis 恢复的历史里取最近几轮，LLM 才能记住「我是唐亮」这类上文。
-            # 只取最近几轮而非全量：否则 token 成本随会话长度线性上涨。
-            history_messages = recent_history(state.get("messages", []), MAX_PROMPT_TURNS)
+""" + PERSONAL_DATA_RULE + prompt_extras(settings.persona, memories)
+            # 历史里取最近几轮（按字数封顶）再加更早轮次的摘要，LLM 才能记住「我是唐亮」这类上文。
+            history_messages = prompt_history(state)
 
             # 将 system prompt + 历史消息 + 当前问题 组装为完整对话
             api_messages = [{"role": "system", "content": system_prompt}] + history_messages + [{"role": "user", "content": question}]
 
             # 边生成边下发，首字延迟不再等整段写完
             parts: list[str] = []
-            for piece in get_deepseek().stream_chat(api_messages, endpoint, temperature=0.8):
+            for piece in get_deepseek().stream_chat(api_messages, endpoint, temperature=DIRECT_TEMPERATURE):
                 parts.append(piece)
                 emit(piece)
             final_answer = "".join(parts)

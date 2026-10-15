@@ -2,30 +2,31 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { migrateLegacyMemories, readSettings } from "@/lib/agent-settings";
+import { type ChatProgress, phaseOfStatus, phaseOfTool, SLOW_AFTER_MS } from "@/lib/chat-progress";
 import { isFallbackAnswer } from "@/lib/friendly-error";
+import { persistThreadId, readStoredThreadId } from "@/lib/thread-storage";
 import {
   type ChatDone,
   type ChatMessage,
-  type ChatStatus,
+  type ChatToolEvent,
+  type SessionSummary,
   addMemories,
   createSession,
+  deleteSession,
   fetchMessages,
+  listSessions,
+  SessionGoneError,
   streamChat,
 } from "@/lib/api";
 
-const STORAGE_KEY = "zhiyue.threadId";
-const EMBED_STORAGE_KEY = "zhiyue.embed.threadId";
-
-const STAGE_LABEL: Record<ChatStatus["stage"], string> = {
-  intent: "正在理解你的问题…",
-  retrieved: "正在翻阅知识库…",
-  generating: "正在组织回答…",
-  remembered: "已记下，正在回复…",
-};
-
 export interface UseChatOptions {
-  /** 嵌入挂件：会话只存 sessionStorage、不改地址栏、不带自带密钥、不迁移记忆 */
+  /** 嵌入挂件：会话只存 sessionStorage、不改地址栏、不带自带密钥、不迁移记忆、没有会话列表 */
   embedded?: boolean;
+}
+
+interface SendOptions {
+  /** 替换最后一轮：重新生成时等于原提问，改了再问时是改之前的那句 */
+  replace?: string;
 }
 
 /** 朗读时接在回答后面，把求助电话也念出来；回答本身是报错时只念求助电话 */
@@ -43,23 +44,13 @@ function newId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 }
 
-/** thread_id 优先取 URL 上的 ?tid=，其次 localStorage，都没有才向后端申请。 */
-function readStoredThreadId(embedded: boolean): string | null {
-  if (embedded) return window.sessionStorage.getItem(EMBED_STORAGE_KEY);
-  const fromUrl = new URLSearchParams(window.location.search).get("tid");
-  if (fromUrl) return fromUrl;
-  return window.localStorage.getItem(STORAGE_KEY);
+function lastUserIndex(messages: ChatMessage[]): number {
+  return messages.findLastIndex((message) => message.role === "user");
 }
 
-function persistThreadId(threadId: string, embedded: boolean) {
-  if (embedded) {
-    window.sessionStorage.setItem(EMBED_STORAGE_KEY, threadId);
-    return;
-  }
-  window.localStorage.setItem(STORAGE_KEY, threadId);
-  const url = new URL(window.location.href);
-  url.searchParams.set("tid", threadId);
-  window.history.replaceState(null, "", url);
+/** 同名工具只留最后一次的状态：查了两次课表算一处 */
+function mergeTool(tools: ChatToolEvent[], event: ChatToolEvent): ChatToolEvent[] {
+  return [...tools.filter((tool) => tool.name !== event.name), event];
 }
 
 export function useChat(onAnswer?: (text: string) => void, options: UseChatOptions = {}) {
@@ -67,12 +58,44 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
   const [threadId, setThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [pending, setPending] = useState("");
-  const [status, setStatus] = useState<string | null>(null);
+  const [progress, setProgress] = useState<ChatProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(true);
+  const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
+  const [sessionsError, setSessionsError] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const initialized = useRef(false);
+  const messagesRef = useRef<ChatMessage[]>([]);
+  const sessionsLoaded = useRef(false);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  const freshSession = useCallback(async () => {
+    const { thread_id: tid } = await createSession();
+    persistThreadId(tid, embedded);
+    setThreadId(tid);
+    setMessages([]);
+    return tid;
+  }, [embedded]);
+
+  /** 打开一个会话；它被删了或不是这个账号的，就换一页新的 */
+  const load = useCallback(
+    async (tid: string) => {
+      try {
+        const history = await fetchMessages(tid);
+        persistThreadId(tid, embedded);
+        setThreadId(tid);
+        setMessages(history.map((item) => ({ ...item, id: newId() })));
+      } catch (err) {
+        if (!(err instanceof SessionGoneError)) throw err;
+        await freshSession();
+      }
+    },
+    [embedded, freshSession],
+  );
 
   useEffect(() => {
     if (initialized.current) return;
@@ -80,15 +103,9 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
 
     (async () => {
       try {
-        let tid = readStoredThreadId(embedded);
-        if (!tid) {
-          tid = (await createSession()).thread_id;
-        }
-        persistThreadId(tid, embedded);
-        setThreadId(tid);
-
-        const history = await fetchMessages(tid);
-        setMessages(history.map((item) => ({ ...item, id: newId() })));
+        const stored = readStoredThreadId(embedded);
+        if (stored) await load(stored);
+        else await freshSession();
       } catch (err) {
         setError(err instanceof Error ? err.message : "无法连接后端服务");
       } finally {
@@ -100,82 +117,123 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
         });
       }
     })();
+  }, [embedded, load, freshSession]);
+
+  const refreshSessions = useCallback(async () => {
+    if (embedded) return;
+    try {
+      setSessions(await listSessions());
+      setSessionsError(null);
+      sessionsLoaded.current = true;
+    } catch (err) {
+      setSessionsError(err instanceof Error ? err.message : "会话列表读取失败");
+    }
   }, [embedded]);
 
   const send = useCallback(
-    async (question: string) => {
+    async (question: string, { replace }: SendOptions = {}) => {
       const text = question.trim();
       if (!text || !threadId || abortRef.current) return;
 
       setError(null);
-      setMessages((prev) => [...prev, { id: newId(), role: "user", content: text }]);
-      setStatus(STAGE_LABEL.intent);
+      setMessages((prev) => {
+        const kept = replace === undefined ? prev : prev.slice(0, Math.max(lastUserIndex(prev), 0));
+        return [...kept, { id: newId(), role: "user", content: text }];
+      });
+      setProgress({ phase: "thinking", slow: false });
 
       const controller = new AbortController();
       abortRef.current = controller;
+      const slowTimer = window.setTimeout(
+        () => setProgress((current) => (current ? { ...current, slow: true } : current)),
+        SLOW_AFTER_MS,
+      );
 
       const settings = embedded ? null : readSettings();
       const llm = settings?.apiKey
-        ? {
-            api_key: settings.apiKey,
-            base_url: settings.baseUrl,
-            model: settings.model,
-            stream: settings.stream,
-          }
+        ? { api_key: settings.apiKey, base_url: settings.baseUrl, model: settings.model, stream: settings.stream }
         : undefined;
 
       let streamed = "";
+      let tools: ChatToolEvent[] = [];
+      const handlers = {
+        onStatus: (status: Parameters<typeof phaseOfStatus>[0]) =>
+          setProgress((current) => ({ phase: phaseOfStatus(status), slow: current?.slow ?? false })),
+        onTool: (event: ChatToolEvent) => {
+          tools = mergeTool(tools, event);
+          // 查完不改回去：工具很快时「在登教务系统…」会一闪而过，留到回答开始吐字再换
+          if (event.state === "running") {
+            setProgress((current) => ({ phase: phaseOfTool(event), label: event.label, slow: current?.slow ?? false }));
+          }
+        },
+        onDelta: (chunk: string) => {
+          window.clearTimeout(slowTimer);
+          streamed += chunk;
+          setPending(streamed);
+        },
+        onDone: (result: ChatDone) => {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: newId(),
+              role: "assistant",
+              content: result.answer,
+              context: result.context,
+              sources: result.sources,
+              tables: result.tables ?? [],
+              emotion: result.emotion,
+              safety: result.safety,
+              tools,
+            },
+          ]);
+          setPending("");
+          onAnswer?.(spokenAnswer(result));
+          if (sessionsLoaded.current) void refreshSessions();
+        },
+        onError: (message: string) => setError(message),
+      };
+
       try {
-        await streamChat(
-          threadId,
-          text,
-          {
-            onStatus: (next) => setStatus(STAGE_LABEL[next.stage] ?? null),
-            // 查完不改回去：工具很快时「正在查课表…」会一闪而过，留到回答开始吐字再换
-            onTool: (event) => event.state === "running" && setStatus(`正在${event.label}…`),
-            onDelta: (chunk) => {
-              streamed += chunk;
-              setPending(streamed);
-            },
-            onDone: (result) => {
-              setMessages((prev) => [
-                ...prev,
-                {
-                  id: newId(),
-                  role: "assistant",
-                  content: result.answer,
-                  context: result.context,
-                  sources: result.sources,
-                  emotion: result.emotion,
-                  safety: result.safety,
-                },
-              ]);
-              setPending("");
-              onAnswer?.(spokenAnswer(result));
-            },
-            onError: (message) => setError(message),
-          },
-          controller.signal,
-          llm,
-        );
+        try {
+          await streamChat(threadId, text, handlers, controller.signal, llm, replace);
+        } catch (err) {
+          if (!(err instanceof SessionGoneError)) throw err;
+          // 这一页在别处被删掉了：换一页新的，把这句话原样再问一次
+          const tid = await freshSession();
+          setMessages([{ id: newId(), role: "user", content: text }]);
+          await streamChat(tid, text, handlers, controller.signal, llm);
+        }
       } catch (err) {
         // 用户主动中断不算错误
         if (!(err instanceof DOMException && err.name === "AbortError")) {
           setError(err instanceof Error ? err.message : "回答生成失败");
         }
         if (streamed) {
-          setMessages((prev) => [
-            ...prev,
-            { id: newId(), role: "assistant", content: streamed },
-          ]);
+          setMessages((prev) => [...prev, { id: newId(), role: "assistant", content: streamed, tools }]);
         }
         setPending("");
       } finally {
+        window.clearTimeout(slowTimer);
         abortRef.current = null;
-        setStatus(null);
+        setProgress(null);
       }
     },
-    [threadId, onAnswer, embedded],
+    [threadId, onAnswer, embedded, freshSession, refreshSessions],
+  );
+
+  /** 用最后一轮的提问再答一次，替换掉原来的回答（或报错） */
+  const regenerate = useCallback(() => {
+    const last = messagesRef.current[lastUserIndex(messagesRef.current)];
+    if (last) void send(last.content, { replace: last.content });
+  }, [send]);
+
+  /** 改了最后一句提问再问：原来那一轮整轮作废 */
+  const editLast = useCallback(
+    (text: string) => {
+      const last = messagesRef.current[lastUserIndex(messagesRef.current)];
+      if (last) void send(text, { replace: last.content });
+    },
+    [send],
   );
 
   const stop = useCallback(() => {
@@ -185,27 +243,58 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
   const startNewSession = useCallback(async () => {
     abortRef.current?.abort();
     try {
-      const { thread_id: tid } = await createSession();
-      persistThreadId(tid, embedded);
-      setThreadId(tid);
-      setMessages([]);
+      await freshSession();
       setPending("");
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "新建会话失败");
     }
-  }, [embedded]);
+  }, [freshSession]);
+
+  const openSession = useCallback(
+    async (tid: string) => {
+      if (tid === threadId) return;
+      abortRef.current?.abort();
+      setRestoring(true);
+      setPending("");
+      setError(null);
+      try {
+        await load(tid);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "没打开这个会话");
+      } finally {
+        setRestoring(false);
+      }
+    },
+    [threadId, load],
+  );
+
+  const removeSession = useCallback(
+    async (tid: string) => {
+      await deleteSession(tid);
+      setSessions((list) => list?.filter((item) => item.thread_id !== tid) ?? list);
+      if (tid === threadId) await startNewSession();
+    },
+    [threadId, startNewSession],
+  );
 
   return {
     threadId,
     messages,
     pending,
-    status,
+    progress,
     error,
     restoring,
-    busy: status !== null || pending !== "",
+    busy: progress !== null || pending !== "",
+    sessions,
+    sessionsError,
     send,
+    regenerate,
+    editLast,
     stop,
     startNewSession,
+    openSession,
+    removeSession,
+    refreshSessions,
   };
 }

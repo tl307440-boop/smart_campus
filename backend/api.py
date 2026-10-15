@@ -11,16 +11,19 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
+import chat_history
 import desk_log
 import httpx
 import jw_account
 import memory_store
 import outbound
 import school_tools
+import session_summary
 from ai_config import (
     READER_TIMEOUT_SECONDS,
     ModelEndpoint,
     ToolKey,
+    chat_endpoint,
     client_for,
     embedding_spec,
     map_key,
@@ -43,10 +46,11 @@ from env_config import load_backend_env
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from graph_app import build_graph, get_vector_db
+from graph_app import MAX_STORED_TURNS, build_graph, get_vector_db
 from jw_zhengfang import JwAuthError, JwCaptcha, JwError
 from knowledge import knowledge_base
 from llm_request import LlmRequest, stream_with_llm_request
+from llm_service import FAILED_PREFIX, NOT_CONFIGURED, RAG_FAILED_PREFIX
 from logging_config import get_logger, setup_logging
 from openai import OpenAI
 from pydantic import BaseModel, Field, field_validator
@@ -127,6 +131,8 @@ class ChatRequest(BaseModel):
     thread_id: str = Field(..., min_length=1)
     question: str = Field(..., min_length=1)
     llm: LlmConfig | None = None
+    # 重新生成 / 改了再问：最后一轮的原提问。和服务端记录的最后一轮对得上才会先删掉那一轮
+    replace_question: str | None = None
 
 
 class Message(BaseModel):
@@ -134,8 +140,15 @@ class Message(BaseModel):
     content: str
     context: str = ""
     sources: list[dict[str, Any]] = Field(default_factory=list)
+    tables: list[dict[str, Any]] = Field(default_factory=list)
     emotion: dict[str, Any] | None = None
     safety: dict[str, Any] | None = None
+
+
+class SessionSummary(BaseModel):
+    thread_id: str
+    title: str
+    updated_at: str
 
 
 class MemoryResponse(BaseModel):
@@ -367,33 +380,108 @@ def create_session(_: CurrentUserDep) -> SessionResponse:
     return SessionResponse(thread_id=str(uuid.uuid4()))
 
 
-@app.get("/api/sessions/{thread_id}/messages", response_model=list[Message])
-def get_messages(thread_id: str, user: CurrentUserDep) -> list[Message]:
-    """从 Redis 快照恢复该会话的历史消息。"""
+def _uses_history_db(user: CurrentUser) -> bool:
+    """访客（嵌入挂件）的对话只在 Redis 里，登录用户的才进库。"""
+    return not user.is_guest and chat_history.enabled()
+
+
+def _is_failed_answer(content: str) -> bool:
+    return not content or content.startswith((FAILED_PREFIX, RAG_FAILED_PREFIX)) or content == NOT_CONFIGURED
+
+
+def _successful_turns(stored: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Redis 快照里成对的「提问 + 成功回答」，失败的那一轮整轮丢掉。"""
+    kept: list[dict[str, Any]] = []
+    for question, answer in zip(stored, stored[1:]):
+        if question.get("role") == "user" and answer.get("role") == "assistant" and not _is_failed_answer(answer.get("content", "")):
+            kept.extend([question, answer])
+    return kept
+
+
+def _to_message(item: dict[str, Any]) -> Message:
+    return Message(
+        role=item.get("role", ""),
+        content=item.get("content", ""),
+        context=item.get("context", "") or "",
+        sources=item.get("sources") or [],
+        tables=item.get("tables") or [],
+        emotion=item.get("emotion"),
+        safety=item.get("safety"),
+    )
+
+
+def _redis_messages(user: CurrentUser, thread_id: str) -> list[dict[str, Any]]:
     try:
-        graph = build_graph()
-        snapshot = graph.get_state(
-            {"configurable": {"thread_id": scoped_thread_id(user, thread_id)}}
-        )
+        snapshot = build_graph().get_state({"configurable": {"thread_id": scoped_thread_id(user, thread_id)}})
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"无法读取会话历史（检查 Redis）: {exc}") from exc
-
     stored = snapshot.values.get("messages") if snapshot and snapshot.values else None
-    if not stored:
-        return []
-
     return [
-        Message(
-            role=item.get("role", ""),
-            content=item.get("content", ""),
-            context=item.get("context", "") or "",
-            sources=item.get("sources") or [],
-            emotion=item.get("emotion"),
-            safety=item.get("safety"),
-        )
-        for item in stored
+        item for item in stored or []
         if item.get("role") in ("user", "assistant") and item.get("content")
     ]
+
+
+@app.get("/api/sessions", response_model=list[SessionSummary])
+def list_sessions(
+    user: CurrentUserDep,
+    limit: Annotated[int, Query(ge=1, le=chat_history.LIST_MAX_LIMIT)] = chat_history.LIST_DEFAULT_LIMIT,
+) -> list[SessionSummary]:
+    if not _uses_history_db(user):
+        return []
+    try:
+        sessions = chat_history.list_sessions(user.tenant_id, user.id, limit)
+    except Exception as exc:
+        logger.warning(f"[History] 会话列表读取失败: {exc}")
+        raise HTTPException(status_code=503, detail="会话列表暂时读不到，请稍后再试") from exc
+    return [
+        SessionSummary(thread_id=s.thread_id, title=s.title, updated_at=s.updated_at.isoformat())
+        for s in sessions
+    ]
+
+
+@app.delete("/api/sessions/{thread_id}", status_code=204)
+def delete_session(thread_id: str, user: MemberDep) -> None:
+    if chat_history.enabled():
+        try:
+            found = chat_history.delete_session(user.tenant_id, user.id, thread_id)
+        except Exception as exc:
+            logger.warning(f"[History] 删除会话失败: {exc}")
+            raise HTTPException(status_code=503, detail="暂时删不掉，请稍后再试") from exc
+        if not found:
+            raise HTTPException(status_code=404, detail="没有这个会话")
+    try:
+        build_graph().checkpointer.delete_thread(scoped_thread_id(user, thread_id))
+    except Exception as exc:
+        # 删除标记已写，残留的快照不会再被补回库里，只是多占一点 Redis
+        logger.warning(f"[History] 会话 {thread_id} 的 Redis 快照没删掉: {exc}")
+
+
+@app.get("/api/sessions/{thread_id}/messages", response_model=list[Message])
+def get_messages(thread_id: str, user: CurrentUserDep) -> list[Message]:
+    """登录用户以库为准，库里没有再看 Redis 并顺手补进库；访客只读 Redis。"""
+    if not _uses_history_db(user):
+        return [_to_message(item) for item in _redis_messages(user, thread_id)]
+    try:
+        stored = chat_history.load_messages(user.tenant_id, user.id, thread_id)
+        if stored is not None:
+            return [_to_message(item) for item in stored]
+        if chat_history.is_blocked(user.tenant_id, user.id, thread_id):
+            raise HTTPException(status_code=404, detail=SESSION_GONE)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning(f"[History] 读库失败，改读 Redis: {exc}")
+        return [_to_message(item) for item in _redis_messages(user, thread_id)]
+
+    cached = _redis_messages(user, thread_id)
+    turns = _successful_turns(cached)
+    if turns:
+        try:
+            chat_history.backfill(user.tenant_id, user.id, thread_id, turns)
+        except Exception as exc:
+            logger.warning(f"[History] 会话 {thread_id} 补进库失败: {exc}")
+    return [_to_message(item) for item in cached]
 
 
 # ============================================================
@@ -417,15 +505,77 @@ def _chat_events(
     tenant_id: str,
     llm: LlmConfig | None = None,
     user_id: str = "",
+    session_id: str = "",
+    replace_question: str | None = None,
 ) -> Iterator[str]:
     """把图的流事件转成 SSE。custom 是生成中的 token，updates 是节点产出。
 
-    user_id 为空（挂件访客）时不读写长期记忆。
+    user_id 为空（挂件访客）时不读写长期记忆；session_id 为空时这一轮不进会话历史库。
     """
-    return stream_with_llm_request(_as_llm_request(llm), _graph_events(thread_id, question, tenant_id, user_id))
+    return stream_with_llm_request(
+        _as_llm_request(llm),
+        _graph_events(thread_id, question, tenant_id, user_id, session_id, replace_question),
+    )
 
 
-def _graph_events(thread_id: str, question: str, tenant_id: str, user_id: str) -> Iterator[str]:
+_DONE_FRAME = "event: done\n"
+SESSION_GONE = "这个会话不存在或已经删除，请新建对话"
+
+
+def _rewind_last_turn(graph: Any, config: dict[str, Any], question: str,
+                      tenant_id: str, user_id: str, session_id: str) -> None:
+    """最后一轮的提问正好是 question 时，把这一轮从 Redis 快照（和库里）删掉，再按新提问重答。"""
+    snapshot = graph.get_state(config)
+    messages = list(snapshot.values.get("messages") or []) if snapshot and snapshot.values else []
+    last_user = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"), None)
+    if last_user is None or messages[last_user].get("content") != question:
+        return
+    dropped_answer = messages[last_user + 1] if last_user + 1 < len(messages) else None
+    graph.update_state(config, {"messages": messages[:last_user]}, as_node="finalize")
+    # 失败的那一轮本来就没进库，库里的最后一轮是更早的，不能删
+    if session_id and dropped_answer and not _is_failed_answer(dropped_answer.get("content", "")):
+        try:
+            chat_history.drop_last_turn(tenant_id, user_id, session_id, question)
+        except Exception as exc:
+            logger.warning(f"[History] 会话 {session_id} 删除最后一轮失败: {exc}")
+
+
+def _prepare_history(graph: Any, config: dict[str, Any], input_state: dict[str, Any],
+                     tenant_id: str, user_id: str, session_id: str) -> None:
+    """把库里的摘要带进这一轮；Redis 快照被清空过的话，用库里最近的消息把对话接上。"""
+    try:
+        input_state["summary"] = chat_history.summary(tenant_id, user_id, session_id)
+        snapshot = graph.get_state(config)
+        if snapshot and snapshot.values and snapshot.values.get("messages"):
+            return
+        restored = chat_history.recent_messages(tenant_id, user_id, session_id, MAX_STORED_TURNS * 2)
+        if restored:
+            input_state["messages"] = restored
+            logger.info(f"[History] 会话 {session_id} 的 Redis 快照没了，从库里接回 {len(restored)} 条")
+    except Exception as exc:
+        logger.warning(f"[History] 读取会话 {session_id} 的历史失败，本轮只用 Redis: {exc}")
+
+
+def _persist_turn(graph: Any, config: dict[str, Any], tenant_id: str, user_id: str, session_id: str) -> None:
+    try:
+        messages = graph.get_state(config).values.get("messages") or []
+        if len(messages) < 2:
+            return
+        question, answer = messages[-2], messages[-1]
+        if question.get("role") != "user" or answer.get("role") != "assistant":
+            return
+        if _is_failed_answer(answer.get("content", "")):
+            return
+        if chat_history.record_turn(tenant_id, user_id, session_id, question, answer) is None:
+            return
+    except Exception as exc:
+        logger.warning(f"[History] 会话 {session_id} 这一轮没写进库: {exc}")
+        return
+    session_summary.schedule(tenant_id, user_id, session_id, chat_endpoint(tenant_id))
+
+
+def _graph_events(thread_id: str, question: str, tenant_id: str, user_id: str,
+                  session_id: str = "", replace_question: str | None = None) -> Iterator[str]:
     remembered = memory_store.take_remember_command(question) if user_id else None
     if remembered:
         try:
@@ -444,12 +594,24 @@ def _graph_events(thread_id: str, question: str, tenant_id: str, user_id: str) -
         input_state["current_doc_content"] = corpus
 
     config = {"configurable": {"thread_id": thread_id}}
+    persist = bool(user_id and session_id and chat_history.enabled())
 
     try:
         graph = build_graph()
-        yield from sse_from_graph_stream(
+        if persist:
+            _prepare_history(graph, config, input_state, tenant_id, user_id, session_id)
+        if replace_question:
+            if "messages" in input_state:
+                # 快照刚从库里接回来、还没写进 Redis，直接在这份消息上去掉最后一轮
+                graph.update_state(config, {"messages": input_state.pop("messages")}, as_node="finalize")
+            _rewind_last_turn(graph, config, replace_question, tenant_id, user_id, session_id if persist else "")
+        for frame in sse_from_graph_stream(
             graph.stream(input_state, config=config, stream_mode=["updates", "custom"])
-        )
+        ):
+            # 先入库再发 done：前端收到 done 就可能关掉连接，之后的代码不一定还会执行
+            if persist and frame.startswith(_DONE_FRAME):
+                _persist_turn(graph, config, tenant_id, user_id, session_id)
+            yield frame
     except Exception as exc:
         yield sse("error", {"message": f"回答生成失败: {exc}"})
 
@@ -466,6 +628,14 @@ def chat(payload: ChatRequest, user: CurrentUserDep) -> StreamingResponse:
     enforce_chat_quota(user.id)
     if user.is_guest:
         _enforce_guest_quota(user)
+    if _uses_history_db(user):
+        try:
+            blocked = chat_history.is_blocked(user.tenant_id, user.id, payload.thread_id)
+        except Exception as exc:
+            logger.warning(f"[History] 会话归属查询失败，照常回答: {exc}")
+            blocked = False
+        if blocked:
+            raise HTTPException(status_code=404, detail=SESSION_GONE)
     try:
         desk_log.remember_question(user.tenant_id, "" if user.is_guest else user.id, payload.question)
     except Exception:
@@ -478,6 +648,8 @@ def chat(payload: ChatRequest, user: CurrentUserDep) -> StreamingResponse:
             # 访客的模型调用一律走学校配置，不接受自带密钥，也没有长期记忆
             None if user.is_guest else payload.llm,
             "" if user.is_guest else user.id,
+            session_id=payload.thread_id if _uses_history_db(user) else "",
+            replace_question=payload.replace_question,
         ),
         media_type="text/event-stream",
         headers={

@@ -23,6 +23,7 @@ import {
   readStoredToken,
   readStoredUser,
 } from "@/lib/auth/session";
+import { forgetThreadId } from "@/lib/thread-storage";
 
 interface AuthContextValue {
   user: AuthUser | null;
@@ -83,6 +84,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(() => {
+    // 先忘会话编号：它按账号存，清掉登录态之后就找不到是哪个账号的了
+    forgetThreadId();
     clearAuth();
     setUser(null);
   }, []);

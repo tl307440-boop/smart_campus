@@ -26,6 +26,7 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]]) -> Iterator[str]:
     answer = ""
     emotion: dict[str, Any] | None = None
     safety: dict[str, Any] | None = None
+    tables: list[dict[str, Any]] = []
     generating_announced = False
 
     for mode, chunk in events:
@@ -62,9 +63,10 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]]) -> Iterator[str]:
                 )
             elif node == "generate":
                 answer = patch.get("final_answer", "") or ""
-                # 工具问答的来源（教务、通知、地图链接）在生成时才有
+                # 工具问答的来源（教务、通知、地图链接）和表格在生成时才有
                 if patch.get("sources"):
                     sources = patch["sources"]
+                tables = patch.get("tables") or []
             elif node == "emotion":
                 emotion = patch.get("emotion_data")
             # 求助卡片：高危关键词在 generate 给出，情绪分析判出高风险时在 finalize 补上
@@ -80,5 +82,6 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]]) -> Iterator[str]:
             "sources": sources,
             "emotion": emotion,
             "safety": safety,
+            "tables": tables,
         },
     )

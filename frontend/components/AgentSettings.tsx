@@ -12,6 +12,7 @@ import { type MemoryNote, addMemories, deleteMemory, errorDetail, fetchMemories,
 import { RATE_RANGE, speakText, useChineseVoices, useSpeechSettings } from "@/lib/speech-settings";
 import { SchoolAiSettings } from "@/components/SchoolAiSettings";
 import { SpeakerIcon } from "@/components/SketchIcons";
+import { useToast } from "@/components/Toast";
 import { PaneTitle } from "@/components/ToolDrawer";
 
 /** 朗读回答：开关、声音、语速，只存在这台浏览器里 */
@@ -85,6 +86,7 @@ function PersonalKey() {
   const [settings, setSettings] = useState<LlmSettings>(readSettings);
   const [notice, setNotice] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
+  const toast = useToast();
 
   function update<K extends keyof LlmSettings>(key: K, value: LlmSettings[K]) {
     setSettings((prev) => ({ ...prev, [key]: value }));
@@ -101,7 +103,8 @@ function PersonalKey() {
 
   function handleSave() {
     saveSettings(settings);
-    setNotice(settings.apiKey ? "已保存在这台浏览器里，之后的提问用你的密钥" : "已保存：没填密钥，继续用学校的服务");
+    setNotice(null);
+    toast.success(settings.apiKey ? "已保存在这台浏览器里，之后的提问用你的密钥" : "已保存：没填密钥，继续用学校的服务");
   }
 
   async function handlePing() {
@@ -144,11 +147,16 @@ function PersonalKey() {
           </select>
         </label>
         <label className="block">
-          <span className="field-label">接口网址（Base URL）</span>
+          <span className="field-label">
+            服务地址<span className="ml-2 text-[0.8125rem]">Base URL</span>
+          </span>
           <input value={settings.baseUrl} onChange={(event) => update("baseUrl", event.target.value)} className="field" />
+          <span className="mt-1 block text-[0.8125rem] text-muted">选了服务商会自动填好，一般不用改，除非用的是自建或中转服务</span>
         </label>
         <label className="block">
-          <span className="field-label">API 密钥</span>
+          <span className="field-label">
+            密钥<span className="ml-2 text-[0.8125rem]">API Key</span>
+          </span>
           <input
             type="password"
             value={settings.apiKey}

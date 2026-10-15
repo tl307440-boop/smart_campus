@@ -1,34 +1,28 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
+import { ChatLog } from "@/components/ChatLog";
 import { Composer } from "@/components/Composer";
-import { ErrorNote } from "@/components/ErrorNote";
-import { MessageBubble } from "@/components/MessageBubble";
 import { PetPortrait } from "@/components/PetPortrait";
 import { SuggestedQuestions } from "@/components/SuggestedQuestions";
 import { useChat } from "@/hooks/useChat";
-import { isFallbackAnswer, mayBeFallback } from "@/lib/friendly-error";
+import { useStickToBottom } from "@/hooks/useStickToBottom";
 
 interface Props {
   assistantName: string;
   tenantName: string;
 }
 
+const EMBED_NOTE = { embedded: true } as const;
+
 /** 挂件里的一页小草稿纸：没有工具抽屉、记忆和设置，只有问答。 */
 export function EmbedChat({ assistantName, tenantName }: Props) {
-  const { messages, pending, status, error, restoring, busy, threadId, send, stop } = useChat(
+  const { messages, pending, progress, error, restoring, busy, threadId, send, stop, regenerate, editLast } = useChat(
     undefined,
     { embedded: true },
   );
-  const last = messages.at(-1);
-  const answerFailed = last?.role === "assistant" && isFallbackAnswer(last.content);
-  const signedId = !busy && last?.role === "assistant" && !answerFailed ? last.id : null;
-  const pendingShown = pending && !mayBeFallback(pending) ? pending : "";
-
-  const bottomRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, pending, status]);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useStickToBottom(scrollRef, `${messages.length}:${pending.length}:${progress?.phase}`);
 
   return (
     <div className="flex h-dvh flex-col bg-paper">
@@ -40,7 +34,7 @@ export function EmbedChat({ assistantName, tenantName }: Props) {
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto px-4 py-5">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-5">
         <div className="flex flex-col gap-6">
           {restoring ? (
             <p className="text-center text-muted">正在连接…</p>
@@ -54,21 +48,19 @@ export function EmbedChat({ assistantName, tenantName }: Props) {
                   <SuggestedQuestions disabled={busy || !threadId} onAsk={(q) => void send(q)} limit={3} />
                 </div>
               )}
-              {messages.map((message) =>
-                message.role === "assistant" && isFallbackAnswer(message.content) ? (
-                  <ErrorNote key={message.id} raw={message.content} safety={message.safety} embedded />
-                ) : (
-                  <MessageBubble key={message.id} message={message} signed={message.id === signedId} />
-                ),
-              )}
-              {pendingShown && (
-                <MessageBubble message={{ id: "pending", role: "assistant", content: pendingShown }} streaming />
-              )}
-              {status && !pendingShown && <p className="text-[0.9375rem] text-muted" role="status">{status}</p>}
+              <ChatLog
+                messages={messages}
+                pending={pending}
+                progress={progress}
+                error={error}
+                busy={busy}
+                assistantName={assistantName}
+                noteProps={EMBED_NOTE}
+                onRegenerate={regenerate}
+                onEdit={editLast}
+              />
             </>
           )}
-          {error && !answerFailed && <ErrorNote raw={error} embedded />}
-          <div ref={bottomRef} />
         </div>
       </div>
 

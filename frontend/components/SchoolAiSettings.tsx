@@ -15,6 +15,7 @@ import {
 } from "@/lib/ai-config/schema";
 import { type AiServiceName, type AiStatus, errorDetail, fetchAiStatus, testAiService } from "@/lib/api";
 import { fetchAiConfig, saveAiConfig } from "@/lib/workspace/client";
+import { useToast } from "@/components/Toast";
 
 /** 与 backend/ai_config.py 的默认值一致：留空时后端用的就是这些 */
 const DEFAULTS: Record<AiService, { baseUrl: string; model: string }> = {
@@ -276,7 +277,9 @@ function EndpointForm({
         ))}
       </div>
       <label className="block">
-        <span className="field-label">接口网址</span>
+        <span className="field-label">
+          服务地址<span className="ml-2 text-[0.8125rem]">Base URL</span>
+        </span>
         <input
           value={draft.baseUrl}
           onChange={(event) => onChange({ baseUrl: event.target.value })}
@@ -294,7 +297,9 @@ function EndpointForm({
         />
       </label>
       <label className="block">
-        <span className="field-label">API 密钥</span>
+        <span className="field-label">
+          密钥<span className="ml-2 text-[0.8125rem]">API Key，在服务商后台复制，这里只存加密后的内容</span>
+        </span>
         <input
           type="password"
           value={draft.apiKey}
@@ -331,6 +336,7 @@ export function SchoolAiSettings({ isAdmin }: { isAdmin: boolean }) {
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [tests, setTests] = useState<Partial<Record<AiServiceName, TestState>>>({});
+  const toast = useToast();
 
   useEffect(() => {
     let cancelled = false;
@@ -380,9 +386,9 @@ export function SchoolAiSettings({ isAdmin }: { isAdmin: boolean }) {
       if (saved.newsUrls.length) await runTest("news");
       if (saved.jw.mode !== "off") await runTest("jw");
       setStatus(await fetchAiStatus());
-      setNotice("已保存。");
+      toast.success("已保存，每项服务的测试结果在上面");
     } catch (err) {
-      setNotice(errorDetail(err));
+      toast.error(`没保存上：${errorDetail(err)}`);
     } finally {
       setSaving(false);
     }
