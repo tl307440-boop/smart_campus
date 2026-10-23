@@ -285,6 +285,78 @@ body {
     animation: qr-scan 2.4s ease-in-out infinite alternate;
     pointer-events: none;
   }
+
+  /* 等回答时的进度：一道往前涂的马克笔，上面有一抹光来回扫 */
+  .waiting-fill {
+    border-radius: 6px 3px 7px 4px;
+    background:
+      linear-gradient(100deg, transparent 20%, rgba(255, 255, 255, 0.6) 50%, transparent 80%) no-repeat,
+      var(--color-marker);
+    background-size:
+      40% 100%,
+      100% 100%;
+    filter: url(#ink-wobble);
+    transition: width 0.16s linear;
+    animation: waiting-sheen 1.8s ease-in-out infinite;
+  }
+
+  .waiting-pencil {
+    transform-origin: 1px 23px;
+    animation: pencil-scribble 0.45s ease-in-out infinite alternate;
+  }
+
+  .waiting-puff {
+    opacity: 0;
+    animation: waiting-puff 1.8s ease-in-out infinite;
+  }
+
+  .waiting-check {
+    stroke-dasharray: 18;
+    animation: waiting-check 0.36s ease-out 0.12s backwards;
+  }
+}
+
+@keyframes waiting-sheen {
+  from {
+    background-position:
+      -100% 0,
+      0 0;
+  }
+  to {
+    background-position:
+      200% 0,
+      0 0;
+  }
+}
+
+@keyframes pencil-scribble {
+  from {
+    rotate: -5deg;
+    translate: 0 0;
+  }
+  to {
+    rotate: 6deg;
+    translate: 0 -1.5px;
+  }
+}
+
+@keyframes waiting-puff {
+  0%,
+  100% {
+    opacity: 0;
+    translate: 0 2px;
+  }
+  30%,
+  70% {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+@keyframes waiting-check {
+  from {
+    stroke-dashoffset: 18;
+  }
 }
 
 @keyframes qr-scan {

@@ -2,9 +2,9 @@
 
 import { ErrorNote } from "@/components/ErrorNote";
 import { MessageBubble } from "@/components/MessageBubble";
-import { PetPortrait } from "@/components/PetPortrait";
+import { WaitingNote } from "@/components/WaitingNote";
 import type { ChatMessage } from "@/lib/api";
-import { type ChatProgress, progressText } from "@/lib/chat-progress";
+import type { ChatProgress } from "@/lib/chat-progress";
 import { describeFailure, isFallbackAnswer, mayBeFallback } from "@/lib/friendly-error";
 
 interface NoteProps {
@@ -64,22 +64,6 @@ function collapseRepeatedFailures(messages: ChatMessage[]): Row[] {
   return rows;
 }
 
-function WaitingNote({ text }: { text: string }) {
-  return (
-    <div className="animate-fade-in flex items-center gap-3" role="status">
-      <PetPortrait eyesClosed={false} className="pencil-bob size-10 shrink-0 [animation-duration:1.4s]" />
-      <p className="flex items-center gap-2 text-[0.9375rem] text-muted">
-        {text}
-        <span className="flex gap-1" aria-hidden="true">
-          {[0, 1, 2].map((i) => (
-            <i key={i} className="pencil-bob size-1.5 rounded-full border border-ink bg-pollen" style={{ animationDelay: `${i * 120}ms` }} />
-          ))}
-        </span>
-      </p>
-    </div>
-  );
-}
-
 /** 对话正文：消息、正在写的回答、等待提示和最后的报错。主页面和嵌入挂件共用。 */
 export function ChatLog({
   messages,
@@ -129,7 +113,7 @@ export function ChatLog({
 
       {pendingShown && <MessageBubble message={{ id: "pending", role: "assistant", content: pendingShown }} streaming />}
 
-      {progress && !pendingShown && <WaitingNote text={progressText(progress, assistantName)} />}
+      {progress && !pendingShown && <WaitingNote progress={progress} name={assistantName} />}
 
       {error && !answerFailed && <ErrorNote raw={error} onRetry={last?.role === "user" ? retry : undefined} {...noteProps} />}
     </>
