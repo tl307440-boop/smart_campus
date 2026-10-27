@@ -7,7 +7,7 @@ import { Markdown } from "@/components/Markdown";
 import { MessageActions } from "@/components/MessageActions";
 import { SafetyCard } from "@/components/SafetyCard";
 import { PaperclipIcon, PencilIcon } from "@/components/SketchIcons";
-import type { ChatMessage, ChatSource, ChatToolEvent } from "@/lib/api";
+import type { ChatMessage, ChatSource, ChatToolEvent, FeedbackRating, FeedbackReason } from "@/lib/api";
 
 interface Props {
   message: ChatMessage;
@@ -22,6 +22,8 @@ interface Props {
   latest?: boolean;
   onRegenerate?: () => void;
   onEdit?: (text: string) => void;
+  /** 点赞 / 点踩；不传（挂件）就没有这两个按钮 */
+  onRate?: (id: string, rating: FeedbackRating, reason?: FeedbackReason) => Promise<void>;
 }
 
 function ToolTrace({ tools }: { tools: ChatToolEvent[] }) {
@@ -152,6 +154,7 @@ export function MessageBubble({
   latest = false,
   onRegenerate,
   onEdit,
+  onRate,
 }: Props) {
   const [editing, setEditing] = useState(false);
   const sources = message.sources ?? [];
@@ -235,6 +238,15 @@ export function MessageBubble({
           pinned={latest}
           onRegenerate={latest ? onRegenerate : undefined}
           speakable
+          rating={
+            onRate && message.serverId
+              ? {
+                  value: message.feedback ?? 0,
+                  reason: message.feedbackReason ?? "",
+                  onRate: (rating, reason) => onRate(message.id, rating, reason),
+                }
+              : undefined
+          }
         />
       )}
     </div>

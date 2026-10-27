@@ -2,28 +2,39 @@
 
 import { useEffect, useState } from "react";
 import { PetPortrait } from "@/components/PetPortrait";
-import { type ChatProgress, doneText, progressCeiling, progressText, stepKey, whispers } from "@/lib/chat-progress";
+import {
+  type ChatProgress,
+  creepRate,
+  doneText,
+  isOverdue,
+  progressCeiling,
+  progressText,
+  stepKey,
+  whispers,
+} from "@/lib/chat-progress";
 
 const WHISPER_MS = 2600;
-const CREEP_MS = 120;
+const TICK_MS = 120;
 const MAX_DONE_SHOWN = 3;
 
-function useTicker(ms: number) {
-  const [tick, setTick] = useState(0);
+/** 每 TICK_MS 走一拍。时间只靠拍数算，渲染里不碰系统时钟 */
+function useTicks() {
+  const [ticks, setTicks] = useState(0);
   useEffect(() => {
-    const timer = window.setInterval(() => setTick((n) => n + 1), ms);
+    const timer = window.setInterval(() => setTicks((n) => n + 1), TICK_MS);
     return () => window.clearInterval(timer);
-  }, [ms]);
-  return tick;
+  }, []);
+  return ticks;
 }
 
-/** 每一拍往上限挪一小截，越靠近越慢；上限只升不降，所以条子不会倒退 */
-function useCreep(ceiling: number) {
+/** 每一拍往上限挪一小截，越靠近越慢；上限只升不降，所以条子不会倒退。节奏跟着预估的等待时间走 */
+function useCreep(ceiling: number, etaMs: number | undefined) {
   const [value, setValue] = useState(5);
   useEffect(() => {
-    const timer = window.setInterval(() => setValue((v) => v + Math.max(0, ceiling - v) * 0.05), CREEP_MS);
+    const rate = creepRate(TICK_MS, etaMs);
+    const timer = window.setInterval(() => setValue((v) => v + Math.max(0, ceiling - v) * rate), TICK_MS);
     return () => window.clearInterval(timer);
-  }, [ceiling]);
+  }, [ceiling, etaMs]);
   return value;
 }
 
@@ -60,23 +71,25 @@ function Pencil() {
 /** 第一个字出来之前的等待：桌宠在想、马克笔进度条往前涂、走过的步骤打勾、底下轮换几句小字 */
 export function WaitingNote({ progress, name }: { progress: ChatProgress; name: string }) {
   const key = stepKey(progress);
-  const tick = useTicker(WHISPER_MS);
+  const ticks = useTicks();
   const [steps, setSteps] = useState<ChatProgress[]>([progress]);
+  // 这一步是第几拍开始的；换了一步、或者刚变慢，小字从头轮起
   const [stepTick, setStepTick] = useState(0);
   const [wasSlow, setWasSlow] = useState(progress.slow);
   if (stepKey(steps[steps.length - 1]) !== key) {
     setSteps([...steps.filter((step) => stepKey(step) !== key), progress]);
-    setStepTick(tick);
+    setStepTick(ticks);
   }
   if (wasSlow !== progress.slow) {
     setWasSlow(progress.slow);
-    setStepTick(tick);
+    setStepTick(ticks);
   }
 
   const done = steps.slice(0, -1).slice(-MAX_DONE_SHOWN);
-  const value = useCreep(progressCeiling(progress.phase, steps.length));
-  const lines = whispers(progress);
-  const whisper = lines[(tick - stepTick) % lines.length];
+  const value = useCreep(progressCeiling(progress.phase, steps.length), progress.etaMs);
+  const elapsedMs = (ticks - stepTick) * TICK_MS;
+  const lines = whispers(progress, isOverdue(progress, elapsedMs));
+  const whisper = lines[Math.floor(elapsedMs / WHISPER_MS) % lines.length];
   const text = progressText(progress, name);
 
   return (

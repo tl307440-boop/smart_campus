@@ -117,6 +117,18 @@ export function RedoIcon(props: IconProps) {
   );
 }
 
+/** 竖起的大拇指；down 时倒过来，filled 表示已经选中 */
+export function ThumbIcon({ down = false, filled = false, ...props }: IconProps & { down?: boolean; filled?: boolean }) {
+  return (
+    <Svg {...props}>
+      <g transform={down ? "rotate(180 12 12)" : undefined} fill={filled ? "currentColor" : "none"} fillOpacity={filled ? 0.25 : 0}>
+        <path d="M3.8 11.2h3.1v8.6H3.8z" />
+        <path d="M6.9 11.2l3.3-6.3c.4-.8 1.3-1.1 2.1-.7.8.4 1.2 1.2 1 2.1l-.7 3.3h5.4c1.3 0 2.2 1.2 1.9 2.4l-1.1 6.1c-.2 1.1-1.1 1.9-2.2 1.9H6.9" />
+      </g>
+    </Svg>
+  );
+}
+
 export function HistoryIcon(props: IconProps) {
   return (
     <Svg {...props}>

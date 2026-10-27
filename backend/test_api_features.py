@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import time
 from unittest.mock import MagicMock
 
@@ -203,6 +204,9 @@ def test_remember_command_ignored_for_guest(monkeypatch: pytest.MonkeyPatch) -> 
 
 def _history_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(api.chat_history, "enabled", lambda: True)
+    # 对话测试不连真库：提问记录和取回答编号都换成空操作
+    monkeypatch.setattr(api.usage_log, "record_question", lambda *args: None)
+    monkeypatch.setattr(api.chat_history, "message_id_at", lambda *args: None)
 
 
 def _fake_graph(messages: list[dict]) -> MagicMock:
@@ -486,3 +490,164 @@ def test_jw_wecom_routes_map_errors(client: TestClient, monkeypatch: pytest.Monk
 def test_student_cannot_import_url(client: TestClient) -> None:
     response = client.post("/api/documents/url", json={"url": "https://a.edu.cn"}, headers=headers())
     assert response.status_code == 403
+
+
+# ---------- 回答评价与使用情况 ----------
+
+
+def _done_payload(frames: list[str]) -> dict:
+    frame = next(f for f in frames if f.startswith("event: done"))
+    return json.loads(frame.split("data: ", 1)[1])
+
+
+def _answering_graph(messages: list[dict]) -> MagicMock:
+    """get_state 给出这几条消息，流里带一个 generate 节点的最终回答（done 里的 answer 取自它）。"""
+    graph = _fake_graph(messages)
+
+    def stream(input_state, config, stream_mode):
+        yield ("updates", {"generate": {"final_answer": messages[-1]["content"]}})
+
+    graph.stream.side_effect = stream
+    return graph
+
+
+def _logging_turn(monkeypatch: pytest.MonkeyPatch, answer: dict | None = None) -> list[tuple]:
+    """会话入库、记录提问都换成可观察的假货，返回被记下的提问。"""
+    _history_on(monkeypatch)
+    logged: list[tuple] = []
+    monkeypatch.setattr(api.knowledge_base, "short_corpus", lambda tid: "")
+    monkeypatch.setattr(api.chat_history, "summary", lambda t, u, s: "")
+    monkeypatch.setattr(api.chat_history, "record_turn", lambda *args: 2)
+    monkeypatch.setattr(api.chat_history, "message_id_at", lambda *args: "m-42")
+    monkeypatch.setattr(api.session_summary, "schedule", MagicMock())
+    monkeypatch.setattr(api.usage_log, "record_question", lambda *args: logged.append(args))
+    monkeypatch.setattr(api, "refusal_text", lambda tenant_id: "抱歉没找到")
+    graph = _answering_graph([QUESTION, answer or ANSWER])
+    monkeypatch.setattr(api, "build_graph", lambda: graph)
+    return logged
+
+
+def test_done_carries_the_saved_answer_id_and_the_question_is_logged(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged = _logging_turn(monkeypatch)
+
+    frames = list(api._chat_events("tenant-1:user-1:s1", "图书馆几点关门", "tenant-1", user_id="user-1", session_id="s1"))
+
+    assert _done_payload(frames)["message_id"] == "m-42"
+    assert logged == [("tenant-1", "图书馆几点关门", "answered", [], False, "m-42")]
+
+
+def test_refused_answer_is_logged_as_a_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged = _logging_turn(monkeypatch, {"role": "assistant", "content": "抱歉没找到"})
+    list(api._chat_events("tenant-1:user-1:s1", "缓考怎么申请", "tenant-1", user_id="user-1", session_id="s1"))
+    assert logged[0][2] == "refused"
+
+
+def test_guest_question_is_logged_without_an_answer_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged = _logging_turn(monkeypatch)
+    frames = list(api._chat_events("tenant-1:guest:s1", "新生怎么报到", "tenant-1"))
+    assert "message_id" not in _done_payload(frames)
+    assert logged == [("tenant-1", "新生怎么报到", "answered", [], True, None)]
+
+
+def test_regenerating_does_not_count_the_question_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged = _logging_turn(monkeypatch)
+    graph = _answering_graph([QUESTION, ANSWER])
+    monkeypatch.setattr(api, "build_graph", lambda: graph)
+    monkeypatch.setattr(api.chat_history, "drop_last_turn", lambda *args: True)
+
+    list(api._chat_events("tenant-1:user-1:s1", "图书馆几点关门", "tenant-1", user_id="user-1",
+                          session_id="s1", replace_question="图书馆几点关门"))
+    assert logged == []
+
+    list(api._chat_events("tenant-1:user-1:s1", "图书馆周末几点关门", "tenant-1", user_id="user-1",
+                          session_id="s1", replace_question="图书馆几点关门"))
+    assert len(logged) == 1
+
+
+def test_failed_answer_is_not_logged(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged = _logging_turn(monkeypatch, {"role": "assistant", "content": api.NOT_CONFIGURED})
+    list(api._chat_events("tenant-1:user-1:s1", "图书馆几点关门", "tenant-1", user_id="user-1", session_id="s1"))
+    assert logged == []
+
+
+def test_a_broken_usage_log_never_breaks_the_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    _logging_turn(monkeypatch)
+
+    def boom(*args):
+        raise OSError("数据库挂了")
+
+    monkeypatch.setattr(api.usage_log, "record_question", boom)
+    frames = list(api._chat_events("tenant-1:user-1:s1", "图书馆几点关门", "tenant-1", user_id="user-1", session_id="s1"))
+    assert _done_payload(frames)["answer"] == "晚上十点"
+
+
+def test_feedback_is_for_members_with_a_known_message(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    body = {"message_id": "m-1", "rating": -1, "reason": "outdated"}
+    assert client.post("/api/feedback", json=body, headers=headers("GUEST")).status_code == 403
+    assert client.post("/api/feedback", json=body, headers=headers()).status_code == 503  # 没配数据库
+
+    _history_on(monkeypatch)
+    calls: list[tuple] = []
+    monkeypatch.setattr(api.usage_log, "set_feedback", lambda *args: calls.append(args) or True)
+    assert client.post("/api/feedback", json=body, headers=headers()).status_code == 204
+    assert calls == [("tenant-1", "user-1", "m-1", -1, "outdated")]
+
+    monkeypatch.setattr(api.usage_log, "set_feedback", lambda *args: False)
+    assert client.post("/api/feedback", json=body, headers=headers()).status_code == 404
+
+    def boom(*args):
+        raise OSError("down")
+
+    monkeypatch.setattr(api.usage_log, "set_feedback", boom)
+    assert client.post("/api/feedback", json=body, headers=headers()).status_code == 503
+
+
+@pytest.mark.parametrize("body", [
+    {"message_id": "m-1", "rating": 2},
+    {"message_id": "m-1", "rating": -1, "reason": "因为我不喜欢"},
+    {"message_id": "", "rating": 1},
+])
+def test_feedback_rejects_bad_input(client: TestClient, monkeypatch: pytest.MonkeyPatch, body: dict) -> None:
+    _history_on(monkeypatch)
+    assert client.post("/api/feedback", json=body, headers=headers()).status_code == 422
+
+
+def test_usage_report_is_admin_only(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert client.get("/api/admin/usage", headers=headers()).status_code == 403
+    assert client.get("/api/admin/usage", headers=headers("STAFF")).status_code == 403
+    assert client.get("/api/admin/usage", headers=headers("ADMIN")).status_code == 503  # 没配数据库
+
+    from datetime import datetime
+
+    _history_on(monkeypatch)
+    seen: list[tuple] = []
+    rows = [{"question": "缓考怎么申请", "outcome": "refused", "guest": False, "at": datetime(2026, 10, 27, 9, 0),
+             "rating": None, "reason": "", "answer": ""}]
+    monkeypatch.setattr(api.usage_log, "usage_rows", lambda tenant, days: seen.append((tenant, days)) or rows)
+    monkeypatch.setattr(api, "read_audit", lambda tenant: [])
+
+    response = client.get("/api/admin/usage?days=30", headers=headers("ADMIN"))
+
+    assert response.status_code == 200
+    assert seen == [("tenant-1", 30)]
+    report = response.json()
+    assert report["days"] == 30
+    assert report["totals"]["refused"] == 1
+    assert report["unanswered"][0]["question"] == "缓考怎么申请"
+
+    assert client.get("/api/admin/usage?days=0", headers=headers("ADMIN")).status_code == 422
+    assert client.get("/api/admin/usage?days=365", headers=headers("ADMIN")).status_code == 422
+
+
+def test_session_messages_carry_ids_and_the_students_own_rating(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _history_on(monkeypatch)
+    stored = [
+        {"role": "user", "content": "在吗"},
+        {"role": "assistant", "content": "在", "id": "m-7", "feedback": -1, "feedback_reason": "wrong"},
+    ]
+    monkeypatch.setattr(api.chat_history, "load_messages", lambda t, u, s: stored)
+
+    body = client.get("/api/sessions/s1/messages", headers=headers()).json()
+
+    assert body[0]["id"] == "" and body[0]["feedback"] == 0
+    assert body[1]["id"] == "m-7" and body[1]["feedback"] == -1 and body[1]["feedback_reason"] == "wrong"

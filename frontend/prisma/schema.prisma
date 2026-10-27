@@ -34,6 +34,8 @@ model Tenant {
   embeds         EmbedConfig[]
   chatSessions   ChatSession[]
   chatTombstones ChatSessionTombstone[]
+  questionLogs   QuestionLog[]
+  feedbacks      MessageFeedback[]
 
   @@map("tenants")
 }
@@ -152,6 +154,7 @@ model User {
 
   chatSessions   ChatSession[]
   chatTombstones ChatSessionTombstone[]
+  feedbacks      MessageFeedback[]
 
   /// 学号只在同一学校内唯一
   @@unique([tenantId, studentNo])
@@ -202,10 +205,58 @@ model ChatMessage {
   safety    Json?
   createdAt DateTime @default(now())
 
-  session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session   ChatSession       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  feedbacks MessageFeedback[]
 
   @@unique([sessionId, seq])
   @@map("chat_messages")
+}
+
+/// 学生对一条助手回答的点赞 / 点踩。只由 FastAPI 读写（backend/usage_log.py），
+/// 会话被删时跟着消息一起删
+model MessageFeedback {
+  id        String   @id
+  tenantId  String
+  userId    String
+  messageId String
+  /// 1 赞，-1 踩；取消评价就直接删这一行
+  rating    Int
+  /// 点踩时选的原因：wrong 答非所问 / outdated 信息过期 / verbose 太啰嗦 / other 其他；点赞和没选时为空
+  reason    String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+
+  tenant  Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  message ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  /// 一个人对一条回答只有一个评价
+  @@unique([messageId, userId])
+  @@index([tenantId, rating, createdAt(sort: Desc)])
+  @@map("message_feedbacks")
+}
+
+/// 一次提问的匿名记录，给管理员看哪些问题问得多、哪些没答上来。
+/// 只由 FastAPI 读写（backend/usage_log.py）。不记是谁问的，只分登录用户和访客；
+/// 情绪倾诉类的提问不存原文
+model QuestionLog {
+  id        String   @id
+  tenantId  String
+  /// 提问原文，最多 300 字；情绪倾诉（comfort）留空
+  question  String
+  /// answered 答上了 / refused 只按资料回答时拒答 / no_source 没检索到资料 / tool 工具问答 / comfort 情绪陪伴
+  outcome   String
+  /// 这一轮用过的工具名，逗号分隔
+  tools     String   @default("")
+  guest     Boolean  @default(false)
+  /// 对应的助手消息，用来把点踩对回提问；访客和没入库的为空。不设外键：会话删了记录还在
+  messageId String?
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@map("question_logs")
 }
 
 /// 删除标记：用户删过的会话。有它在，Redis 里残留的快照不会再被补回库里

@@ -467,6 +467,47 @@ def _audit(ctx: ToolContext, tool: str, args: dict[str, Any], ok: bool, error: s
         logger.warning(f"[Agent] 审计写入失败: {exc}")
 
 
+def read_audit(tenant_id: str, limit: int = AUDIT_KEEP) -> list[dict[str, Any]]:
+    """本校最近的工具调用审计，新的在前。Redis 连不上就当没有，不拖垮调用方。"""
+    try:
+        rows = _redis().lrange(f"tool_audit:{tenant_id}", 0, limit - 1)
+    except redis.RedisError as exc:
+        logger.warning(f"[Agent] 审计读取失败: {exc}")
+        return []
+    found: list[dict[str, Any]] = []
+    for raw in rows:
+        try:
+            item = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(item, dict):
+            found.append(item)
+    return found
+
+
+def tool_labels() -> dict[str, str]:
+    """工具名 → 给人看的名字，使用情况页用。"""
+    tools = [*_JW_TOOLS, *_NEWS_TOOLS, _SEARCH_TOOL, *_MAP_TOOLS, _KNOWLEDGE_TOOL]
+    return {tool.name: tool.label for tool in tools}
+
+
+ETA_SAMPLES = 3
+ETA_WINDOW = 200
+ETA_MAX_MS = 60_000
+
+
+def typical_ms(tenant_id: str, name: str) -> int | None:
+    """这个工具最近成功几次的耗时中位数，前端进度条用它估要等多久。样本太少就不估。"""
+    spent = sorted(
+        int(item.get("ms") or 0)
+        for item in read_audit(tenant_id, ETA_WINDOW)
+        if item.get("tool") == name and item.get("ok") is True
+    )
+    if len(spent) < ETA_SAMPLES:
+        return None
+    return min(spent[len(spent) // 2], ETA_MAX_MS)
+
+
 def run_tool(ctx: ToolContext, tool: Tool, raw_args: str) -> tuple[str, bool]:
     """返回 (交给模型的 JSON 文本, 是否成功)。"""
     started = time.monotonic()
@@ -594,7 +635,11 @@ def run(
         for call in turn.calls:
             tool = by_name.get(call["name"])
             label = tool.label if tool else call["name"]
-            on_tool({"name": call["name"], "label": label, "state": "running"})
+            running: dict[str, Any] = {"name": call["name"], "label": label, "state": "running"}
+            eta = typical_ms(ctx.tenant_id, call["name"]) if tool else None
+            if eta is not None:
+                running["eta_ms"] = eta
+            on_tool(running)
             if tool:
                 result, ok = run_tool(ctx, tool, call["arguments"])
             else:

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -21,6 +22,9 @@ import outbound
 import school_tools
 import session_summary
 import today_card
+import usage_log
+import usage_stats
+from agent import read_audit, tool_labels
 from ai_config import (
     READER_TIMEOUT_SECONDS,
     ModelEndpoint,
@@ -48,7 +52,7 @@ from env_config import load_backend_env
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from graph_app import MAX_STORED_TURNS, build_graph, get_vector_db
+from graph_app import MAX_STORED_TURNS, build_graph, get_vector_db, refusal_text
 from jw_zhengfang import JwAuthError, JwCaptcha, JwError
 from knowledge import knowledge_base
 from llm_request import LlmRequest, stream_with_llm_request
@@ -138,6 +142,8 @@ class ChatRequest(BaseModel):
 
 
 class Message(BaseModel):
+    # 入库的消息才有编号；没有编号的（访客、Redis 里补来的）不能打分
+    id: str = ""
     role: str
     content: str
     context: str = ""
@@ -145,6 +151,15 @@ class Message(BaseModel):
     tables: list[dict[str, Any]] = Field(default_factory=list)
     emotion: dict[str, Any] | None = None
     safety: dict[str, Any] | None = None
+    # 这个人自己打的分：1 赞、-1 踩、0 没打
+    feedback: int = 0
+    feedback_reason: str = ""
+
+
+class FeedbackRequest(BaseModel):
+    message_id: str = Field(..., min_length=1, max_length=64)
+    rating: Literal[-1, 0, 1]
+    reason: Literal["", "wrong", "outdated", "verbose", "other"] = ""
 
 
 class SessionSummary(BaseModel):
@@ -414,6 +429,9 @@ def _successful_turns(stored: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _to_message(item: dict[str, Any]) -> Message:
     return Message(
+        id=item.get("id", ""),
+        feedback=item.get("feedback", 0),
+        feedback_reason=item.get("feedback_reason", ""),
         role=item.get("role", ""),
         content=item.get("content", ""),
         context=item.get("context", "") or "",
@@ -532,7 +550,6 @@ def _chat_events(
     )
 
 
-_DONE_FRAME = "event: done\n"
 SESSION_GONE = "这个会话不存在或已经删除，请新建对话"
 
 
@@ -570,22 +587,43 @@ def _prepare_history(graph: Any, config: dict[str, Any], input_state: dict[str, 
         logger.warning(f"[History] 读取会话 {session_id} 的历史失败，本轮只用 Redis: {exc}")
 
 
-def _persist_turn(graph: Any, config: dict[str, Any], tenant_id: str, user_id: str, session_id: str) -> None:
+def _persist_turn(graph: Any, config: dict[str, Any], tenant_id: str, user_id: str, session_id: str) -> str | None:
+    """这一轮成功就写进库，返回刚写的那条回答的编号（前端拿它来点赞点踩）；没写进去返回 None。"""
     try:
         messages = graph.get_state(config).values.get("messages") or []
         if len(messages) < 2:
-            return
+            return None
         question, answer = messages[-2], messages[-1]
         if question.get("role") != "user" or answer.get("role") != "assistant":
-            return
+            return None
         if _is_failed_answer(answer.get("content", "")):
-            return
-        if chat_history.record_turn(tenant_id, user_id, session_id, question, answer) is None:
-            return
+            return None
+        seq = chat_history.record_turn(tenant_id, user_id, session_id, question, answer)
+        if seq is None:
+            return None
     except Exception as exc:
         logger.warning(f"[History] 会话 {session_id} 这一轮没写进库: {exc}")
-        return
+        return None
     session_summary.schedule(tenant_id, user_id, session_id, chat_endpoint(tenant_id))
+    try:
+        return chat_history.message_id_at(tenant_id, user_id, session_id, seq)
+    except Exception as exc:
+        logger.warning(f"[History] 会话 {session_id} 取不到回答编号，这条不能打分: {exc}")
+        return None
+
+
+def _log_question(tenant_id: str, question: str, done: dict[str, Any], tools: list[dict[str, Any]],
+                  guest: bool, message_id: str | None) -> None:
+    """记一笔匿名的提问结果，给管理员看哪些问题没答上来。失败了只记日志，不能影响回答。"""
+    answer = done.get("answer", "")
+    if _is_failed_answer(answer) or not usage_log.enabled():
+        return
+    try:
+        names = list(dict.fromkeys(str(t["name"]) for t in tools if t.get("state") == "running" and t.get("name")))
+        outcome = usage_stats.classify(done.get("intent", ""), answer, done.get("sources") or [], names, refusal_text(tenant_id))
+        usage_log.record_question(tenant_id, question, outcome, names, guest, message_id)
+    except Exception as exc:
+        logger.warning(f"[Usage] 提问记录没写上: {exc}")
 
 
 def _graph_events(thread_id: str, question: str, tenant_id: str, user_id: str,
@@ -619,13 +657,17 @@ def _graph_events(thread_id: str, question: str, tenant_id: str, user_id: str,
                 # 快照刚从库里接回来、还没写进 Redis，直接在这份消息上去掉最后一轮
                 graph.update_state(config, {"messages": input_state.pop("messages")}, as_node="finalize")
             _rewind_last_turn(graph, config, replace_question, tenant_id, user_id, session_id if persist else "")
-        for frame in sse_from_graph_stream(
-            graph.stream(input_state, config=config, stream_mode=["updates", "custom"])
-        ):
+        def finish(done: dict[str, Any], tools: list[dict[str, Any]]) -> dict[str, Any]:
             # 先入库再发 done：前端收到 done 就可能关掉连接，之后的代码不一定还会执行
-            if persist and frame.startswith(_DONE_FRAME):
-                _persist_turn(graph, config, tenant_id, user_id, session_id)
-            yield frame
+            message_id = _persist_turn(graph, config, tenant_id, user_id, session_id) if persist else None
+            # 「重新回答」是同一个问题再答一次，已经算过一回了，不重复记
+            if replace_question != question:
+                _log_question(tenant_id, question, done, tools, guest=not user_id, message_id=message_id)
+            return {"message_id": message_id} if message_id else {}
+
+        yield from sse_from_graph_stream(
+            graph.stream(input_state, config=config, stream_mode=["updates", "custom"]), finish
+        )
     except Exception as exc:
         yield sse("error", {"message": f"回答生成失败: {exc}"})
 
@@ -673,6 +715,37 @@ def chat(payload: ChatRequest, user: CurrentUserDep) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ============================================================
+# 回答评价与使用情况
+# ============================================================
+
+@app.post("/api/feedback", status_code=204)
+def rate_answer(payload: FeedbackRequest, user: MemberDep) -> None:
+    """给自己会话里的一条回答点赞 / 点踩；rating 为 0 是取消。"""
+    if not usage_log.enabled():
+        raise HTTPException(status_code=503, detail="没有配置数据库，暂时不能评价")
+    try:
+        found = usage_log.set_feedback(user.tenant_id, user.id, payload.message_id, payload.rating, payload.reason)
+    except Exception as exc:
+        logger.warning(f"[Usage] 评价没写上: {exc}")
+        raise HTTPException(status_code=503, detail="暂时没记上，请稍后再试") from exc
+    if not found:
+        raise HTTPException(status_code=404, detail="没有这条回答")
+
+
+@app.get("/api/admin/usage")
+def get_usage(user: AdminDep, days: Annotated[int, Query(ge=1, le=90)] = 7) -> dict[str, Any]:
+    """管理员看本校最近几天的使用情况：高频问题、没答上来的、点赞点踩、工具调用。"""
+    if not usage_log.enabled():
+        raise HTTPException(status_code=503, detail="没有配置数据库，看不到使用情况")
+    try:
+        rows = usage_log.usage_rows(user.tenant_id, days)
+    except Exception as exc:
+        logger.warning(f"[Usage] 读取使用情况失败: {exc}")
+        raise HTTPException(status_code=503, detail="使用情况暂时读不到，请稍后再试") from exc
+    return usage_stats.build_report(rows, read_audit(user.tenant_id), tool_labels(), days, time.time())
 
 
 # ============================================================

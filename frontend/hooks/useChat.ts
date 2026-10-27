@@ -9,12 +9,16 @@ import {
   type ChatDone,
   type ChatMessage,
   type ChatToolEvent,
+  type FeedbackRating,
+  type FeedbackReason,
   type SessionSummary,
+  type StoredMessage,
   addMemories,
   createSession,
   deleteSession,
   fetchMessages,
   listSessions,
+  rateMessage,
   SessionGoneError,
   streamChat,
 } from "@/lib/api";
@@ -42,6 +46,11 @@ function spokenAnswer(result: ChatDone): string {
 
 function newId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+}
+
+/** 库里读出来的消息换成界面用的：前端自己编一个 id，库里的编号留作点赞点踩用（只有助手回答能评价） */
+function fromStored({ id, feedback_reason: feedbackReason, ...rest }: StoredMessage): ChatMessage {
+  return { ...rest, id: newId(), serverId: rest.role === "assistant" && id ? id : undefined, feedbackReason };
 }
 
 function lastUserIndex(messages: ChatMessage[]): number {
@@ -88,7 +97,7 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
         const history = await fetchMessages(tid);
         persistThreadId(tid, embedded);
         setThreadId(tid);
-        setMessages(history.map((item) => ({ ...item, id: newId() })));
+        setMessages(history.map(fromStored));
       } catch (err) {
         if (!(err instanceof SessionGoneError)) throw err;
         await freshSession();
@@ -163,7 +172,12 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
           tools = mergeTool(tools, event);
           // 查完不改回去：工具很快时「在登教务系统…」会一闪而过，留到回答开始吐字再换
           if (event.state === "running") {
-            setProgress((current) => ({ phase: phaseOfTool(event), label: event.label, slow: current?.slow ?? false }));
+            setProgress((current) => ({
+              phase: phaseOfTool(event),
+              label: event.label,
+              etaMs: event.eta_ms,
+              slow: current?.slow ?? false,
+            }));
           }
         },
         onDelta: (chunk: string) => {
@@ -184,6 +198,7 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
               emotion: result.emotion,
               safety: result.safety,
               tools,
+              serverId: result.message_id,
             },
           ]);
           setPending("");
@@ -235,6 +250,22 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
     },
     [send],
   );
+
+  /** 给一条回答点赞 / 点踩（0 取消）。先改界面，没记上就改回去并把错抛给调用方 */
+  const rate = useCallback(async (id: string, rating: FeedbackRating, reason: FeedbackReason = "") => {
+    const target = messagesRef.current.find((message) => message.id === id);
+    if (!target?.serverId) return;
+    const before = { feedback: target.feedback ?? 0, feedbackReason: target.feedbackReason ?? "" };
+    const patch = (value: Pick<ChatMessage, "feedback" | "feedbackReason">) =>
+      setMessages((prev) => prev.map((message) => (message.id === id ? { ...message, ...value } : message)));
+    patch({ feedback: rating, feedbackReason: rating === -1 ? reason : "" });
+    try {
+      await rateMessage(target.serverId, rating, reason);
+    } catch (err) {
+      patch(before);
+      throw err;
+    }
+  }, []);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -291,6 +322,7 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
     send,
     regenerate,
     editLast,
+    rate,
     stop,
     startNewSession,
     openSession,
