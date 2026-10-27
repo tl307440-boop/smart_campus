@@ -55,23 +55,32 @@ def _remember(key: str, card: dict[str, Any]) -> None:
         logger.warning(f"[今日卡片] 缓存写入失败: {exc}")
 
 
+def parse_exam_time(text: str) -> tuple[date, str, str] | None:
+    """「2027-01-08(09:00-11:00)」→ (日期, 开始, 结束)；没写时段时开始、结束为空串；读不出日期返回 None。"""
+    match = _EXAM_TIME.search(text or "")
+    if not match:
+        return None
+    try:
+        day = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return None
+    return day, match.group(4) or "", match.group(5) or ""
+
+
 def upcoming_exams(exams: list[dict[str, str]], today: date) -> list[dict[str, Any]]:
     """窗口内、今天及以后的考试，最近的在前。时间读不出来的跳过：宁可少列，不能列错日子。"""
     found = []
     for exam in exams:
-        match = _EXAM_TIME.search(exam.get("time", ""))
-        if not match:
+        parsed = parse_exam_time(exam.get("time", ""))
+        if not parsed:
             continue
-        try:
-            day = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-        except ValueError:
-            continue
+        day, start, end = parsed
         days_left = (day - today).days
         if not 0 <= days_left <= EXAM_WINDOW_DAYS:
             continue
         found.append({
             "course": exam.get("course", ""), "name": exam.get("name", ""), "date": day.isoformat(),
-            "start": match.group(4) or "", "end": match.group(5) or "",
+            "start": start, "end": end,
             "room": exam.get("room", ""), "seat": exam.get("seat", ""), "days_left": days_left,
         })
     found.sort(key=lambda e: (e["date"], e["start"]))

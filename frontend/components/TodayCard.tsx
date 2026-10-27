@@ -16,6 +16,8 @@ interface Props {
   onRetry: () => void;
   /** 打开「教务账号」绑定页 */
   onBind: () => void;
+  /** 打开「日历」页：导出或订阅课表 */
+  onCalendar: () => void;
 }
 
 /** 每半分钟走一格，用来判断哪节课在上、哪节是下一节 */
@@ -96,7 +98,7 @@ function ReminderControl({ reminder, onChange }: { reminder: ReminderSettings; o
   );
 }
 
-function ReadyCard({ card, ...controls }: { card: TodayCardData } & Pick<Props, "reminder" | "onReminderChange">) {
+function ReadyCard({ card, onCalendar, ...controls }: { card: TodayCardData } & Pick<Props, "reminder" | "onReminderChange" | "onCalendar">) {
   const now = useClock();
   const lessons = card.lessons ?? [];
   const exams = card.exams ?? [];
@@ -141,12 +143,17 @@ function ReadyCard({ card, ...controls }: { card: TodayCardData } & Pick<Props, 
       )}
 
       {lessons.length > 0 && <ReminderControl reminder={controls.reminder} onChange={controls.onReminderChange} />}
+      <p className="mt-2.5 text-sm">
+        <button type="button" onClick={onCalendar} className="link-ink">
+          把课表放进手机日历
+        </button>
+      </p>
     </section>
   );
 }
 
 /** 空白页上的今日卡片：今天的课、快到的考试、课前提醒开关。学校没开教务时什么都不画。 */
-export function TodayCard({ state, reminder, onReminderChange, onRetry, onBind }: Props) {
+export function TodayCard({ state, reminder, onReminderChange, onRetry, onBind, onCalendar }: Props) {
   if (state.status === "loading") return <p className="text-sm text-muted">正在看今天有什么课…</p>;
 
   if (state.status === "error") {
@@ -174,5 +181,5 @@ export function TodayCard({ state, reminder, onReminderChange, onRetry, onBind }
     );
   }
 
-  return <ReadyCard card={card} reminder={reminder} onReminderChange={onReminderChange} />;
+  return <ReadyCard card={card} reminder={reminder} onReminderChange={onReminderChange} onCalendar={onCalendar} />;
 }

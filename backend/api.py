@@ -12,13 +12,16 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from datetime import date
 from typing import Annotated, Any, Literal
+from urllib.parse import quote
 
+import calendar_ics
 import chat_history
 import desk_log
 import httpx
 import jw_account
 import memory_store
 import outbound
+import redis
 import school_tools
 import session_summary
 import today_card
@@ -49,7 +52,7 @@ from auth import (
 )
 from chat_stream import sse, sse_from_graph_stream
 from env_config import load_backend_env
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Path, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from graph_app import MAX_STORED_TURNS, build_graph, get_vector_db, refusal_text
@@ -398,6 +401,94 @@ def get_today_card(
         return today_card.build_card(user.tenant_id, user.id, today_card.clamp_day(day, date.today()))
     except JW_ERRORS as exc:
         raise _jw_http_error(exc) from exc
+
+
+# ============================================================
+# 课表日历：一次性下载，或带令牌的订阅链接
+# ============================================================
+
+CALENDAR_UNAVAILABLE = "日历功能暂时不可用，请稍后再试"
+
+
+class SubscriptionRequest(BaseModel):
+    alarm: int = Field(calendar_ics.DEFAULT_ALARM)
+
+    @field_validator("alarm")
+    @classmethod
+    def _known_alarm(cls, value: int) -> int:
+        if value not in calendar_ics.ALARM_CHOICES:
+            raise ValueError(f"提醒提前的分钟数只能是 {list(calendar_ics.ALARM_CHOICES)}")
+        return value
+
+
+def _calendar_response(text: str, filename: str) -> Response:
+    return Response(
+        content=text.encode("utf-8"),
+        media_type="text/calendar; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename=\"timetable.ics\"; filename*=UTF-8''{quote(filename)}", "Cache-Control": "no-store"},
+    )
+
+
+def _calendar_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, calendar_ics.CalendarError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, redis.RedisError):
+        return HTTPException(status_code=503, detail=CALENDAR_UNAVAILABLE)
+    return _jw_http_error(exc)
+
+
+@app.get("/api/calendar/export")
+def export_calendar(
+    user: MemberDep,
+    alarm: int = Query(calendar_ics.DEFAULT_ALARM, description="课前几分钟提醒，0 表示不提醒"),
+    term_start: str | None = Query(None, max_length=10, pattern=r"^\d{4}-\d{2}-\d{2}$", description="开学第一周的周一；教务给不出当前周次时用"),
+) -> Response:
+    """当前学期的课表和考试，导出成 .ics 文件。"""
+    try:
+        week1 = date.fromisoformat(term_start) if term_start else None
+        text, stats = calendar_ics.render(user.tenant_id, user.id, date.today(), alarm, week1)
+    except (*JW_ERRORS, calendar_ics.CalendarError, redis.RedisError) as exc:
+        raise _calendar_error(exc) from exc
+    logger.info(f"[日历] 导出 {stats['lessons']} 节课 {stats['exams']} 场考试，跳过 {stats['skipped']} 门读不出时间的课")
+    return _calendar_response(text, "我的课表.ics")
+
+
+@app.get("/api/calendar/subscription")
+def get_calendar_subscription(user: MemberDep) -> dict[str, Any]:
+    try:
+        return calendar_ics.subscription_status(user.tenant_id, user.id)
+    except redis.RedisError as exc:
+        raise _calendar_error(exc) from exc
+
+
+@app.post("/api/calendar/subscription")
+def create_calendar_subscription(body: SubscriptionRequest, user: MemberDep) -> dict[str, Any]:
+    """生成订阅令牌。令牌只在这次返回，之后查不到；重新生成会让旧链接作废。"""
+    try:
+        token = calendar_ics.create_subscription(user.tenant_id, user.id, body.alarm)
+    except redis.RedisError as exc:
+        raise _calendar_error(exc) from exc
+    return {"token": token, "path": f"/api/calendar/feed/{token}.ics", "alarm": body.alarm}
+
+
+@app.delete("/api/calendar/subscription", status_code=204)
+def delete_calendar_subscription(user: MemberDep) -> None:
+    try:
+        calendar_ics.revoke_subscription(user.tenant_id, user.id)
+    except redis.RedisError as exc:
+        raise _calendar_error(exc) from exc
+
+
+@app.get("/api/calendar/feed/{token}.ics")
+def calendar_feed(token: Annotated[str, Path(min_length=20, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")]) -> Response:
+    """日历软件来取的订阅地址：令牌就是凭证，不走登录。令牌无效一律 404，不透露是否存在过。"""
+    try:
+        text = calendar_ics.feed(token, date.today())
+    except (*JW_ERRORS, calendar_ics.CalendarError, redis.RedisError) as exc:
+        raise _calendar_error(exc) from exc
+    if text is None:
+        raise HTTPException(status_code=404, detail="订阅链接无效或已被关闭")
+    return Response(content=text.encode("utf-8"), media_type="text/calendar; charset=utf-8", headers={"Cache-Control": "private, max-age=600"})
 
 
 # ============================================================

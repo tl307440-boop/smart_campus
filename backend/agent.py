@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
 
+import httpx
 import jw_account
 import redis
 import school_tools
@@ -32,6 +33,7 @@ WEEKDAYS = "一二三四五六日"
 # 空教室交给模型的行数；完整结果走表格，不受这个限制
 ROOMS_FOR_MODEL = 40
 # 一张表最多带多少行给前端，防止一次查询把消息撑到几百 KB
+MAX_FOLLOW_UPS = 3
 TABLE_MAX_ROWS = 300
 TABLE_SHOWN = "完整结果已经以表格形式显示在你的回答下方，不要再逐行列出，用一两句话总结重点即可"
 
@@ -39,6 +41,7 @@ TABLE_SHOWN = "完整结果已经以表格形式显示在你的回答下方，�
 _JW_WORDS = (
     "成绩", "绩点", "学分", "挂科", "补考", "重修", "课表", "有课", "什么课", "几节课", "第几节",
     "考试", "考场", "座位号", "空教室", "空闲教室", "自习室", "教室空", "毕业", "学业",
+    "第几周", "第几个周", "周次", "教学周", "校历", "开学", "放假",
 )
 _NEWS_WORDS = ("通知", "公告", "新闻", "讲座", "活动安排")
 _TIMELY_WORDS = (
@@ -68,7 +71,14 @@ class ToolContext:
     sources: list[dict[str, Any]] = field(default_factory=list)
     # 工具查出的多行结果：原样交给前端画成表格，模型碰不到行数据
     tables: list[dict[str, Any]] = field(default_factory=list)
+    # 查完之后值得顺着问的下一句，前端画成点一下就问的小按钮
+    follow_ups: list[str] = field(default_factory=list)
     _campus_id: str = ""
+
+    def suggest(self, *questions: str) -> None:
+        for question in questions:
+            if question and question not in self.follow_ups and len(self.follow_ups) < MAX_FOLLOW_UPS:
+                self.follow_ups.append(question)
 
     def cite(self, title: str, url: str = "", snippet: str = "") -> None:
         if any(s.get("url") == url and url for s in self.sources):
@@ -133,6 +143,15 @@ def _periods_of(jcs: str) -> list[int]:
     if not match:
         return []
     return list(range(int(match.group(1)), int(match.group(2) or match.group(1)) + 1))
+
+
+weeks_of = _weeks_of
+periods_of = _periods_of
+
+
+def first_monday(today: date, week: int) -> date:
+    """今天是教学第 week 周时，第 1 周的周一是哪天。"""
+    return today - timedelta(days=today.weekday()) - timedelta(weeks=week - 1)
 
 
 def _previous_term(xnm: str, xqm: str) -> tuple[str, str]:
@@ -230,6 +249,8 @@ def _timetable(ctx: ToolContext, args: dict[str, Any]) -> Any:
         )
     else:
         result["note"] = "这段时间没有课"
+    result["calendar_hint"] = "学生想把课表放进手机日历时，告诉他点右上角「工具」→「日历」，可以下载文件，也可以生成订阅链接（调课后手机里自动更新）"
+    ctx.suggest("怎么把课表放进手机日历")
     return result
 
 
@@ -243,7 +264,41 @@ def _exams(ctx: ToolContext, args: dict[str, Any]) -> Any:
         result["display"] = ctx.table(
             "考试安排", [("course", "课程"), ("time", "时间"), ("room", "考场"), ("seat", "座位号"), ("name", "考试")], exams
         )
+        result["calendar_hint"] = "考试会随课表一起导出：「工具」→「日历」"
+        ctx.suggest("帮我排一个考前复习计划", "我的考场怎么走")
     return result
+
+
+_FAIL_WORDS = ("不及格", "不合格", "未通过", "挂科", "缺考", "作弊")
+PASS_SCORE = 60
+
+
+def is_failed(grade: dict[str, str]) -> bool:
+    """成绩单里的一行是不是没通过：百分制低于 60，或者等级、文字写着不及格。绩点为 0 但成绩读不出来的不下结论。"""
+    score = str(grade.get("score", "")).strip()
+    if any(word in score for word in _FAIL_WORDS):
+        return True
+    try:
+        return float(score) < PASS_SCORE
+    except ValueError:
+        return False
+
+
+def gpa_by_term(grades: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """按学期算学分加权绩点；学分或绩点读不出来的行不参与，学期按出现顺序。"""
+    sums: dict[str, list[float]] = {}
+    for g in grades:
+        try:
+            credit, gpa = float(g["credit"]), float(g["gpa"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        entry = sums.setdefault(g.get("term", ""), [0.0, 0.0])
+        entry[0] += credit
+        entry[1] += credit * gpa
+    return [
+        {"term": term, "credits": round(credits, 1), "gpa": round(points / credits, 2) if credits else None}
+        for term, (credits, points) in sums.items()
+    ]
 
 
 def _grades(ctx: ToolContext, args: dict[str, Any]) -> Any:
@@ -259,11 +314,20 @@ def _grades(ctx: ToolContext, args: dict[str, Any]) -> Any:
         credits += credit
         points += credit * gpa
     ctx.cite("教务系统·成绩")
+    terms = gpa_by_term(grades)
+    failed = [g for g in grades if is_failed(g)]
     result: dict[str, Any] = {
         "count": len(grades),
         "credit_weighted_gpa": round(points / credits, 2) if credits else None,
+        "gpa_by_term": terms,
         "grades": grades,
     }
+    if failed:
+        result["failed_courses"] = [{"term": g["term"], "course": g["course"], "score": g["score"], "credit": g["credit"]} for g in failed]
+    if len(terms) > 1:
+        ctx.suggest("每学期的绩点分别是多少")
+    if failed:
+        ctx.suggest("没通过的课要怎么补考重修")
     if grades:
         result["display"] = ctx.table(
             "成绩", [("term", "学期"), ("course", "课程"), ("score", "成绩"), ("credit", "学分"), ("gpa", "绩点"), ("type", "性质")], grades
@@ -285,6 +349,10 @@ def _graduation(ctx: ToolContext, args: dict[str, Any]) -> Any:
         )
     else:
         result["note"] = "教务没给出分类学分要求，只能看总体通过情况；具体还差哪门课以教务系统「学生学业情况查询」为准"
+    if (data.get("plan") or {}).get("failed"):
+        ctx.suggest("我有哪几门课没通过")
+    if any((c.get("missing") or 0) > 0 for c in categories):
+        ctx.suggest("按现在的进度，学分缺口怎么补")
     return result
 
 
@@ -313,8 +381,57 @@ def _free_rooms(ctx: ToolContext, args: dict[str, Any]) -> Any:
         result["display"] = ctx.table(
             "空教室", [("room", "教室"), ("building", "教学楼"), ("type", "类型"), ("seats", "座位")], rooms
         )
+        if (building_name := _busiest_building(rooms)) and map_key(ctx.tenant_id):
+            ctx.suggest(f"{building_name}怎么走")
+        ctx.suggest("明天同一时段呢")
     else:
         result["note"] = "这个时段没有空教室"
+    return result
+
+
+def _busiest_building(rooms: list[dict[str, str]]) -> str:
+    """空教室最多的那栋楼：值得问一句怎么走。教室名常是「1号教学楼 101」，楼名没单独给时取空格前面那段。"""
+    counts: dict[str, int] = {}
+    for room in rooms:
+        name = room.get("building") or room.get("room", "").split(" ")[0]
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    return max(counts, key=lambda name: counts[name]) if counts else ""
+
+
+def _calendar(ctx: ToolContext, args: dict[str, Any]) -> Any:
+    """今天是教学第几周；也能反查某一天是第几周、某一周是几号到几号。放假、开学这类校历安排不在教务接口里。"""
+    school = school_ai(ctx.tenant_id)
+    week: int | None = None
+    if ctx.user_id and school.jw_mode in ("demo", "zhengfang"):
+        try:
+            with jw_account.source_for(ctx.tenant_id, ctx.user_id) as jw:
+                week = jw.current_week()
+        except (JwError, httpx.HTTPError):
+            week = None  # 没绑定、教务连不上：只当不知道周次，日期照样回答
+    today = ctx.today
+    result: dict[str, Any] = {"today": today.isoformat(), "weekday": f"星期{WEEKDAYS[today.weekday()]}", "current_week": week}
+    rule = "放假、开学、考试周、调休这类校历安排，用 search_knowledge 查学校上传的校历，查不到就如实说，不要凭印象回答"
+    if not week:
+        result["note"] = (
+            "教务没给出当前是第几周（没绑定教务、可能在假期，或新学期还没开始），不要猜周次。" + rule
+        )
+        return result
+    start = first_monday(today, week)
+    result["week1_monday"] = start.isoformat()
+    ctx.cite("教务系统·当前周次")
+    asked_day = str(args.get("date") or "").strip()
+    if asked_day:
+        try:
+            day = date.fromisoformat(asked_day)
+            result["asked"] = {"date": day.isoformat(), "weekday": f"星期{WEEKDAYS[day.weekday()]}", "week": (day - start).days // 7 + 1}
+        except ValueError:
+            result["asked_error"] = "date 要写成 YYYY-MM-DD"
+    asked_week = _int_arg(args.get("week"), 1, 30)
+    if asked_week:
+        monday = start + timedelta(weeks=asked_week - 1)
+        result["asked_week"] = {"week": asked_week, "from": monday.isoformat(), "to": (monday + timedelta(days=6)).isoformat()}
+    result["note"] = "周次按教务系统给的当前周推算，假期里不连续计周的学校可能有出入。" + rule
     return result
 
 
@@ -416,6 +533,15 @@ _MAP_TOOLS = [
     Tool("campus_place", "找地点", "在地图上找学校里或学校附近的地点（教学楼、食堂、校门、医院、地铁站等），返回地址和导航链接。", _obj({"name": {"type": "string", "description": "地点名，如 图书馆、北门"}}, ["name"]), _place),
     Tool("walking_route", "规划步行路线", "规划学校里或附近两个地点之间的步行路线。", _obj({"origin": {"type": "string"}, "destination": {"type": "string"}}, ["origin", "destination"]), _route),
 ]
+_CALENDAR_TOOL = Tool(
+    "school_calendar", "查周次校历",
+    "今天是星期几、教学第几周；也能查某个日期是第几周、第几周是几号到几号。问放假、开学、考试周等校历安排时一并用 search_knowledge。",
+    _obj({
+        "date": {"type": "string", "description": "要反查周次的日期，YYYY-MM-DD，可不填"},
+        "week": {"type": "integer", "minimum": 1, "maximum": 30, "description": "要查日期范围的教学周，可不填"},
+    }),
+    _calendar,
+)
 _KNOWLEDGE_TOOL = Tool("search_knowledge", "查本校资料", "检索学校上传的资料（学生手册、规章、校园指南、地点介绍等）。", _obj({"query": {"type": "string"}}, ["query"]), _knowledge)
 
 
@@ -423,7 +549,7 @@ def available_tools(tenant_id: str, user_id: str, settings: WorkspaceSettings) -
     school = school_ai(tenant_id)
     tools = [_KNOWLEDGE_TOOL]
     if user_id and school.jw_mode in ("demo", "zhengfang"):
-        tools += _JW_TOOLS
+        tools += [*_JW_TOOLS, _CALENDAR_TOOL]  # 周次来自教务，没有教务就没有可靠的周次
     if school.news_urls:
         tools += _NEWS_TOOLS
     if map_key(tenant_id):

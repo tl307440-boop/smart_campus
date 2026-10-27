@@ -80,7 +80,13 @@ def test_done_is_always_last_and_complete() -> None:
             "emotion": {"risk_level": 1},
             "safety": None,
             "tables": [],
+            "follow_ups": [],
         }
+
+
+def test_follow_ups_from_the_tool_answer_reach_done() -> None:
+    events = [("updates", {"generate": {"final_answer": "查到了", "follow_ups": ["2号楼怎么走"]}})]
+    assert parse(list(sse_from_graph_stream(events)))[-1][1]["follow_ups"] == ["2号楼怎么走"]
 
 
 def test_safety_card_from_generate_or_finalize_reaches_done() -> None:

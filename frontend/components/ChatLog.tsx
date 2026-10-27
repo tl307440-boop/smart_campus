@@ -27,6 +27,8 @@ interface Props {
   onEdit: (text: string) => void;
   /** 点赞点踩；挂件里的访客对话不入库，不传 */
   onRate?: (id: string, rating: FeedbackRating, reason?: FeedbackReason) => Promise<void>;
+  /** 点一下「接着问」的按钮就把这句话发出去；不传就不显示 */
+  onAsk?: (question: string) => void;
 }
 
 interface Row {
@@ -79,6 +81,7 @@ export function ChatLog({
   onRegenerate,
   onEdit,
   onRate,
+  onAsk,
 }: Props) {
   const last = messages.at(-1);
   const answerFailed = failedAnswer(last);
@@ -114,6 +117,18 @@ export function ChatLog({
           />
         );
       })}
+
+      {signedId && onAsk && last?.followUps && last.followUps.length > 0 && (
+        <ul className="rise-in flex flex-wrap gap-2" aria-label="接着问">
+          {last.followUps.map((question) => (
+            <li key={question}>
+              <button type="button" onClick={() => onAsk(question)} className="btn btn-sm">
+                {question}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
 
       {pendingShown && <MessageBubble message={{ id: "pending", role: "assistant", content: pendingShown }} streaming />}
 
