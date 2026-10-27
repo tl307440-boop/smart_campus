@@ -13,14 +13,19 @@ import { SelectionAsk } from "@/components/SelectionAsk";
 import { SessionList } from "@/components/SessionList";
 import { ArrowDownIcon } from "@/components/SketchIcons";
 import { SuggestedQuestions } from "@/components/SuggestedQuestions";
+import { TodayCard } from "@/components/TodayCard";
+import { useToast } from "@/components/Toast";
 import { type ToolTab, ToolDrawer } from "@/components/ToolDrawer";
 import { WorkspacePane } from "@/components/WorkspaceAdmin";
 import { PET_LOOK_EVENT } from "@/hooks/useDeskPet";
+import { useLessonReminders } from "@/hooks/useLessonReminders";
 import { useStickToBottom } from "@/hooks/useStickToBottom";
+import { useToday } from "@/hooks/useToday";
 import { fetchWorkspace } from "@/lib/api";
 import { useAuth } from "@/lib/auth/context";
 import { canManageKnowledge } from "@/lib/auth/session";
 import { isFallbackAnswer } from "@/lib/friendly-error";
+import { useReminderSettings } from "@/lib/reminder-settings";
 import { speakText, useSpeechSettings } from "@/lib/speech-settings";
 import { useChat } from "@/hooks/useChat";
 
@@ -39,6 +44,11 @@ export default function ChatPage() {
   const isStaff = canManageKnowledge(user?.role);
   const isAdmin = user?.role === "ADMIN";
   const [speech] = useSpeechSettings();
+  const { notice } = useToast();
+  const { state: today, reload: reloadToday } = useToday();
+  const [reminder, setReminder] = useReminderSettings();
+  // 提醒挂在页面上而不是卡片上：开始聊天后卡片会收起，该提醒的课还是要提醒
+  useLessonReminders(today.status === "ready" ? today.card : null, reminder, notice);
   const [drawer, setDrawer] = useState<{ tab: ToolTab; open: boolean; n: number }>({ tab: "service", open: false, n: 0 });
   const [historyOpen, setHistoryOpen] = useState(false);
   const [assistantName, setAssistantName] = useState<string | null>(null);
@@ -69,7 +79,11 @@ export default function ChatPage() {
   const { atBottom, unseen, scrollToBottom } = useStickToBottom(scrollRef, `${messages.length}:${pending.length}:${progress?.phase}`);
 
   const openTool = useCallback((tab: ToolTab) => setDrawer((d) => ({ tab, open: true, n: d.open ? d.n : d.n + 1 })), []);
-  const closeTool = useCallback(() => setDrawer((d) => ({ ...d, open: false })), []);
+  const closeTool = useCallback(() => {
+    setDrawer((d) => ({ ...d, open: false }));
+    // 刚在「教务账号」里绑定、换绑或解绑了：卡片跟着换
+    if (drawer.tab === "jw") reloadToday();
+  }, [drawer.tab, reloadToday]);
   const openService = useCallback(() => openTool("service"), [openTool]);
   const closeHistory = useCallback(() => setHistoryOpen(false), []);
 
@@ -136,6 +150,13 @@ export default function ChatPage() {
                       <h1 className="font-display text-[2rem] leading-tight sm:text-[2.5rem]">嗨，我是{name}</h1>
                       <p className="mt-2 text-muted">规章、资助、考试和校园生活，直接问我就好。回答下面会附上出处。</p>
                     </div>
+                    <TodayCard
+                      state={today}
+                      reminder={reminder}
+                      onReminderChange={setReminder}
+                      onRetry={reloadToday}
+                      onBind={() => openTool("jw")}
+                    />
                     <SuggestedQuestions disabled={busy || !threadId} onAsk={handleSend} />
                   </div>
                 )}

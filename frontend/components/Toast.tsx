@@ -3,11 +3,11 @@
 import { createContext, type ReactNode, useCallback, useContext, useMemo, useRef, useState } from "react";
 import { CheckIcon, CloseIcon } from "@/components/SketchIcons";
 
-/** 成功的提示几秒后自己消失；失败的要用户亲手关掉，免得没看清原因就没了 */
-const SUCCESS_MS = 3000;
+/** 成功的提示几秒后自己消失；失败的要用户亲手关掉，免得没看清原因就没了；上课提醒留得久一点，但不用手动关 */
+const DISMISS_MS: Partial<Record<ToastKind, number>> = { success: 3000, notice: 15000 };
 const MAX_TOASTS = 3;
 
-type ToastKind = "success" | "error";
+type ToastKind = "success" | "error" | "notice";
 
 interface ToastItem {
   id: number;
@@ -18,6 +18,8 @@ interface ToastItem {
 interface ToastApi {
   success: (text: string) => void;
   error: (text: string) => void;
+  /** 需要看一眼但不是好事也不是坏事，比如马上要上课了 */
+  notice: (text: string) => void;
 }
 
 const ToastContext = createContext<ToastApi | null>(null);
@@ -32,13 +34,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     (kind: ToastKind, text: string) => {
       const id = ++nextId.current;
       setItems((list) => [...list.filter((item) => item.text !== text), { id, kind, text }].slice(-MAX_TOASTS));
-      if (kind === "success") window.setTimeout(() => dismiss(id), SUCCESS_MS);
+      const lifetime = DISMISS_MS[kind];
+      if (lifetime) window.setTimeout(() => dismiss(id), lifetime);
     },
     [dismiss],
   );
 
   const api = useMemo<ToastApi>(
-    () => ({ success: (text) => push("success", text), error: (text) => push("error", text) }),
+    () => ({ success: (text) => push("success", text), error: (text) => push("error", text), notice: (text) => push("notice", text) }),
     [push],
   );
 
@@ -58,14 +61,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           >
             <span
               className={`mt-0.5 grid size-6 shrink-0 place-items-center rounded-full border-[1.5px] border-ink font-display text-sm ${
-                item.kind === "success" ? "bg-flower" : "bg-skin text-pink"
+                item.kind === "success" ? "bg-flower" : item.kind === "notice" ? "bg-pollen" : "bg-skin text-pink"
               }`}
               aria-hidden="true"
             >
-              {item.kind === "success" ? <CheckIcon size={14} /> : "!"}
+              {item.kind === "success" ? <CheckIcon size={14} /> : item.kind === "notice" ? "课" : "!"}
             </span>
             <p className="min-w-0 flex-1 text-[0.9375rem] leading-snug break-words">{item.text}</p>
-            {item.kind === "error" && (
+            {item.kind !== "success" && (
               <button type="button" onClick={() => dismiss(item.id)} className="shrink-0 text-muted hover:text-ink" aria-label="关掉这条提示">
                 <CloseIcon size={16} />
               </button>
