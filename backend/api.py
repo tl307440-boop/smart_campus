@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Generator, Iterator
 from contextlib import asynccontextmanager
 from datetime import date
 from typing import Annotated, Any, Literal
@@ -27,6 +27,7 @@ import session_summary
 import today_card
 import usage_log
 import usage_stats
+import vision
 from agent import read_audit, tool_labels
 from ai_config import (
     READER_TIMEOUT_SECONDS,
@@ -40,6 +41,7 @@ from ai_config import (
     school_chat_endpoint,
     scrub,
     search_key,
+    vision_endpoint,
 )
 from auth import (
     AdminDep,
@@ -127,7 +129,7 @@ class LlmConfig(BaseModel):
 
 
 class AiServiceTest(BaseModel):
-    service: Literal["chat", "reader", "embedding", "map", "search", "jw", "news"]
+    service: Literal["chat", "reader", "vision", "embedding", "map", "search", "jw", "news"]
 
 
 class JwBind(BaseModel):
@@ -142,6 +144,8 @@ class ChatRequest(BaseModel):
     llm: LlmConfig | None = None
     # 重新生成 / 改了再问：最后一轮的原提问。和服务端记录的最后一轮对得上才会先删掉那一轮
     replace_question: str | None = None
+    # 附图：data URL（JPEG / PNG / WebP）。只在这一次请求里用，不入库；格式与大小由 vision.validate 把关
+    images: list[str] = Field(default_factory=list, max_length=vision.MAX_IMAGES)
 
 
 class Message(BaseModel):
@@ -207,7 +211,12 @@ def health() -> dict[str, str]:
 def get_workspace(user: CurrentUserDep) -> dict[str, Any]:
     """前端展示用：助手称呼与是否只按资料回答。完整设置只在 Next 的管理接口里可改。"""
     settings = workspace_settings(user.tenant_id)
-    return {"assistant_name": settings.assistant_name, "query_only": settings.query_only}
+    return {
+        "assistant_name": settings.assistant_name,
+        "query_only": settings.query_only,
+        # 学校配了识图模型、且是登录用户（访客不开放）才能附图提问
+        "vision": not user.is_guest and vision_endpoint(user.tenant_id) is not None,
+    }
 
 
 @app.post("/api/llm/ping")
@@ -242,6 +251,7 @@ def ai_status(user: MemberDep) -> dict[str, Any]:
     return {
         "chat": _endpoint_status(school_chat_endpoint(user.tenant_id)),
         "reader": _endpoint_status(reader_endpoint(user.tenant_id)),
+        "vision": _endpoint_status(vision_endpoint(user.tenant_id)),
         "embedding": {
             "configured": spec is not None,
             "source": spec.source if spec else None,
@@ -313,7 +323,14 @@ def test_ai_service(payload: AiServiceTest, user: AdminDep) -> dict[str, Any]:
         return {"ok": True, "source": spec.source, "model": spec.model}
 
     is_chat = payload.service == "chat"
-    endpoint = school_chat_endpoint(user.tenant_id) if is_chat else reader_endpoint(user.tenant_id)
+    if is_chat:
+        endpoint = school_chat_endpoint(user.tenant_id)
+    elif payload.service == "vision":
+        endpoint = vision_endpoint(user.tenant_id)
+        if endpoint is None:
+            raise HTTPException(status_code=400, detail="还没配置：识图模型的服务地址、模型 ID、密钥三项都要填，保存后再测")
+    else:
+        endpoint = reader_endpoint(user.tenant_id)
     if endpoint is None:
         raise HTTPException(status_code=400, detail="还没配置：先填好密钥并保存")
     timeout = 20.0 if is_chat else min(READER_TIMEOUT_SECONDS, 30.0)
@@ -630,6 +647,7 @@ def _chat_events(
     user_id: str = "",
     session_id: str = "",
     replace_question: str | None = None,
+    images: list[str] | None = None,
 ) -> Iterator[str]:
     """把图的流事件转成 SSE。custom 是生成中的 token，updates 是节点产出。
 
@@ -637,7 +655,7 @@ def _chat_events(
     """
     return stream_with_llm_request(
         _as_llm_request(llm),
-        _graph_events(thread_id, question, tenant_id, user_id, session_id, replace_question),
+        _graph_events(thread_id, question, tenant_id, user_id, session_id, replace_question, images or []),
     )
 
 
@@ -650,7 +668,8 @@ def _rewind_last_turn(graph: Any, config: dict[str, Any], question: str,
     snapshot = graph.get_state(config)
     messages = list(snapshot.values.get("messages") or []) if snapshot and snapshot.values else []
     last_user = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"), None)
-    if last_user is None or messages[last_user].get("content") != question:
+    # 带图的提问在快照里是「原话 + 图里读出的文字」，对的时候只看学生自己写的那句
+    if last_user is None or vision.original_question(messages[last_user].get("content") or "") != question:
         return
     dropped_answer = messages[last_user + 1] if last_user + 1 < len(messages) else None
     graph.update_state(config, {"messages": messages[:last_user]}, as_node="finalize")
@@ -687,6 +706,8 @@ def _persist_turn(graph: Any, config: dict[str, Any], tenant_id: str, user_id: s
         question, answer = messages[-2], messages[-1]
         if question.get("role") != "user" or answer.get("role") != "assistant":
             return None
+        # 图里读出的文字只留在这一轮的上下文里，库里和学生在页面上看到的都是他自己写的那句
+        question = {**question, "content": vision.original_question(question.get("content") or "")}
         if _is_failed_answer(answer.get("content", "")):
             return None
         seq = chat_history.record_turn(tenant_id, user_id, session_id, question, answer)
@@ -717,8 +738,26 @@ def _log_question(tenant_id: str, question: str, done: dict[str, Any], tools: li
         logger.warning(f"[Usage] 提问记录没写上: {exc}")
 
 
+def _read_attached_images(tenant_id: str, question: str, images: list[str]) -> Generator[str, None, str | None]:
+    """让识图模型读图。先发「看图中」的进度，读完返回「原话 + 图里读出的文字」；失败时发一条 error 帧并返回 None。"""
+    running = {"name": "vision_read", "label": "看图", "state": "running"}
+    yield sse("tool", running)
+    try:
+        endpoint = vision_endpoint(tenant_id)
+        if endpoint is None:
+            raise vision.VisionError("学校还没有开通图片提问")
+        reading = vision.read_images(endpoint, images, question)
+    except vision.VisionError as exc:
+        yield sse("tool", {**running, "state": "done", "ok": False})
+        yield sse("error", {"message": str(exc)})
+        return None
+    yield sse("tool", {**running, "state": "done", "ok": True})
+    return vision.with_reading(question, reading, len(images))
+
+
 def _graph_events(thread_id: str, question: str, tenant_id: str, user_id: str,
-                  session_id: str = "", replace_question: str | None = None) -> Iterator[str]:
+                  session_id: str = "", replace_question: str | None = None,
+                  images: list[str] | None = None) -> Iterator[str]:
     remembered = memory_store.take_remember_command(question) if user_id else None
     if remembered:
         try:
@@ -726,8 +765,14 @@ def _graph_events(thread_id: str, question: str, tenant_id: str, user_id: str,
             yield sse("status", {"stage": "remembered", "content": remembered})
         except Exception as exc:
             logger.warning(f"[记忆] 「记住」指令写入失败: {exc}")
+    model_question = question
+    if images:
+        read = yield from _read_attached_images(tenant_id, question, images)
+        if read is None:
+            return
+        model_question = read
     input_state: dict[str, Any] = {
-        "user_question": question,
+        "user_question": model_question,
         "route_strategy": ROUTE_STRATEGY,
         "tenant_id": tenant_id,
         "user_id": user_id,
@@ -775,6 +820,15 @@ def chat(payload: ChatRequest, user: CurrentUserDep) -> StreamingResponse:
     enforce_chat_quota(user.id)
     if user.is_guest:
         _enforce_guest_quota(user)
+    if payload.images:
+        if user.is_guest:
+            raise HTTPException(status_code=403, detail="挂件里暂时不能发图片，登录后再试")
+        if vision_endpoint(user.tenant_id) is None:
+            raise HTTPException(status_code=400, detail="学校还没有开通图片提问，请联系管理员")
+        try:
+            vision.validate(payload.images)
+        except vision.VisionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if _uses_history_db(user):
         try:
             blocked = chat_history.is_blocked(user.tenant_id, user.id, payload.thread_id)
@@ -797,6 +851,7 @@ def chat(payload: ChatRequest, user: CurrentUserDep) -> StreamingResponse:
             "" if user.is_guest else user.id,
             session_id=payload.thread_id if _uses_history_db(user) else "",
             replace_question=payload.replace_question,
+            images=payload.images,
         ),
         media_type="text/event-stream",
         headers={

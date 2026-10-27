@@ -174,9 +174,21 @@ export function MessageBubble({
             }}
           />
         ) : (
-          <p className="max-w-[85%] text-right leading-[1.9] whitespace-pre-wrap break-words">
-            <span className="marker marker-swipe">{message.content}</span>
-          </p>
+          <>
+            {message.images && message.images.length > 0 && (
+              <div className="mb-2 flex justify-end gap-2">
+                {message.images.map((url, index) => (
+                  <div key={index} className="sketch size-24 bg-paper p-0.5">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={url} alt={`你附的图 ${index + 1}`} className="size-full object-cover" />
+                  </div>
+                ))}
+              </div>
+            )}
+            <p className="max-w-[85%] text-right leading-[1.9] whitespace-pre-wrap break-words">
+              <span className="marker marker-swipe">{message.content}</span>
+            </p>
+          </>
         )}
         {showActions && !editing && (
           <MessageActions

@@ -120,6 +120,8 @@ export interface ChatMessage {
   feedbackReason?: FeedbackReason;
   /** 查完教务后建议接着问的话，只在最新一条回答下面显示，刷新后没有 */
   followUps?: string[];
+  /** 学生附的图（data URL），只在前端内存里给自己看和重新生成用；后端不存，刷新后没有 */
+  images?: string[];
 }
 
 export type FeedbackRating = 1 | -1 | 0;
@@ -250,10 +252,10 @@ export function clearDocuments() {
 }
 
 export function fetchWorkspace() {
-  return request<{ assistant_name: string; query_only: boolean }>("/api/workspace");
+  return request<{ assistant_name: string; query_only: boolean; vision?: boolean }>("/api/workspace");
 }
 
-export type AiServiceName = "chat" | "reader" | "embedding" | "map" | "search" | "jw" | "news";
+export type AiServiceName = "chat" | "reader" | "vision" | "embedding" | "map" | "search" | "jw" | "news";
 
 export interface AiServiceStatus {
   configured: boolean;
@@ -508,11 +510,13 @@ export async function streamChat(
   llm?: LlmChatConfig,
   /** 重新生成 / 改了再问：被替换掉的最后一轮的原提问 */
   replaceQuestion?: string,
+  /** 附图（data URL），后端读完变成文字就丢，不入库 */
+  images?: string[],
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ thread_id: threadId, question, llm, replace_question: replaceQuestion }),
+    body: JSON.stringify({ thread_id: threadId, question, llm, replace_question: replaceQuestion, images }),
     signal,
   });
 

@@ -28,9 +28,14 @@ export interface UseChatOptions {
   embedded?: boolean;
 }
 
+/** 只发图没打字时的提问；与后端 vision.DEFAULT_QUESTION 保持一致 */
+const PICTURE_QUESTION = "请看一下这张图片，告诉我上面是什么、有什么要注意的";
+
 interface SendOptions {
   /** 替换最后一轮：重新生成时等于原提问，改了再问时是改之前的那句 */
   replace?: string;
+  /** 附图（data URL）；重新生成时沿用最后一轮自己带的图 */
+  images?: string[];
 }
 
 /** 朗读时接在回答后面，把求助电话也念出来；回答本身是报错时只念求助电话 */
@@ -140,14 +145,16 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
   }, [embedded]);
 
   const send = useCallback(
-    async (question: string, { replace }: SendOptions = {}) => {
-      const text = question.trim();
+    async (question: string, { replace, images }: SendOptions = {}) => {
+      const attached = images?.length ? images : undefined;
+      // 只发图没打字：给一句默认的话，库里存的也是这句
+      const text = question.trim() || (attached ? PICTURE_QUESTION : "");
       if (!text || !threadId || abortRef.current) return;
 
       setError(null);
       setMessages((prev) => {
         const kept = replace === undefined ? prev : prev.slice(0, Math.max(lastUserIndex(prev), 0));
-        return [...kept, { id: newId(), role: "user", content: text }];
+        return [...kept, { id: newId(), role: "user", content: text, images: attached }];
       });
       setProgress({ phase: "thinking", slow: false });
 
@@ -211,13 +218,13 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
 
       try {
         try {
-          await streamChat(threadId, text, handlers, controller.signal, llm, replace);
+          await streamChat(threadId, text, handlers, controller.signal, llm, replace, attached);
         } catch (err) {
           if (!(err instanceof SessionGoneError)) throw err;
           // 这一页在别处被删掉了：换一页新的，把这句话原样再问一次
           const tid = await freshSession();
-          setMessages([{ id: newId(), role: "user", content: text }]);
-          await streamChat(tid, text, handlers, controller.signal, llm);
+          setMessages([{ id: newId(), role: "user", content: text, images: attached }]);
+          await streamChat(tid, text, handlers, controller.signal, llm, undefined, attached);
         }
       } catch (err) {
         // 用户主动中断不算错误
@@ -240,14 +247,20 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
   /** 用最后一轮的提问再答一次，替换掉原来的回答（或报错） */
   const regenerate = useCallback(() => {
     const last = messagesRef.current[lastUserIndex(messagesRef.current)];
-    if (last) void send(last.content, { replace: last.content });
+    if (!last) return;
+    if (last.content === PICTURE_QUESTION && !last.images) {
+      // 图片不入库，刷新或换会话后就没了；没图可看就别拿空问题去答
+      setError("这张图片没有保存，请重新附上图片再问。");
+      return;
+    }
+    void send(last.content, { replace: last.content, images: last.images });
   }, [send]);
 
   /** 改了最后一句提问再问：原来那一轮整轮作废 */
   const editLast = useCallback(
     (text: string) => {
       const last = messagesRef.current[lastUserIndex(messagesRef.current)];
-      if (last) void send(text, { replace: last.content });
+      if (last) void send(text, { replace: last.content, images: last.images });
     },
     [send],
   );

@@ -63,6 +63,15 @@ class SchoolAi:
 
 
 @dataclass(frozen=True)
+class SchoolVision:
+    """学校配的识图模型。没有平台默认：三项缺一项就等于没开。"""
+
+    base_url: str = ""
+    model: str = ""
+    key: str = ""
+
+
+@dataclass(frozen=True)
 class EmbedSettings:
     id: str
     tenant_id: str
@@ -72,6 +81,7 @@ class EmbedSettings:
 
 DEFAULT_SETTINGS = WorkspaceSettings()
 NO_SCHOOL_AI = SchoolAi()
+NO_VISION = SchoolVision()
 
 _cache: dict[tuple[str, str], tuple[float, Any]] = {}
 _cache_lock = threading.Lock()
@@ -117,6 +127,7 @@ def forget_school_ai(tenant_id: str) -> None:
     """管理员刚保存完就点「测一下」时，不能拿缓存里的旧配置去测。"""
     with _cache_lock:
         _cache.pop(("ai", tenant_id), None)
+        _cache.pop(("vision", tenant_id), None)
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -218,6 +229,22 @@ def school_ai(tenant_id: str) -> SchoolAi:
         )
 
     return _cached("ai", tenant_id, load, NO_SCHOOL_AI)
+
+
+def school_vision(tenant_id: str) -> SchoolVision:
+    """学校的识图模型。单独一条查询：迁移还没跑（列不存在）时只是识图不可用，不牵连对话配置。"""
+
+    def load() -> SchoolVision:
+        row = _fetch_one(
+            'SELECT "visionBaseUrl", "visionModel", "visionKey" FROM tenant_ai_configs WHERE "tenantId" = %s',
+            (tenant_id,),
+        )
+        if row is None:
+            return NO_VISION
+        base_url, model, key = row[:3]
+        return SchoolVision((base_url or "").strip().rstrip("/"), (model or "").strip(), _decrypt(tenant_id, key))
+
+    return _cached("vision", tenant_id, load, NO_VISION)
 
 
 def school_name(tenant_id: str) -> str:

@@ -15,7 +15,7 @@ from typing import Literal
 from env_config import load_backend_env
 from llm_request import current_llm_request
 from openai import OpenAI
-from workspace import school_ai
+from workspace import school_ai, school_vision
 
 load_backend_env()
 
@@ -138,6 +138,17 @@ def reader_endpoint(tenant_id: str) -> ModelEndpoint | None:
             "school",
         )
     return platform_reader_endpoint()
+
+
+def vision_endpoint(tenant_id: str) -> ModelEndpoint | None:
+    """学校配的识图模型。没有平台默认也没有个人密钥：识图会把学生的图片发给第三方，只能是学校明确选定的那一家。
+
+    网址、模型、密钥三项都填了才算开通。
+    """
+    vision = school_vision(tenant_id)
+    if not (vision.base_url and vision.model and vision.key):
+        return None
+    return ModelEndpoint(vision.key, _base_url(vision.base_url, vision.base_url), vision.model, "school")
 
 
 @dataclass(frozen=True)

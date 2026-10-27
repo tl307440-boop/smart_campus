@@ -101,6 +101,11 @@ model TenantAiConfig {
   /// 智谱 embedding-3 的密钥密文。学校管理员填的优先于服务器 .env
   embeddingKey      String @default("")
   embeddingKeyHint  String @default("")
+  /// 识图模型：学生附图提问时先由它把图读成文字，再交给对话模型回答。没有平台默认，不填就不开放图片提问
+  visionBaseUrl String   @default("")
+  visionModel   String   @default("")
+  visionKey     String   @default("")
+  visionKeyHint String   @default("")
   updatedAt     DateTime @updatedAt
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)

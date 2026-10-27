@@ -103,7 +103,7 @@ def test_workspace_is_readable_by_guest(client: TestClient, monkeypatch: pytest.
 def test_guest_chat_drops_byok_and_memory(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_events(thread_id, question, tenant_id, llm=None, user_id="", session_id="", replace_question=None):
+    def fake_events(thread_id, question, tenant_id, llm=None, user_id="", session_id="", replace_question=None, images=None):
         captured.update(thread_id=thread_id, llm=llm, user_id=user_id, tenant_id=tenant_id)
         yield "event: done\ndata: {}\n\n"
 
@@ -127,7 +127,7 @@ def test_guest_chat_drops_byok_and_memory(client: TestClient, monkeypatch: pytes
 def test_chat_records_the_question_before_answering(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, str] = {}
 
-    def fake_events(thread_id, question, tenant_id, llm=None, user_id="", session_id="", replace_question=None):
+    def fake_events(thread_id, question, tenant_id, llm=None, user_id="", session_id="", replace_question=None, images=None):
         yield "event: done\ndata: {}\n\n"
 
     def record(tenant_id: str, user_id: str, question: str) -> None:
@@ -143,7 +143,7 @@ def test_chat_records_the_question_before_answering(client: TestClient, monkeypa
 
 
 def test_chat_still_answers_when_the_question_log_breaks(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_events(thread_id, question, tenant_id, llm=None, user_id="", session_id="", replace_question=None):
+    def fake_events(thread_id, question, tenant_id, llm=None, user_id="", session_id="", replace_question=None, images=None):
         yield "event: done\ndata: {}\n\n"
 
     def broken(tenant_id: str, user_id: str, question: str) -> None:
@@ -158,7 +158,7 @@ def test_chat_still_answers_when_the_question_log_breaks(client: TestClient, mon
 def test_member_chat_keeps_user_id(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_events(thread_id, question, tenant_id, llm=None, user_id="", session_id="", replace_question=None):
+    def fake_events(thread_id, question, tenant_id, llm=None, user_id="", session_id="", replace_question=None, images=None):
         captured["user_id"] = user_id
         yield "event: done\ndata: {}\n\n"
 
@@ -301,7 +301,7 @@ def test_delete_session_writes_tombstone_and_drops_redis(client: TestClient, mon
 def test_member_chat_passes_session_id_only_with_database(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, str] = {}
 
-    def fake_events(thread_id, question, tenant_id, llm=None, user_id="", session_id="", replace_question=None):
+    def fake_events(thread_id, question, tenant_id, llm=None, user_id="", session_id="", replace_question=None, images=None):
         captured["session_id"] = session_id
         yield "event: done\ndata: {}\n\n"
 

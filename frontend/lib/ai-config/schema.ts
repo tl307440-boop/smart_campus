@@ -1,7 +1,7 @@
 /** 学校 AI 服务配置的请求体校验与对外形状。密钥只进不出：读回时只给末四位。 */
 import type { ValidationResult } from "@/lib/auth/schema";
 
-export const AI_SERVICES = ["chat", "reader"] as const;
+export const AI_SERVICES = ["chat", "reader", "vision"] as const;
 export type AiService = (typeof AI_SERVICES)[number];
 
 export const BASE_URL_MAX = 200;
@@ -92,6 +92,7 @@ export interface AiConfigView extends Record<AiService, AiEndpointView>, Record<
 const SERVICE_NAME: Record<AiService | KeyService, string> = {
   chat: "对话模型",
   reader: "长文档精读",
+  vision: "识图模型",
   map: "高德地图 Key",
   search: "博查搜索 Key",
 };
@@ -244,6 +245,8 @@ export function parseAiConfig(body: unknown): ValidationResult<AiConfigInput> {
   if (!chat.ok) return chat;
   const reader = parseEndpoint("reader", source.reader);
   if (!reader.ok) return reader;
+  const vision = parseEndpoint("vision", source.vision);
+  if (!vision.ok) return vision;
   const map = parseKey("map", source.map);
   if (!map.ok) return map;
   const search = parseKey("search", source.search);
@@ -259,6 +262,7 @@ export function parseAiConfig(body: unknown): ValidationResult<AiConfigInput> {
     value: {
       chat: chat.value,
       reader: reader.value,
+      vision: vision.value,
       map: map.value,
       search: search.value,
       jw: jw.value,

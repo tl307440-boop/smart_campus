@@ -65,7 +65,7 @@ export function EmbedChat({ assistantName, tenantName }: Props) {
       </div>
 
       <div className="border-t-2 border-ink px-4 py-3">
-        <Composer disabled={restoring || !threadId} busy={busy} onSend={send} onStop={stop} />
+        <Composer disabled={restoring || !threadId} busy={busy} onSend={(text) => void send(text)} onStop={stop} />
       </div>
     </div>
   );

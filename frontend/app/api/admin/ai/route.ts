@@ -25,6 +25,10 @@ const EMPTY: Row = {
   readerModel: "",
   readerKey: "",
   readerKeyHint: "",
+  visionBaseUrl: "",
+  visionModel: "",
+  visionKey: "",
+  visionKeyHint: "",
   mapKey: "",
   mapKeyHint: "",
   searchKey: "",
@@ -50,6 +54,7 @@ function toView(row: Row): AiConfigView {
       hasKey: Boolean(row.readerKey),
       keyHint: row.readerKeyHint,
     },
+    vision: { baseUrl: row.visionBaseUrl, model: row.visionModel, hasKey: Boolean(row.visionKey), keyHint: row.visionKeyHint },
     map: { hasKey: Boolean(row.mapKey), keyHint: row.mapKeyHint },
     search: { hasKey: Boolean(row.searchKey), keyHint: row.searchKeyHint },
     jw: {
@@ -104,10 +109,11 @@ export async function PUT(request: Request): Promise<NextResponse> {
   const parsed = parseAiConfig(body);
   if (!parsed.ok) return authError(AUTH_ERROR.INVALID_INPUT, parsed.message);
 
-  const { chat, reader, map, search, jw, newsUrls, embedding } = parsed.value;
+  const { chat, reader, vision, map, search, jw, newsUrls, embedding } = parsed.value;
   try {
     const chatKey = keyChange(chat);
     const readerKey = keyChange(reader);
+    const visionKey = keyChange(vision);
     const mapKey = keyChange(map);
     const searchKey = keyChange(search);
     const embeddingKey = keyChange(embedding);
@@ -116,6 +122,8 @@ export async function PUT(request: Request): Promise<NextResponse> {
       chatModel: chat.model,
       readerBaseUrl: reader.baseUrl,
       readerModel: reader.model,
+      visionBaseUrl: vision.baseUrl,
+      visionModel: vision.model,
       jwMode: jw.mode,
       jwCasUrl: jw.casUrl,
       jwBaseUrl: jw.baseUrl,
@@ -125,6 +133,7 @@ export async function PUT(request: Request): Promise<NextResponse> {
       embeddingBaseUrl: embedding.baseUrl,
       ...(chatKey && { chatKey: chatKey.key, chatKeyHint: chatKey.hint }),
       ...(readerKey && { readerKey: readerKey.key, readerKeyHint: readerKey.hint }),
+      ...(visionKey && { visionKey: visionKey.key, visionKeyHint: visionKey.hint }),
       ...(mapKey && { mapKey: mapKey.key, mapKeyHint: mapKey.hint }),
       ...(searchKey && { searchKey: searchKey.key, searchKeyHint: searchKey.hint }),
       ...(embeddingKey && { embeddingKey: embeddingKey.key, embeddingKeyHint: embeddingKey.hint }),
