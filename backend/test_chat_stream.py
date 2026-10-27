@@ -131,3 +131,35 @@ def test_chinese_is_not_escaped() -> None:
     frames = list(sse_from_graph_stream([("custom", {"delta": "校规"})]))
 
     assert "校规" in frames[1]
+
+
+def test_finish_runs_before_done_and_merges_its_fields() -> None:
+    """入库发生在 done 之前，它给的编号并进 done；工具事件也交给它判断这一轮的结局。"""
+    order: list[str] = []
+    seen: dict = {}
+
+    def finish(done: dict, tools: list[dict]) -> dict:
+        order.append("finish")
+        seen.update(answer=done["answer"], tools=tools)
+        return {"message_id": "m-1"}
+
+    events = [
+        ("custom", {"tool": {"name": "jw_grades", "label": "查成绩", "state": "running"}}),
+        ("updates", {"generate": {"final_answer": "绩点 3.6"}}),
+    ]
+    for frame in sse_from_graph_stream(events, finish):
+        order.append(frame.split("\n", 1)[0].removeprefix("event: "))
+
+    # 工具事件先发出去，finish 在 done 之前跑完
+    assert order == ["tool", "finish", "done"]
+    assert seen["answer"] == "绩点 3.6"
+    assert [tool["name"] for tool in seen["tools"]] == ["jw_grades"]
+
+
+def test_finish_fields_reach_the_client_and_none_is_fine() -> None:
+    events = [("updates", {"generate": {"final_answer": "好"}})]
+    _, payload = parse(list(sse_from_graph_stream(events, lambda done, tools: {"message_id": "m-9"})))[-1]
+    assert payload["message_id"] == "m-9" and payload["answer"] == "好"
+
+    _, payload = parse(list(sse_from_graph_stream(events, lambda done, tools: None)))[-1]
+    assert "message_id" not in payload

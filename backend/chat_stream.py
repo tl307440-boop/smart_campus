@@ -6,19 +6,25 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
+
+# 结束时的回调：拿到最终答案和这一轮用过的工具事件，返回要并进 done 帧的额外字段
+Finish = Callable[[dict[str, Any], list[dict[str, Any]]], dict[str, Any] | None]
 
 
 def sse(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def sse_from_graph_stream(events: Iterable[tuple[str, Any]]) -> Iterator[str]:
+def sse_from_graph_stream(events: Iterable[tuple[str, Any]], finish: Finish | None = None) -> Iterator[str]:
     """消费 graph.stream(stream_mode=["updates", "custom"]) 的 (mode, chunk) 序列。
 
     custom 是生成中的 token，来一个发一个；updates 是节点产出，用来发进度，
     并在结束时给出权威的完整答案（与写进 Redis 历史的那份一致）。
+
+    finish 在发 done 之前调用：入库、记录提问都放在这里，保证前端收到 done 时已经写完。
+    它返回的字段（比如刚入库那条回答的编号）会并进 done。它出错不能拖垮回答，由调用方自己兜住。
     """
     intent = ""
     context = ""
@@ -27,12 +33,14 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]]) -> Iterator[str]:
     emotion: dict[str, Any] | None = None
     safety: dict[str, Any] | None = None
     tables: list[dict[str, Any]] = []
+    tool_events: list[dict[str, Any]] = []
     generating_announced = False
 
     for mode, chunk in events:
         if mode == "custom":
             tool = chunk.get("tool") if isinstance(chunk, dict) else None
             if isinstance(tool, dict):
+                tool_events.append(tool)
                 yield sse("tool", tool)
                 continue
             delta = chunk.get("delta") if isinstance(chunk, dict) else None
@@ -73,15 +81,15 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]]) -> Iterator[str]:
             if node in ("generate", "finalize") and patch.get("safety"):
                 safety = patch["safety"]
 
-    yield sse(
-        "done",
-        {
-            "answer": answer,
-            "intent": intent,
-            "context": context,
-            "sources": sources,
-            "emotion": emotion,
-            "safety": safety,
-            "tables": tables,
-        },
-    )
+    done: dict[str, Any] = {
+        "answer": answer,
+        "intent": intent,
+        "context": context,
+        "sources": sources,
+        "emotion": emotion,
+        "safety": safety,
+        "tables": tables,
+    }
+    if finish is not None:
+        done.update(finish(done, tool_events) or {})
+    yield sse("done", done)

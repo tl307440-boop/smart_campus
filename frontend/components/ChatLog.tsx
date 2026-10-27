@@ -3,7 +3,7 @@
 import { ErrorNote } from "@/components/ErrorNote";
 import { MessageBubble } from "@/components/MessageBubble";
 import { WaitingNote } from "@/components/WaitingNote";
-import type { ChatMessage } from "@/lib/api";
+import type { ChatMessage, FeedbackRating, FeedbackReason } from "@/lib/api";
 import type { ChatProgress } from "@/lib/chat-progress";
 import { describeFailure, isFallbackAnswer, mayBeFallback } from "@/lib/friendly-error";
 
@@ -25,6 +25,8 @@ interface Props {
   noteProps: NoteProps;
   onRegenerate: () => void;
   onEdit: (text: string) => void;
+  /** 点赞点踩；挂件里的访客对话不入库，不传 */
+  onRate?: (id: string, rating: FeedbackRating, reason?: FeedbackReason) => Promise<void>;
 }
 
 interface Row {
@@ -76,6 +78,7 @@ export function ChatLog({
   noteProps,
   onRegenerate,
   onEdit,
+  onRate,
 }: Props) {
   const last = messages.at(-1);
   const answerFailed = failedAnswer(last);
@@ -107,6 +110,7 @@ export function ChatLog({
             latest={latest}
             onRegenerate={onRegenerate}
             onEdit={onEdit}
+            onRate={onRate}
           />
         );
       })}

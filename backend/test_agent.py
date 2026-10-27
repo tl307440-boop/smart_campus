@@ -26,6 +26,9 @@ class FakeRedis:
     def ltrim(self, key: str, start: int, end: int) -> None:
         self.lists[key] = self.lists[key][start:end + 1]
 
+    def lrange(self, key: str, start: int, end: int) -> list[str]:
+        return self.lists.get(key, [])[start:end + 1]
+
 
 @pytest.fixture
 def audit(monkeypatch: pytest.MonkeyPatch) -> FakeRedis:
@@ -290,3 +293,47 @@ def test_agent_stops_calling_tools_after_max_rounds(monkeypatch: pytest.MonkeyPa
     answer = agent.run(_ctx(), ENDPOINT, [], "图书馆在哪", lambda t: None, lambda e: None)
     assert answer == "资料里没找到。"
     assert len(requests) == agent.MAX_ROUNDS + 1
+
+
+def _seed_audit(audit: FakeRedis, tool: str, spent: list[int], ok: bool = True) -> None:
+    for ms in spent:
+        audit.lpush("tool_audit:t1", json.dumps({"ts": 1, "user": "u1", "tool": tool, "args": {}, "ok": ok, "error": "", "ms": ms}))
+
+
+def test_typical_ms_is_the_median_of_recent_successes(audit: FakeRedis) -> None:
+    _seed_audit(audit, "jw_free_rooms", [900, 100, 300])
+    _seed_audit(audit, "jw_free_rooms", [9999], ok=False)  # 失败的不算，免得把预估拉长
+    assert agent.typical_ms("t1", "jw_free_rooms") == 300
+    assert agent.typical_ms("t1", "jw_grades") is None
+
+
+def test_typical_ms_needs_enough_samples(audit: FakeRedis) -> None:
+    _seed_audit(audit, "jw_exams", [500, 600])
+    assert agent.typical_ms("t1", "jw_exams") is None
+
+
+def test_read_audit_skips_garbage_rows(audit: FakeRedis) -> None:
+    audit.lpush("tool_audit:t1", "not json")
+    audit.lpush("tool_audit:t1", json.dumps(["list"]))
+    _seed_audit(audit, "jw_exams", [100])
+    assert [item["tool"] for item in agent.read_audit("t1")] == ["jw_exams"]
+
+
+def test_tool_labels_cover_every_tool() -> None:
+    labels = agent.tool_labels()
+    assert labels["jw_free_rooms"] == "查空教室"
+    assert {"jw_timetable", "school_news", "web_search", "campus_place", "search_knowledge"} <= labels.keys()
+
+
+def test_running_event_carries_the_expected_wait(monkeypatch: pytest.MonkeyPatch, audit: FakeRedis) -> None:
+    _gate(monkeypatch, SchoolAi(jw_mode="demo"), False, False)
+    monkeypatch.setattr(jw_account, "school_ai", lambda tenant_id: SchoolAi(jw_mode="demo"))
+    monkeypatch.setattr(agent, "school_name", lambda tenant_id: "")
+    monkeypatch.setattr(agent, "client_for", lambda endpoint: FakeModel())
+    _seed_audit(audit, "jw_timetable", [2000, 2500, 3000])
+    events: list[dict[str, Any]] = []
+
+    agent.run(_ctx(), ENDPOINT, [], "我今天有什么课", lambda text: None, events.append)
+
+    assert events[0] == {"name": "jw_timetable", "label": "查课表", "state": "running", "eta_ms": 2500}
+    assert "eta_ms" not in events[1]

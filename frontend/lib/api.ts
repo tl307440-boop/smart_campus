@@ -38,6 +38,8 @@ export interface ChatToolEvent {
   label: string;
   state: "running" | "done";
   ok?: boolean;
+  /** 这个工具最近一般要多久（毫秒），样本够了才有；进度条按它估节奏 */
+  eta_ms?: number;
 }
 
 export type JwMode = "off" | "demo" | "zhengfang";
@@ -111,7 +113,21 @@ export interface ChatMessage {
   safety?: SafetyCardData | null;
   /** 这一轮查过的工具，只在前端内存里，刷新后没有 */
   tools?: ChatToolEvent[];
+  /** 助手回答在库里的编号，有它才能点赞点踩；访客和没入库的没有 */
+  serverId?: string;
+  /** 自己打的分：1 赞、-1 踩、0 没打 */
+  feedback?: FeedbackRating;
+  feedbackReason?: FeedbackReason;
 }
+
+export type FeedbackRating = 1 | -1 | 0;
+export type FeedbackReason = "" | "wrong" | "outdated" | "verbose" | "other";
+
+/** 后端 api.Message：比 ChatMessage 多一个库里的编号，没有前端自己的 id */
+export type StoredMessage = Omit<ChatMessage, "id" | "serverId" | "feedbackReason"> & {
+  id: string;
+  feedback_reason: FeedbackReason;
+};
 
 /** 会话列表的一行，与后端 api.SessionSummary 一一对应 */
 export interface SessionSummary {
@@ -149,6 +165,8 @@ export interface ChatDone {
   tables: ChatTable[];
   emotion: EmotionData | null;
   safety: SafetyCardData | null;
+  /** 这一轮入库后那条回答的编号；没入库（访客、库连不上）时没有 */
+  message_id?: string;
 }
 
 export interface ChatStatus {
@@ -199,7 +217,7 @@ export function createSession() {
 
 export async function fetchMessages(threadId: string) {
   try {
-    return await request<Omit<ChatMessage, "id">[]>(`/api/sessions/${encodeURIComponent(threadId)}/messages`);
+    return await request<StoredMessage[]>(`/api/sessions/${encodeURIComponent(threadId)}/messages`);
   } catch (err) {
     if (err instanceof ApiError && err.status === NOT_FOUND) throw new SessionGoneError(errorDetail(err));
     throw err;
@@ -308,6 +326,70 @@ export function importDocumentUrl(url: string) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ url }),
   });
+}
+
+/** 给自己会话里的一条回答点赞 / 点踩；rating 为 0 是取消。reason 只在点踩时有意义 */
+export function rateMessage(messageId: string, rating: FeedbackRating, reason: FeedbackReason = "") {
+  return request<void>("/api/feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message_id: messageId, rating, reason }),
+  });
+}
+
+export type UsageDays = 7 | 30 | 90;
+
+export interface UsageTotals {
+  questions: number;
+  guest: number;
+  comfort: number;
+  refused: number;
+  no_source: number;
+  /** 答上的占比（不含情绪倾诉）；这段时间没人问就是 null */
+  answer_rate: number | null;
+  up: number;
+  down: number;
+  tool_calls: number;
+  tool_failures: number;
+}
+
+export interface UsageTopQuestion {
+  question: string;
+  count: number;
+  last_at: string;
+}
+
+export interface UsageGap {
+  question: string;
+  count: number;
+  last_at: string;
+  /** refused 拒答 / no_source 没检索到资料 / downvoted 被点踩，各出现几次 */
+  kinds: Partial<Record<"refused" | "no_source" | "downvoted", number>>;
+  reasons: Partial<Record<Exclude<FeedbackReason, "">, number>>;
+  /** 被点踩的那条回答的开头，让管理员知道答了什么 */
+  answer_hint: string;
+}
+
+export interface UsageTool {
+  name: string;
+  label: string;
+  calls: number;
+  failures: number;
+  failure_rate: number;
+  avg_ms: number;
+  last_error: string;
+}
+
+export interface UsageReport {
+  days: number;
+  totals: UsageTotals;
+  top_questions: UsageTopQuestion[];
+  unanswered: UsageGap[];
+  tools: UsageTool[];
+}
+
+export function fetchUsage(days: UsageDays, signal?: AbortSignal) {
+  return request<UsageReport>(`/api/admin/usage?days=${days}`, { signal });
 }
 
 export function fetchMemories() {

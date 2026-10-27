@@ -16,6 +16,7 @@ import { SuggestedQuestions } from "@/components/SuggestedQuestions";
 import { TodayCard } from "@/components/TodayCard";
 import { useToast } from "@/components/Toast";
 import { type ToolTab, ToolDrawer } from "@/components/ToolDrawer";
+import { UsagePane } from "@/components/UsagePane";
 import { WorkspacePane } from "@/components/WorkspaceAdmin";
 import { PET_LOOK_EVENT } from "@/hooks/useDeskPet";
 import { useLessonReminders } from "@/hooks/useLessonReminders";
@@ -121,7 +122,7 @@ export default function ChatPage() {
     logout();
   }
 
-  const tabs: ToolTab[] = ["service", "memory", "jw", ...(isStaff ? (["knowledge"] as const) : []), ...(isAdmin ? (["workspace", "embeds"] as const) : [])];
+  const tabs: ToolTab[] = ["service", "memory", "jw", ...(isStaff ? (["knowledge"] as const) : []), ...(isAdmin ? (["usage", "workspace", "embeds"] as const) : [])];
   const noteProps = { canDebug: isStaff, canConfigure: isAdmin, onOpenService: openService };
 
   return (
@@ -171,6 +172,7 @@ export default function ChatPage() {
                   noteProps={noteProps}
                   onRegenerate={chat.regenerate}
                   onEdit={chat.editLast}
+                  onRate={chat.rate}
                 />
               </>
             )}
@@ -222,6 +224,7 @@ export default function ChatPage() {
           {drawer.tab === "memory" && <MemoryPane />}
           {drawer.tab === "jw" && <JwAccountPane />}
           {drawer.tab === "knowledge" && isStaff && <KnowledgePane />}
+          {drawer.tab === "usage" && isAdmin && <UsagePane />}
           {drawer.tab === "workspace" && isAdmin && <WorkspacePane onSaved={loadWorkspace} />}
           {drawer.tab === "embeds" && isAdmin && <EmbedPane />}
         </div>

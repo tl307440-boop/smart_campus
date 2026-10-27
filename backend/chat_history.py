@@ -149,15 +149,33 @@ def list_sessions(tenant_id: str, user_id: str, limit: int = LIST_DEFAULT_LIMIT)
 
 
 def load_messages(tenant_id: str, user_id: str, thread_id: str) -> list[dict[str, Any]] | None:
-    """这个人名下的会话返回全部消息；库里没有这一行（或不是他的）返回 None。"""
+    """这个人名下的会话返回全部消息，助手消息带上编号和他自己打的分；库里没有这一行（或不是他的）返回 None。"""
     with _connect() as conn, conn.cursor() as cur:
         if not _owned(cur, tenant_id, user_id, thread_id):
             return None
         cur.execute(
-            f'SELECT {_MESSAGE_COLUMNS} FROM chat_messages WHERE "sessionId" = %s ORDER BY seq',
-            (thread_id,),
+            'SELECT m.role, m.content, m.context, m.sources, m.tables, m.emotion, m.safety, '
+            "m.id, COALESCE(f.rating, 0), COALESCE(f.reason, '') "
+            'FROM chat_messages m LEFT JOIN message_feedbacks f ON f."messageId" = m.id AND f."userId" = %s '
+            'WHERE m."sessionId" = %s ORDER BY m.seq',
+            (user_id, thread_id),
         )
-        return [_message_row(r) for r in cur.fetchall()]
+        return [
+            {**_message_row(r[:7]), "id": r[7], "feedback": r[8], "feedback_reason": r[9]}
+            for r in cur.fetchall()
+        ]
+
+
+def message_id_at(tenant_id: str, user_id: str, thread_id: str, seq: int) -> str | None:
+    """某条消息的编号：一轮刚写进库时用，好让前端拿它来打分。"""
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT m.id FROM chat_messages m JOIN chat_sessions s ON s.id = m.\"sessionId\" "
+            'WHERE m."sessionId" = %s AND m.seq = %s AND s."tenantId" = %s AND s."userId" = %s',
+            (thread_id, seq, tenant_id, user_id),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
 
 
 def recent_messages(tenant_id: str, user_id: str, thread_id: str, limit: int) -> list[dict[str, Any]]:

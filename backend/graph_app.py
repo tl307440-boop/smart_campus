@@ -271,6 +271,11 @@ def _refusal(settings: WorkspaceSettings) -> str:
     )
 
 
+def refusal_text(tenant_id: str) -> str:
+    """这所学校拒答时说的那句话，用来从回答里认出「没答上来」。"""
+    return _refusal(workspace_settings(tenant_id or GLOBAL_TENANT))
+
+
 def recent_history(messages: list[dict[str, Any]], max_turns: int) -> list[dict[str, Any]]:
     """取最近若干轮的纯对话内容，作为发给模型的上下文。
 

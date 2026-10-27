@@ -9,6 +9,28 @@ export interface ChatProgress {
   label?: string;
   /** 发出去超过 SLOW_AFTER_MS 还没出第一个字 */
   slow: boolean;
+  /** 后端按这个工具最近的耗时估的等待时间（毫秒）；没攒够样本时没有 */
+  etaMs?: number;
+}
+
+/** 没有估计值时，进度条按这个节奏往上爬 */
+export const DEFAULT_ETA_MS = 4000;
+/** 比预估多等了这么多倍，就说「比平时慢」 */
+const OVERDUE_FACTOR = 1.5;
+const OVERDUE_GRACE_MS = 1000;
+
+/** 这一步已经等了多久，超过预估的 1.5 倍（再加 1 秒余量）才算比平时慢；没有预估就不下判断 */
+export function isOverdue(progress: ChatProgress, elapsedMs: number): boolean {
+  return progress.etaMs !== undefined && elapsedMs > progress.etaMs * OVERDUE_FACTOR + OVERDUE_GRACE_MS;
+}
+
+/**
+ * 进度条每一拍该往上限挪多少比例：等够预估时间，缺口收掉 80%。
+ * 所以预估 2 秒的工具爬得快，预估 10 秒的爬得慢，和真实耗时对得上。
+ */
+export function creepRate(tickMs: number, etaMs: number | undefined): number {
+  const eta = Math.max(etaMs ?? DEFAULT_ETA_MS, 500);
+  return 1 - 0.2 ** (tickMs / eta);
 }
 
 export const SLOW_AFTER_MS = 8000;
@@ -103,11 +125,13 @@ const PHASE_WHISPERS: Record<ChatPhase, string[]> = {
 };
 
 const SLOW_WHISPERS = ["有点慢，再等等我", "网络有点堵，我还在", "别走开，快好了"];
+const OVERDUE_WHISPERS = ["比平时慢一点，我还在等它回话", "它今天回得有点慢，不会丢的"];
 
-/** 进度条下面轮换的小字，让等待有点事可看 */
-export function whispers(progress: ChatProgress): string[] {
+/** 进度条下面轮换的小字，让等待有点事可看。overdue 是这一步比平时慢，这是真的，所以排在最前 */
+export function whispers(progress: ChatProgress, overdue = false): string[] {
   const own = (progress.phase === "jw" && progress.label && JW_WHISPERS[progress.label]) || PHASE_WHISPERS[progress.phase];
-  return progress.slow ? [...SLOW_WHISPERS, ...own] : own;
+  const slow = progress.slow ? SLOW_WHISPERS : [];
+  return [...(overdue ? OVERDUE_WHISPERS : []), ...slow, ...own];
 }
 
 /** 一句有人味的进度文案；助手名由学校在工作区设置里改 */
