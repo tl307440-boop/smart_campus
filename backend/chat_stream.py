@@ -33,6 +33,7 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]], finish: Finish | No
     emotion: dict[str, Any] | None = None
     safety: dict[str, Any] | None = None
     tables: list[dict[str, Any]] = []
+    follow_ups: list[str] = []
     tool_events: list[dict[str, Any]] = []
     generating_announced = False
 
@@ -75,6 +76,7 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]], finish: Finish | No
                 if patch.get("sources"):
                     sources = patch["sources"]
                 tables = patch.get("tables") or []
+                follow_ups = patch.get("follow_ups") or []
             elif node == "emotion":
                 emotion = patch.get("emotion_data")
             # 求助卡片：高危关键词在 generate 给出，情绪分析判出高风险时在 finalize 补上
@@ -89,6 +91,7 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]], finish: Finish | No
         "emotion": emotion,
         "safety": safety,
         "tables": tables,
+        "follow_ups": follow_ups,
     }
     if finish is not None:
         done.update(finish(done, tool_events) or {})

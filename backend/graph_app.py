@@ -137,6 +137,9 @@ class GraphState(TypedDict):
     # ---- 本轮工具查出的表格（agent.ToolContext.table），原样给前端 ----
     tables: list[dict[str, Any]]
 
+    # ---- 本轮工具查完后建议接着问的话（agent.ToolContext.suggest），只给前端当快捷按钮，不入库 ----
+    follow_ups: list[str]
+
     # ---- 本会话更早轮次的滚动摘要（chat_history），每轮由 api 从库里读出来放进输入 ----
     summary: str
 
@@ -590,6 +593,7 @@ def generate_node(state: GraphState) -> dict:
     out = _generate(state)
     out.setdefault("safety", None)
     out.setdefault("tables", [])
+    out.setdefault("follow_ups", [])
     return out
 
 
@@ -672,7 +676,10 @@ def _agent_answer(state: GraphState, question: str, settings: WorkspaceSettings,
                 emit(final_answer)
     logger.info(f"[生成节点] 工具问答完成，长度: {len(final_answer)} 字，来源 {len(ctx.sources)} 条，表格 {len(ctx.tables)} 张")
     updated_messages = _append_turn_messages(state, question, final_answer, sources=ctx.sources, tables=ctx.tables)
-    return {"final_answer": final_answer, "messages": updated_messages, "sources": ctx.sources, "tables": ctx.tables}
+    return {
+        "final_answer": final_answer, "messages": updated_messages, "sources": ctx.sources,
+        "tables": ctx.tables, "follow_ups": ctx.follow_ups,
+    }
 
 
 def _generate(state: GraphState) -> dict:

@@ -195,6 +195,7 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
               context: result.context,
               sources: result.sources,
               tables: result.tables ?? [],
+              followUps: result.follow_ups ?? [],
               emotion: result.emotion,
               safety: result.safety,
               tools,

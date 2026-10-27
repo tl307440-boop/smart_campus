@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MemoryPane, ServicePane } from "@/components/AgentSettings";
+import { CalendarPane } from "@/components/CalendarPane";
 import { ChatHeader } from "@/components/ChatHeader";
 import { ChatLog } from "@/components/ChatLog";
 import { Composer, type ComposerPrefill } from "@/components/Composer";
@@ -122,7 +123,8 @@ export default function ChatPage() {
     logout();
   }
 
-  const tabs: ToolTab[] = ["service", "memory", "jw", ...(isStaff ? (["knowledge"] as const) : []), ...(isAdmin ? (["usage", "workspace", "embeds"] as const) : [])];
+  const jwOn = today.status === "ready" && today.card.enabled;
+  const tabs: ToolTab[] = ["service", "memory", "jw", ...(jwOn ? (["calendar"] as const) : []), ...(isStaff ? (["knowledge"] as const) : []), ...(isAdmin ? (["usage", "workspace", "embeds"] as const) : [])];
   const noteProps = { canDebug: isStaff, canConfigure: isAdmin, onOpenService: openService };
 
   return (
@@ -157,6 +159,7 @@ export default function ChatPage() {
                       onReminderChange={setReminder}
                       onRetry={reloadToday}
                       onBind={() => openTool("jw")}
+                      onCalendar={() => openTool("calendar")}
                     />
                     <SuggestedQuestions disabled={busy || !threadId} onAsk={handleSend} />
                   </div>
@@ -173,6 +176,7 @@ export default function ChatPage() {
                   onRegenerate={chat.regenerate}
                   onEdit={chat.editLast}
                   onRate={chat.rate}
+                  onAsk={handleSend}
                 />
               </>
             )}
@@ -223,6 +227,7 @@ export default function ChatPage() {
           {drawer.tab === "service" && <ServicePane isAdmin={isAdmin} />}
           {drawer.tab === "memory" && <MemoryPane />}
           {drawer.tab === "jw" && <JwAccountPane />}
+          {drawer.tab === "calendar" && <CalendarPane />}
           {drawer.tab === "knowledge" && isStaff && <KnowledgePane />}
           {drawer.tab === "usage" && isAdmin && <UsagePane />}
           {drawer.tab === "workspace" && isAdmin && <WorkspacePane onSaved={loadWorkspace} />}

@@ -118,6 +118,8 @@ export interface ChatMessage {
   /** 自己打的分：1 赞、-1 踩、0 没打 */
   feedback?: FeedbackRating;
   feedbackReason?: FeedbackReason;
+  /** 查完教务后建议接着问的话，只在最新一条回答下面显示，刷新后没有 */
+  followUps?: string[];
 }
 
 export type FeedbackRating = 1 | -1 | 0;
@@ -163,6 +165,7 @@ export interface ChatDone {
   context: string;
   sources: ChatSource[];
   tables: ChatTable[];
+  follow_ups?: string[];
   emotion: EmotionData | null;
   safety: SafetyCardData | null;
   /** 这一轮入库后那条回答的编号；没入库（访客、库连不上）时没有 */
@@ -390,6 +393,62 @@ export interface UsageReport {
 
 export function fetchUsage(days: UsageDays, signal?: AbortSignal) {
   return request<UsageReport>(`/api/admin/usage?days=${days}`, { signal });
+}
+
+/** 课前几分钟提醒；0 = 不提醒。与后端 calendar_ics.ALARM_CHOICES 一致 */
+export const CALENDAR_ALARMS = [0, 5, 10, 15, 30, 60] as const;
+export type CalendarAlarm = (typeof CALENDAR_ALARMS)[number];
+
+export interface CalendarSubscription {
+  active: boolean;
+  alarm?: CalendarAlarm;
+  created_at?: number;
+}
+
+/** 刚生成的订阅：令牌只在这一次返回 */
+export interface NewCalendarSubscription {
+  token: string;
+  path: string;
+  alarm: CalendarAlarm;
+}
+
+/** 课表和考试导出成 .ics 文件并交给浏览器下载。需要带登录信息，所以不能用普通链接。 */
+export async function downloadCalendar(alarm: CalendarAlarm, termStart?: string): Promise<void> {
+  const query = new URLSearchParams({ alarm: String(alarm) });
+  if (termStart) query.set("term_start", termStart);
+  const response = await fetch(`${API_BASE}/api/calendar/export?${query}`, { headers: authHeaders() });
+  if (!response.ok) {
+    throw new ApiError(response.status, (await response.text().catch(() => "")) || `请求失败（${response.status}）`);
+  }
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "我的课表.ics";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+export function fetchCalendarSubscription() {
+  return request<CalendarSubscription>("/api/calendar/subscription");
+}
+
+export function createCalendarSubscription(alarm: CalendarAlarm) {
+  return request<NewCalendarSubscription>("/api/calendar/subscription", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ alarm }),
+  });
+}
+
+export function deleteCalendarSubscription() {
+  return request<void>("/api/calendar/subscription", { method: "DELETE" });
+}
+
+/** 填进手机日历的订阅地址：日历软件直接访问后端，所以用后端的地址 */
+export function calendarFeedUrl(path: string): string {
+  return `${API_BASE.replace(/\/+$/, "")}${path}`;
 }
 
 export function fetchMemories() {

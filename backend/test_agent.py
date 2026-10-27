@@ -143,6 +143,136 @@ def test_graduation_progress_reports_category_credits(monkeypatch: pytest.Monkey
     assert ctx.sources[0]["source"] == "教务系统·学业情况"
 
 
+def _demo_school(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(jw_account, "school_ai", lambda tenant_id: SchoolAi(jw_mode="demo"))
+    monkeypatch.setattr(agent, "school_ai", lambda tenant_id: SchoolAi(jw_mode="demo"))
+
+
+@pytest.mark.parametrize(
+    ("score", "failed"),
+    [("59", True), ("60", False), ("88.5", False), ("不及格", True), ("合格", False), ("缺考", True), ("", False), ("优", False)],
+)
+def test_failed_grade_detection(score: str, failed: bool) -> None:
+    assert agent.is_failed({"score": score}) is failed
+
+
+def test_gpa_is_computed_per_term_and_skips_unreadable_rows() -> None:
+    rows = [
+        {"term": "2025-1", "credit": "4", "gpa": "4.0"},
+        {"term": "2025-1", "credit": "2", "gpa": "1.0"},
+        {"term": "2025-2", "credit": "3", "gpa": "3.0"},
+        {"term": "2025-2", "credit": "2", "gpa": ""},
+    ]
+    assert agent.gpa_by_term(rows) == [
+        {"term": "2025-1", "credits": 6.0, "gpa": 3.0},
+        {"term": "2025-2", "credits": 3.0, "gpa": 3.0},
+    ]
+
+
+def test_grades_expose_per_term_gpa_failed_courses_and_followups(monkeypatch: pytest.MonkeyPatch) -> None:
+    _demo_school(monkeypatch)
+    rows = [
+        {"term": "2025-1", "course": "高数", "score": "55", "credit": "4", "gpa": "0", "type": "必修", "exam": ""},
+        {"term": "2025-2", "course": "英语", "score": "80", "credit": "3", "gpa": "3.0", "type": "必修", "exam": ""},
+    ]
+    monkeypatch.setattr(jw_account.DemoJw, "grades", lambda self, xnm="", xqm="": rows)
+    ctx = _ctx()
+    result = agent._grades(ctx, {})
+    assert [t["term"] for t in result["gpa_by_term"]] == ["2025-1", "2025-2"]
+    assert result["failed_courses"] == [{"term": "2025-1", "course": "高数", "score": "55", "credit": "4"}]
+    assert ctx.follow_ups == ["每学期的绩点分别是多少", "没通过的课要怎么补考重修"]
+
+
+def test_followups_are_deduplicated_and_capped() -> None:
+    ctx = _ctx()
+    ctx.suggest("a", "a", "b", "", "c", "d", "e")
+    assert ctx.follow_ups == ["a", "b", "c"]
+
+
+def test_free_rooms_suggests_navigating_to_the_busiest_building_only_with_a_map(monkeypatch: pytest.MonkeyPatch) -> None:
+    _demo_school(monkeypatch)
+    rooms = [{"room": "1号楼 101", "building": "1号楼"}, {"room": "2号楼 201", "building": "2号楼"}, {"room": "2号楼 202", "building": "2号楼"}]
+    monkeypatch.setattr(jw_account.DemoJw, "free_rooms", lambda self, *args: rooms)
+    monkeypatch.setattr(agent, "map_key", lambda tenant_id: None)
+    without_map = _ctx(date(2026, 10, 12))
+    agent._free_rooms(without_map, {})
+    assert without_map.follow_ups == ["明天同一时段呢"]
+
+    monkeypatch.setattr(agent, "map_key", lambda tenant_id: ToolKey("k", "school"))
+    with_map = _ctx(date(2026, 10, 12))
+    agent._free_rooms(with_map, {})
+    assert with_map.follow_ups == ["2号楼怎么走", "明天同一时段呢"]
+
+
+def test_busiest_building_falls_back_to_the_room_name_prefix() -> None:
+    assert agent._busiest_building([{"room": "3号楼 101"}, {"room": "3号楼 102"}, {"room": "4号楼 1"}]) == "3号楼"
+    assert agent._busiest_building([]) == ""
+
+
+def test_timetable_and_exams_point_to_the_calendar_export(monkeypatch: pytest.MonkeyPatch) -> None:
+    _demo_school(monkeypatch)
+    ctx = _ctx(date(2026, 10, 12))
+    assert "日历" in agent._timetable(ctx, {})["calendar_hint"]
+    exams = agent._exams(ctx, {})
+    assert "日历" in exams["calendar_hint"]
+    assert "帮我排一个考前复习计划" in ctx.follow_ups
+
+
+def test_graduation_offers_followups_for_failed_courses_and_missing_credits(monkeypatch: pytest.MonkeyPatch) -> None:
+    _demo_school(monkeypatch)
+    ctx = _ctx()
+    agent._graduation(ctx, {})
+    assert ctx.follow_ups == ["我有哪几门课没通过", "按现在的进度，学分缺口怎么补"]
+
+
+def test_first_monday() -> None:
+    assert agent.first_monday(date(2026, 10, 14), 7) == date(2026, 8, 31)
+    assert agent.first_monday(date(2026, 9, 7), 1) == date(2026, 9, 7)
+
+
+def test_school_calendar_answers_week_questions_from_the_jw_week(monkeypatch: pytest.MonkeyPatch) -> None:
+    _demo_school(monkeypatch)
+    ctx = _ctx(date(2026, 10, 14))  # 演示教务：本周是第 7 周
+    result = agent._calendar(ctx, {"date": "2026-11-02", "week": 10})
+    assert result["current_week"] == 7 and result["week1_monday"] == "2026-08-31"
+    assert result["asked"] == {"date": "2026-11-02", "weekday": "星期一", "week": 10}
+    assert result["asked_week"] == {"week": 10, "from": "2026-11-02", "to": "2026-11-08"}
+    assert "search_knowledge" in result["note"]
+
+
+def test_school_calendar_does_not_guess_when_the_week_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    _demo_school(monkeypatch)
+    monkeypatch.setattr(jw_account.DemoJw, "current_week", lambda self: None)
+    result = agent._calendar(_ctx(date(2026, 8, 20)), {"week": 3})
+    assert result["current_week"] is None and "asked_week" not in result and "week1_monday" not in result
+    assert "不要猜" in result["note"]
+
+
+def test_school_calendar_survives_an_unbound_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unbound(*args: Any, **kwargs: Any) -> Any:
+        raise JwAuthError("你还没有绑定教务账号")
+
+    monkeypatch.setattr(agent, "school_ai", lambda tenant_id: SchoolAi(jw_mode="zhengfang"))
+    monkeypatch.setattr(jw_account, "source_for", unbound)
+    result = agent._calendar(_ctx(date(2026, 10, 14)), {})
+    assert result["current_week"] is None and result["today"] == "2026-10-14"
+
+
+def test_school_calendar_is_only_offered_with_jw(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agent, "school_ai", lambda tenant_id: SchoolAi(jw_mode="demo"))
+    monkeypatch.setattr(agent, "map_key", lambda tenant_id: None)
+    monkeypatch.setattr(agent, "search_key", lambda tenant_id: None)
+    names = {t.name for t in agent.available_tools("t1", "u1", WorkspaceSettings())}
+    assert "school_calendar" in names
+    assert "school_calendar" not in {t.name for t in agent.available_tools("t1", "", WorkspaceSettings())}
+
+
+def test_week_questions_are_routed_to_tools() -> None:
+    assert agent.needs_tools("现在是第几周", {"jw_grades"})
+    assert agent.needs_tools("什么时候放假", {"jw_grades"})
+    assert not agent.needs_tools("你好呀", {"jw_grades"})
+
+
 @pytest.mark.parametrize(
     ("question", "names", "expected"),
     [
