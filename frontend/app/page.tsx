@@ -54,11 +54,15 @@ export default function ChatPage() {
   const [drawer, setDrawer] = useState<{ tab: ToolTab; open: boolean; n: number }>({ tab: "service", open: false, n: 0 });
   const [historyOpen, setHistoryOpen] = useState(false);
   const [assistantName, setAssistantName] = useState<string | null>(null);
+  const [visionOn, setVisionOn] = useState(false);
   const [prefill, setPrefill] = useState<ComposerPrefill>({ text: "", n: 0 });
 
   const loadWorkspace = useCallback(() => {
     fetchWorkspace()
-      .then((workspace) => setAssistantName(workspace.assistant_name || DEFAULT_ASSISTANT_NAME))
+      .then((workspace) => {
+        setAssistantName(workspace.assistant_name || DEFAULT_ASSISTANT_NAME);
+        setVisionOn(workspace.vision === true);
+      })
       .catch(() => setAssistantName((name) => name ?? DEFAULT_ASSISTANT_NAME));
   }, []);
   useEffect(loadWorkspace, [loadWorkspace]);
@@ -89,8 +93,8 @@ export default function ChatPage() {
   const openService = useCallback(() => openTool("service"), [openTool]);
   const closeHistory = useCallback(() => setHistoryOpen(false), []);
 
-  function handleSend(text: string) {
-    void chat.send(text);
+  function handleSend(text: string, images?: string[]) {
+    void chat.send(text, { images });
     // 等新提问画到纸上，再让桌宠转头看它
     requestAnimationFrame(() =>
       requestAnimationFrame(() => {
@@ -204,6 +208,7 @@ export default function ChatPage() {
               onStop={chat.stop}
               prefill={prefill}
               lastQuestion={lastQuestion}
+              allowImages={visionOn}
             />
           </div>
         </div>

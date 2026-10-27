@@ -83,6 +83,16 @@ export function StopIcon(props: IconProps) {
   );
 }
 
+export function ImageIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4.6 5.6h14.8c.4 0 .7.3.7.7l-.2 11.5c0 .4-.3.7-.7.7H4.5c-.4 0-.7-.3-.7-.7l.1-11.5c0-.4.3-.7.7-.7z" />
+      <path d="M4.2 16.4l4.4-4.5 3.2 3.2 2.4-2.4 5.6 5.1" />
+      <path d="M15.2 9.6a.9.9 0 1 0 .01 0" />
+    </Svg>
+  );
+}
+
 export function CloseIcon(props: IconProps) {
   return (
     <Svg {...props}>

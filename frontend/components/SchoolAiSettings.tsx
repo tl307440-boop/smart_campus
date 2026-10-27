@@ -21,17 +21,29 @@ import { useToast } from "@/components/Toast";
 const DEFAULTS: Record<AiService, { baseUrl: string; model: string }> = {
   chat: { baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
   reader: { baseUrl: "https://api.moonshot.cn/v1", model: "kimi-k2-0905-preview" },
+  // 识图没有默认值：三项都要学校自己填，没填就不开放图片提问
+  vision: { baseUrl: "", model: "" },
 };
+
+/** 都是 OpenAI 兼容接口、支持看图的模型；点一下只是帮着填网址和模型 ID，密钥还得自己填 */
+const VISION_PRESETS = [
+  { label: "智谱 GLM-4V-Flash", baseUrl: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4v-flash" },
+  { label: "Kimi 视觉", baseUrl: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k-vision-preview" },
+  { label: "通义千问 VL", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-vl-plus" },
+] as const;
 
 const ROWS: { service: AiServiceName; name: string; use: string }[] = [
   { service: "chat", name: "对话模型", use: "判断问题、回答、情绪分析" },
   { service: "reader", name: "长文档精读", use: "资料不多时整篇读，摘出相关段落" },
+  { service: "vision", name: "图片提问", use: "学生拍课表、通知、表格来问；单独的识图模型把图读成文字，图片不保存" },
   { service: "embedding", name: "知识库向量化", use: "智谱 embedding-3，把资料切成片段再检索" },
   { service: "jw", name: "教务查询", use: "学生绑定账号后查课表、考试、成绩、空教室" },
   { service: "news", name: "学校通知", use: "从官网、教务处的列表页读最新通知" },
   { service: "map", name: "地图问路", use: "新生找教学楼、食堂、校门，规划步行路线" },
   { service: "search", name: "联网搜索", use: "学校资料里没有的最新信息" },
 ];
+
+const ENDPOINT_TITLE: Record<AiService, string> = { chat: "对话模型", reader: "长文档精读", vision: "图片提问（识图模型）" };
 
 const SOURCE_TEXT = { school: "学校配置", platform: "平台默认" } as const;
 const JW_MODE_TEXT: Record<JwMode, string> = { off: "关闭", demo: "演示数据", zhengfang: "正方教务" };
@@ -68,6 +80,7 @@ function toDrafts(view: AiConfigView): Drafts {
   return {
     chat: draft("chat"),
     reader: draft("reader"),
+    vision: draft("vision"),
     map: { apiKey: "", clearKey: false },
     search: { apiKey: "", clearKey: false },
     jw: { ...view.jw },
@@ -86,6 +99,7 @@ function statusText(service: AiServiceName, status: AiStatus[AiServiceName] | un
   if (!status) return "读取中…";
   if (!status.configured || !status.source) {
     if (service === "embedding") return "未配置：请管理员填写智谱密钥";
+    if (service === "vision") return "未开通：学生暂时不能附图提问";
     if (service === "jw") return "关闭";
     return "未配置";
   }
@@ -257,10 +271,18 @@ function EndpointForm({
   onChange: (patch: Partial<AiEndpointInput>) => void;
 }) {
   const fallback = DEFAULTS[service];
+  const isVision = service === "vision";
+  const presets: readonly { label: string; baseUrl: string; model: string }[] = isVision ? VISION_PRESETS : Object.values(PROVIDERS);
   return (
     <div className="space-y-3">
+      {isVision && (
+        <p className="text-sm text-muted">
+          网址、模型、密钥三项都填了，学生才会在输入框旁看到「附图」。学生拍的图会发给这里选的服务商来读，学校这边不保存图片；
+          图里的个人证件号会被要求不转写。选之前请确认这家服务商的数据政策你们能接受。
+        </p>
+      )}
       <div className="flex flex-wrap gap-1.5" role="group" aria-label="常用服务商，点一下填好网址和模型">
-        {Object.values(PROVIDERS).map((preset) => (
+        {presets.map((preset) => (
           <button
             key={preset.label}
             type="button"
@@ -283,7 +305,7 @@ function EndpointForm({
         <input
           value={draft.baseUrl}
           onChange={(event) => onChange({ baseUrl: event.target.value })}
-          placeholder={`留空用 ${fallback.baseUrl}`}
+          placeholder={isVision ? "必填，如 https://open.bigmodel.cn/api/paas/v4" : `留空用 ${fallback.baseUrl}`}
           className="field"
         />
       </label>
@@ -292,7 +314,7 @@ function EndpointForm({
         <input
           value={draft.model}
           onChange={(event) => onChange({ model: event.target.value })}
-          placeholder={`留空用 ${fallback.model}`}
+          placeholder={isVision ? "必填，要选支持看图的模型，如 glm-4v-flash" : `留空用 ${fallback.model}`}
           className="field"
         />
       </label>
@@ -317,7 +339,7 @@ function EndpointForm({
             onChange={(event) => onChange({ clearKey: event.target.checked, apiKey: "" })}
             className="size-4 accent-pink"
           />
-          清除已保存的密钥（改用平台默认）
+          {isVision ? "清除已保存的密钥（关闭图片提问）" : "清除已保存的密钥（改用平台默认）"}
         </label>
       )}
     </div>
@@ -379,7 +401,7 @@ export function SchoolAiSettings({ isAdmin }: { isAdmin: boolean }) {
       setView(saved);
       setDrafts(toDrafts(saved));
       // 后端把学校配置缓存 60 秒，测试接口会先丢掉缓存，所以先测再读状态
-      for (const service of ["chat", "reader", "map", "search"] as const) {
+      for (const service of ["chat", "reader", "vision", "map", "search"] as const) {
         if (saved[service].hasKey || status?.[service].configured) await runTest(service);
       }
       await runTest("embedding");
@@ -452,9 +474,9 @@ export function SchoolAiSettings({ isAdmin }: { isAdmin: boolean }) {
               }
             />
           </fieldset>
-          {(["chat", "reader"] as const).map((service) => (
+          {(["chat", "reader", "vision"] as const).map((service) => (
             <fieldset key={service} className="mt-4 border-t border-dashed border-rule pt-3">
-              <legend className="pr-2 font-display text-base">{service === "chat" ? "对话模型" : "长文档精读"}</legend>
+              <legend className="pr-2 font-display text-base">{ENDPOINT_TITLE[service]}</legend>
               <EndpointForm
                 service={service}
                 view={view[service]}
