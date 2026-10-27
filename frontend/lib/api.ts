@@ -50,6 +50,40 @@ export interface JwAccount {
   boundAt: number | null;
 }
 
+/** 与后端 today_card.build_card 一一对应；时间都是 "08:00"，教务没给节次时间时为空串 */
+export interface TodayLesson {
+  course: string;
+  periods: string;
+  start: string;
+  end: string;
+  room: string;
+  teacher: string;
+}
+
+export interface TodayExam {
+  course: string;
+  name: string;
+  /** YYYY-MM-DD */
+  date: string;
+  start: string;
+  end: string;
+  room: string;
+  seat: string;
+  days_left: number;
+}
+
+/** enabled=false 学校没开教务；bound=false 学生还没绑定，后面的字段都没有 */
+export interface TodayCardData {
+  enabled: boolean;
+  bound: boolean;
+  date?: string;
+  weekday?: string;
+  week?: number | null;
+  week_unknown?: boolean;
+  lessons?: TodayLesson[];
+  exams?: TodayExam[];
+}
+
 /** 与后端 comfort.safety_card 一一对应 */
 export interface SafetyCardData {
   level: "crisis";
@@ -224,6 +258,11 @@ export function testAiService(service: AiServiceName) {
 
 export function fetchJwAccount() {
   return request<JwAccount>("/api/jw/account");
+}
+
+/** day 是学生本机的日期（YYYY-MM-DD），免得服务器在别的时区时凌晨看到昨天的课 */
+export function fetchTodayCard(day: string, signal?: AbortSignal) {
+  return request<TodayCardData>(`/api/today?day=${encodeURIComponent(day)}`, { signal });
 }
 
 /** 需要验证码时返回 { captcha: 图片 base64 }，填好后连同账号密码再提交一次 */

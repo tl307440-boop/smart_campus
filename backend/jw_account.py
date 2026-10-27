@@ -48,6 +48,11 @@ def _cred_key(tenant_id: str, user_id: str) -> str:
     return f"jw:cred:{tenant_id}:{user_id}"
 
 
+def today_card_key(tenant_id: str, user_id: str) -> str:
+    """今日卡片的缓存（见 today_card.py）。换绑、解绑时必须清掉，不然新账号会先看到上一个人的课表。"""
+    return f"today_card:{tenant_id}:{user_id}"
+
+
 def _pending_key(tenant_id: str, user_id: str) -> str:
     return f"jw:pending:{tenant_id}:{user_id}"
 
@@ -189,7 +194,7 @@ def wecom_poll(tenant_id: str, user_id: str, qr_id: str) -> dict[str, Any]:
 
 
 def unbind(tenant_id: str, user_id: str) -> None:
-    _redis().delete(_cred_key(tenant_id, user_id), _pending_key(tenant_id, user_id))
+    _redis().delete(_cred_key(tenant_id, user_id), _pending_key(tenant_id, user_id), today_card_key(tenant_id, user_id))
 
 
 def _save(tenant_id: str, user_id: str, client: ZhengfangClient, username: str, bound_at: float | None = None) -> None:
@@ -199,6 +204,8 @@ def _save(tenant_id: str, user_id: str, client: ZhengfangClient, username: str, 
         "cookies": secret_box.encrypt(json.dumps(client.export_cookies()), _INFO),
     }
     _redis().set(_cred_key(tenant_id, user_id), json.dumps(meta), ex=CRED_TTL)
+    if bound_at is None:  # 新绑定；用完一次查询把会话续上时不用动
+        _redis().delete(today_card_key(tenant_id, user_id))
 
 
 @contextmanager

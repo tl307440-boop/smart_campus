@@ -191,24 +191,33 @@ def _target_days(ctx: ToolContext, day: str, weekday: Any) -> list[tuple[date, i
     return [(d, (d - timedelta(days=d.weekday()) - monday).days // 7) for d in days]
 
 
+def lessons_on(data: dict[str, Any], day: date, week: int | None) -> list[dict[str, Any]]:
+    """课表里落在 day 这一天的课，按节次排好；week 是 day 所在的第几周，不知道就别按周次筛。
+
+    每节课多带 time（"08:00-09:40"）、start、end，教务没给节次时间时为空串。
+    """
+    times = {p["period"]: p for p in data.get("periods", [])}
+    lessons = []
+    for c in sorted(data["courses"], key=lambda c: _periods_of(c["periods"])[:1] or [0]):
+        if c["weekday"] != day.isoweekday() or (week and week not in _weeks_of(c["weeks"])):
+            continue
+        periods = _periods_of(c["periods"])
+        start = times.get(str(periods[0]), {}).get("start", "") if periods else ""
+        end = times.get(str(periods[-1]), {}).get("end", "") if periods else ""
+        lessons.append({**c, "time": f"{start}-{end}" if start else "", "start": start, "end": end})
+    return lessons
+
+
 def _timetable(ctx: ToolContext, args: dict[str, Any]) -> Any:
     xnm, xqm = current_term(ctx.today)
     with jw_account.source_for(ctx.tenant_id, ctx.user_id) as jw:
         week = jw.current_week()
         data = jw.timetable(xnm, xqm)
     ctx._campus_id = data.get("campus_id", "")
-    times = {p["period"]: p for p in data.get("periods", [])}
     out = []
     for day, week_shift in _target_days(ctx, str(args.get("day") or "today"), args.get("weekday")):
         target_week = (week or 0) + week_shift
-        lessons = []
-        for c in sorted(data["courses"], key=lambda c: _periods_of(c["periods"])[:1] or [0]):
-            if c["weekday"] != day.isoweekday() or (week and target_week not in _weeks_of(c["weeks"])):
-                continue
-            periods = _periods_of(c["periods"])
-            start = times.get(str(periods[0]), {}).get("start", "") if periods else ""
-            end = times.get(str(periods[-1]), {}).get("end", "") if periods else ""
-            lessons.append({**c, "time": f"{start}-{end}" if start else ""})
+        lessons = lessons_on(data, day, target_week if week else None)
         out.append({"date": day.isoformat(), "weekday": f"星期{WEEKDAYS[day.weekday()]}", "week": target_week or None, "courses": lessons})
     ctx.cite("教务系统·个人课表")
     result: dict[str, Any] = {"current_week": week, "days": out}

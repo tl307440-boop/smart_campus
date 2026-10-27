@@ -9,6 +9,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from datetime import date
 from typing import Annotated, Any, Literal
 
 import chat_history
@@ -19,6 +20,7 @@ import memory_store
 import outbound
 import school_tools
 import session_summary
+import today_card
 from ai_config import (
     READER_TIMEOUT_SECONDS,
     ModelEndpoint,
@@ -369,6 +371,18 @@ def _jw_http_error(exc: Exception) -> HTTPException:
 def unbind_jw_account(user: MemberDep) -> dict[str, Any]:
     jw_account.unbind(user.tenant_id, user.id)
     return jw_account.status(user.tenant_id, user.id)
+
+
+@app.get("/api/today")
+def get_today_card(
+    user: MemberDep,
+    day: str | None = Query(None, max_length=10, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+) -> dict[str, Any]:
+    """今天的课和临近的考试。day 是学生本机的日期，只在服务器日期前后一天内才采信。"""
+    try:
+        return today_card.build_card(user.tenant_id, user.id, today_card.clamp_day(day, date.today()))
+    except JW_ERRORS as exc:
+        raise _jw_http_error(exc) from exc
 
 
 # ============================================================

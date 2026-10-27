@@ -114,6 +114,31 @@ def test_cas_outage_keeps_binding(env: tuple[FakeRedis, FakeSchool], monkeypatch
     assert jw_account.status("t1", "u1")["bound"] is True
 
 
+def test_rebinding_and_unbinding_drop_the_cached_today_card(env: tuple[FakeRedis, FakeSchool]) -> None:
+    fake, _ = env
+    key = jw_account.today_card_key("t1", "u1")
+
+    fake.data[key] = '{"date": "2026-10-12", "lessons": ["上一个账号的课"]}'
+    jw_account.bind("t1", "u1", "2023001", "secret")
+    assert key not in fake.data  # 换了账号，不能先给他看上一个人的课表
+
+    fake.data[key] = "{}"
+    jw_account.unbind("t1", "u1")
+    assert key not in fake.data
+
+
+def test_a_normal_query_keeps_the_cached_today_card(env: tuple[FakeRedis, FakeSchool]) -> None:
+    fake, _ = env
+    jw_account.bind("t1", "u1", "2023001", "secret")
+    key = jw_account.today_card_key("t1", "u1")
+    fake.data[key] = "{}"
+
+    with jw_account.source_for("t1", "u1") as jw:  # 用完会把续上的会话存回去，但这不是换绑
+        jw.grades()
+
+    assert key in fake.data
+
+
 def test_unbound_student_gets_bind_hint(env: tuple[FakeRedis, FakeSchool]) -> None:
     with pytest.raises(JwAuthError, match="还没有绑定"):
         with jw_account.source_for("t1", "u2"):
