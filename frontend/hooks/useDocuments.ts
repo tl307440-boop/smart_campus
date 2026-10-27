@@ -35,11 +35,11 @@ export function useDocuments() {
     };
   }, []);
 
+  // 索引都建好了就把「卡住」清掉；放在渲染里而不是 effect 里，免得多渲染一轮
+  if (!indexPending && indexStalled) setIndexStalled(false);
+
   useEffect(() => {
-    if (!indexPending) {
-      setIndexStalled(false);
-      return;
-    }
+    if (!indexPending) return;
     const timer = window.setTimeout(() => setIndexStalled(true), 120_000);
     return () => window.clearTimeout(timer);
   }, [indexPending]);
