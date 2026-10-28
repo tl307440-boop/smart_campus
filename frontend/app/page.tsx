@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { MemoryPane, ServicePane } from "@/components/AgentSettings";
+import { ServicePane } from "@/components/AgentSettings";
+import { MemoryPane } from "@/components/MemoryPane";
 import { CalendarPane } from "@/components/CalendarPane";
 import { ChatHeader } from "@/components/ChatHeader";
 import { ChatLog } from "@/components/ChatLog";

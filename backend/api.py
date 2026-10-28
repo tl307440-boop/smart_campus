@@ -57,7 +57,7 @@ from env_config import load_backend_env
 from fastapi import FastAPI, File, HTTPException, Path, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from graph_app import MAX_STORED_TURNS, build_graph, get_vector_db, refusal_text
+from graph_app import MAX_STORED_TURNS, build_graph, configure_memory_embedding, get_vector_db, refusal_text
 from jw_zhengfang import JwAuthError, JwCaptcha, JwError
 from knowledge import knowledge_base
 from llm_request import LlmRequest, stream_with_llm_request
@@ -86,6 +86,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # 密钥缺失时宁可起不来，也不要让所有接口裸奔
     jwt_secret()
     knowledge_base.autoload()
+    # 记忆检索复用学校配的智谱 embedding；没配的学校自动退回词匹配
+    configure_memory_embedding()
     yield
 
 
@@ -180,10 +182,20 @@ class MemoryResponse(BaseModel):
     content: str
     created_at: float
     origin: str
+    kind: str
+    slot: str
+    pinned: bool
+    # 由用户自己明确说「记住」的内容可能带隐私，前端据此加一句提醒，不写进提示词
+    sensitive: bool
 
 
 class MemoryCreate(BaseModel):
     contents: list[str] = Field(..., min_length=1, max_length=memory_store.MAX_MEMORIES)
+
+
+class MemoryUpdate(BaseModel):
+    content: str | None = Field(default=None, max_length=memory_store.MAX_MEMORY_CHARS)
+    pinned: bool | None = None
 
 
 class UrlImport(BaseModel):
@@ -717,6 +729,8 @@ def _persist_turn(graph: Any, config: dict[str, Any], tenant_id: str, user_id: s
         logger.warning(f"[History] 会话 {session_id} 这一轮没写进库: {exc}")
         return None
     session_summary.schedule(tenant_id, user_id, session_id, chat_endpoint(tenant_id))
+    # 顺手整理这个人的长期记忆（每天最多一次，后台跑，不影响这一轮）
+    memory_store.schedule_tidy(tenant_id, user_id)
     try:
         return chat_history.message_id_at(tenant_id, user_id, session_id, seq)
     except Exception as exc:
@@ -761,6 +775,8 @@ def _graph_events(thread_id: str, question: str, tenant_id: str, user_id: str,
     remembered = memory_store.take_remember_command(question) if user_id else None
     if remembered:
         try:
+            # 第一次写入前先把 Redis 里的旧记忆搬进库，免得这次新增把老条目挤掉
+            memory_store.migrate_from_redis(tenant_id, user_id)
             memory_store.add_memories(tenant_id, user_id, [remembered])
             yield sse("status", {"stage": "remembered", "content": remembered})
         except Exception as exc:
@@ -976,21 +992,49 @@ def clear_documents(user: KnowledgeManagerDep) -> dict[str, str]:
 
 def _memory_response(note: memory_store.MemoryNote) -> MemoryResponse:
     return MemoryResponse(
-        id=note.id, content=note.content, created_at=note.created_at, origin=note.origin
+        id=note.id,
+        content=note.content,
+        created_at=note.created_at,
+        origin=note.origin,
+        kind=note.kind,
+        slot=note.slot,
+        pinned=note.pinned,
+        sensitive=note.sensitive,
     )
 
 
 @app.get("/api/memories", response_model=list[MemoryResponse])
 def list_memories(user: MemberDep) -> list[MemoryResponse]:
     notes = memory_store.list_memories(user.tenant_id, user.id)
+    if not notes:
+        # 升级后第一次打开：把还留在 Redis 里的旧记忆搬过来，别让学生觉得记忆丢了
+        memory_store.migrate_from_redis(user.tenant_id, user.id)
+        notes = memory_store.list_memories(user.tenant_id, user.id)
     return [_memory_response(note) for note in notes]
 
 
 @app.post("/api/memories", response_model=list[MemoryResponse])
 def add_memories(payload: MemoryCreate, user: MemberDep) -> list[MemoryResponse]:
-    """一次可写多条：浏览器里旧版 localStorage 记忆迁移时整批上传。"""
-    added = memory_store.add_memories(user.tenant_id, user.id, payload.contents)
-    return [_memory_response(note) for note in added]
+    """一次可写多条：浏览器里旧版 localStorage 记忆迁移时整批上传。
+
+    用户主动写的按 manual 存，即使带隐私也照存（是他自己要求记的），
+    但会标上 sensitive，之后不会自动注入提示词。
+    """
+    written = memory_store.add_memories(user.tenant_id, user.id, payload.contents)
+    return [_memory_response(note) for note in written]
+
+
+@app.patch("/api/memories/{memory_id}", response_model=MemoryResponse)
+def update_memory(memory_id: str, payload: MemoryUpdate, user: MemberDep) -> MemoryResponse:
+    """改内容或置顶：学生发现自己记错了、或者年级变了，可以自己订正。"""
+    if payload.content is None and payload.pinned is None:
+        raise HTTPException(status_code=400, detail="没有要改的内容")
+    note = memory_store.update_memory(
+        user.tenant_id, user.id, memory_id, content=payload.content, pinned=payload.pinned
+    )
+    if note is None:
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    return _memory_response(note)
 
 
 @app.delete("/api/memories/{memory_id}")
@@ -998,3 +1042,10 @@ def delete_memory(memory_id: str, user: MemberDep) -> dict[str, str]:
     if not memory_store.delete_memory(user.tenant_id, user.id, memory_id):
         raise HTTPException(status_code=404, detail="记忆不存在")
     return {"status": "deleted"}
+
+
+@app.delete("/api/memories")
+def clear_memories(user: MemberDep) -> dict[str, Any]:
+    """一键忘掉全部：学生换号、转专业或单纯不想被记住时有处可去。"""
+    removed = memory_store.clear_memories(user.tenant_id, user.id)
+    return {"status": "cleared", "removed": removed}

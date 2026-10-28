@@ -1,6 +1,6 @@
-"use client";
+﻿"use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import {
   PROVIDERS,
   type LlmProvider,
@@ -8,7 +8,7 @@ import {
   readSettings,
   saveSettings,
 } from "@/lib/agent-settings";
-import { type MemoryNote, addMemories, deleteMemory, errorDetail, fetchMemories, pingLlm } from "@/lib/api";
+import { errorDetail, pingLlm } from "@/lib/api";
 import { RATE_RANGE, speakText, useChineseVoices, useSpeechSettings } from "@/lib/speech-settings";
 import { SchoolAiSettings } from "@/components/SchoolAiSettings";
 import { SpeakerIcon } from "@/components/SketchIcons";
@@ -202,101 +202,6 @@ export function ServicePane({ isAdmin }: { isAdmin: boolean }) {
       <SpeechPrefs />
       <SchoolAiSettings isAdmin={isAdmin} />
       <PersonalKey />
-    </section>
-  );
-}
-
-/** 抽屉页「记忆」：长期记忆在服务端，换设备登录也在。 */
-export function MemoryPane() {
-  const [notes, setNotes] = useState<MemoryNote[]>([]);
-  const [draft, setDraft] = useState("");
-  const [notice, setNotice] = useState<string | null>(null);
-
-  const reload = useCallback(async () => {
-    try {
-      setNotes(await fetchMemories());
-    } catch {
-      setNotice("记忆没读出来，稍后再打开看看");
-    }
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetchMemories()
-      .then((list) => {
-        if (!cancelled) setNotes(list);
-      })
-      .catch(() => {
-        if (!cancelled) setNotice("记忆没读出来，稍后再打开看看");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  async function handleRemember() {
-    const content = draft.trim();
-    if (!content) return;
-    setNotice(null);
-    try {
-      await addMemories([content]);
-      setDraft("");
-      await reload();
-    } catch {
-      setNotice("没记住，稍后再试");
-    }
-  }
-
-  async function handleForget(id: string) {
-    setNotice(null);
-    try {
-      await deleteMemory(id);
-      await reload();
-    } catch {
-      setNotice("没删掉，稍后再试");
-    }
-  }
-
-  return (
-    <section>
-      <PaneTitle title="记忆">
-        告诉我的事（比如学院、专业）会记在这里，换设备登录也在。聊天时说「记住：……」也能记下。
-      </PaneTitle>
-
-      <form
-        className="flex items-end gap-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void handleRemember();
-        }}
-      >
-        <input
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          aria-label="要记住的事"
-          placeholder="例如：我是计算机学院大二的"
-          className="field flex-1"
-        />
-        <button type="submit" disabled={!draft.trim()} className="btn">
-          记住
-        </button>
-      </form>
-
-      <ul className="mt-5 divide-y divide-dashed divide-rule">
-        {notes.map((note) => (
-          <li key={note.id} className="flex items-start justify-between gap-3 py-2.5">
-            <span className="min-w-0 break-words">
-              {note.content}
-              {note.origin === "auto" && <span className="ml-2 text-sm text-muted">自动记下</span>}
-            </span>
-            <button type="button" onClick={() => void handleForget(note.id)} className="link-ink shrink-0 text-sm">
-              忘掉
-            </button>
-          </li>
-        ))}
-        {notes.length === 0 && <li className="py-2.5 text-muted">还没有记住什么。</li>}
-      </ul>
-      {notice && <p className="mt-3 text-[0.9375rem] text-danger" role="status">{notice}</p>}
     </section>
   );
 }

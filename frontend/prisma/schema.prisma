@@ -36,6 +36,7 @@ model Tenant {
   chatTombstones ChatSessionTombstone[]
   questionLogs   QuestionLog[]
   feedbacks      MessageFeedback[]
+  memories       UserMemory[]
 
   @@map("tenants")
 }
@@ -160,6 +161,7 @@ model User {
   chatSessions   ChatSession[]
   chatTombstones ChatSessionTombstone[]
   feedbacks      MessageFeedback[]
+  memories       UserMemory[]
 
   /// 学号只在同一学校内唯一
   @@unique([tenantId, studentNo])
@@ -276,4 +278,33 @@ model ChatSessionTombstone {
 
   @@id([tenantId, userId, threadId])
   @@map("chat_session_tombstones")
+}
+
+/// 学生的长期记忆。只由 FastAPI 读写（backend/memory_store.py 手写 SQL），表名与列名改动要同步。
+/// 迁移自 Redis hash：Postgres 是权威副本，Redis 里只保留短时缓存。
+model UserMemory {
+  id       String @id
+  tenantId String
+  userId   String
+  /// 记忆正文，最多 200 字
+  content String
+  /// profile 身份档案 / preference 长期偏好 / ongoing 在办的事 / fact 其他
+  kind String @default("fact")
+  /// grade / college / major；同一槽位只保留最新说法
+  slot   String  @default("")
+  /// manual 用户主动说「记住」 / auto 情绪分析顺带抽取 / consolidated 整理合并
+  origin String  @default("manual")
+  pinned Boolean @default(false)
+  /// 涉及隐私：只在「记忆」页给本人看，不自动注入提示词
+  sensitive Boolean @default(false)
+  /// 智谱 embedding-3 的向量；没配向量服务的学校为空数组，退回关键词检索
+  embedding Float[] @default([])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId])
+  @@map("user_memories")
 }
