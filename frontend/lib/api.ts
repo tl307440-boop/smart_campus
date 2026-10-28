@@ -149,6 +149,13 @@ export interface MemoryNote {
   content: string;
   created_at: number;
   origin: "manual" | "auto";
+  /** profile 身份档案 / preference 长期偏好 / ongoing 在办的事 / fact 其他 */
+  kind: "profile" | "preference" | "ongoing" | "fact";
+  /** grade / college / major；同一槽位只保留最新说法 */
+  slot: "" | "grade" | "college" | "major";
+  pinned: boolean;
+  /** 用户自己要求记下的隐私内容：只在记忆页显示，不会自动进提示词 */
+  sensitive: boolean;
 }
 
 /** 取值与后端 knowledge.py 的 DocumentInfo.source 一一对应 */
@@ -469,6 +476,18 @@ export function deleteMemory(id: string) {
   return request<{ status: string }>(`/api/memories/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
+}
+
+export function updateMemory(id: string, patch: { content?: string; pinned?: boolean }) {
+  return request<MemoryNote>(`/api/memories/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export function clearMemories() {
+  return request<{ status: string; removed: number }>("/api/memories", { method: "DELETE" });
 }
 
 /**

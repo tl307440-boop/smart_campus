@@ -61,7 +61,7 @@ from knowledge import KIMI_CORPUS_BUDGET
 from llm_service import FAILED_PREFIX, NOT_CONFIGURED, PERSONAL_DATA_RULE, DeepSeekService, prompt_extras
 from logging_config import get_logger
 from tenancy import GLOBAL_TENANT
-from vector_service import VectorRAGService, open_store
+from vector_service import VectorRAGService, build_embeddings, open_store
 from workspace import WorkspaceSettings, workspace_settings
 
 logger = get_logger(__name__)
@@ -346,6 +346,29 @@ def get_vector_db(tenant_id: str | None = None) -> VectorRAGService | None:
     if spec is None:
         return None
     return open_store(spec)
+
+
+_memory_embedders: dict[str, Any] = {}
+
+
+def _memory_embedder(tenant_id: str) -> Any | None:
+    """记忆检索复用学校配的智谱 embedding-3：已经为知识库配过一次，不该再让管理员配第二遍。
+
+    没配向量服务的学校返回 None，记忆就只用中文两字切词匹配，功能不受影响。
+    """
+    spec = embedding_spec(tenant_id)
+    if spec is None:
+        return None
+    embedder = _memory_embedders.get(spec.api_key)
+    if embedder is None:
+        embedder = build_embeddings(spec)
+        _memory_embedders[spec.api_key] = embedder
+    return embedder
+
+
+def configure_memory_embedding() -> None:
+    """启动时告诉记忆模块怎么拿向量模型；本轮不需要向量时也不会真的去请求。"""
+    memory_store.set_embedder(_memory_embedder)
 
 
 def _prepare_index(tenant_id: str) -> None:
@@ -833,18 +856,32 @@ def emotion_node(state: GraphState) -> dict:
 
 
 def _store_auto_memories(state: GraphState, facts: Any) -> None:
+    """自动抽取的记忆落库。隐私相关的条目由 memory_store 拦下，这里只记日志。
+
+    抽取结果允许是字符串，也允许是 {content, kind, slot} 字典——后者能直接标好槽位，
+    让「我今年大四了」覆盖掉去年记的「大三」。
+    """
     user_id = state.get("user_id") or ""
     if not user_id or not MEMORY_AUTO_EXTRACT or not isinstance(facts, list):
         return
-    contents = [item for item in facts if isinstance(item, str) and item.strip()][:3]
-    if not contents:
+    items = [
+        item
+        for item in facts[:3]
+        if isinstance(item, dict) or (isinstance(item, str) and item.strip())
+    ]
+    if not items:
         return
     try:
-        added = memory_store.add_memories(
-            state.get("tenant_id") or GLOBAL_TENANT, user_id, contents, origin="auto"
+        result = memory_store.remember(
+            state.get("tenant_id") or GLOBAL_TENANT, user_id, items, origin="auto"
         )
-        if added:
-            logger.info(f"[记忆] 自动记下 {len(added)} 条")
+        if result.added:
+            logger.info(f"[记忆] 自动记下 {len(result.added)} 条")
+        if result.updated:
+            logger.info(f"[记忆] 覆盖了 {len(result.updated)} 条旧说法")
+        if result.rejected:
+            # 不写内容，日志里也不留隐私原文
+            logger.info(f"[记忆] {len(result.rejected)} 条涉及隐私，已跳过自动记忆")
     except Exception as e:
         logger.warning(f"[记忆] 自动写入失败: {e}")
 

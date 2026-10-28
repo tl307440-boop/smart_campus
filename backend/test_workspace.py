@@ -214,8 +214,8 @@ def test_emotion_node_stores_facts_and_strips_them(monkeypatch: pytest.MonkeyPat
     ds = MagicMock()
     ds.analyze_emotion_and_reply.return_value = {"core_emotion": "平静", "memory_facts": ["我读大三"]}
     monkeypatch.setattr(graph_app, "get_deepseek", lambda: ds)
-    store = MagicMock(return_value=["note"])
-    monkeypatch.setattr(graph_app.memory_store, "add_memories", store)
+    store = MagicMock(return_value=graph_app.memory_store.RememberResult([], [], []))
+    monkeypatch.setattr(graph_app.memory_store, "remember", store)
 
     out = graph_app.emotion_node({"user_question": "我读大三", "tenant_id": "t1", "user_id": "u1"})
 
@@ -223,12 +223,45 @@ def test_emotion_node_stores_facts_and_strips_them(monkeypatch: pytest.MonkeyPat
     assert "memory_facts" not in out["emotion_data"]
 
 
+def test_emotion_node_accepts_structured_facts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """模型可以带槽位回来，「大四」才能覆盖掉去年记的「大三」。"""
+    ds = MagicMock()
+    ds.analyze_emotion_and_reply.return_value = {
+        "memory_facts": [{"content": "我今年大四", "kind": "profile", "slot": "grade"}, "  ", None]
+    }
+    monkeypatch.setattr(graph_app, "get_deepseek", lambda: ds)
+    store = MagicMock(return_value=graph_app.memory_store.RememberResult([], [], []))
+    monkeypatch.setattr(graph_app.memory_store, "remember", store)
+
+    graph_app.emotion_node({"user_question": "我上大四了", "tenant_id": "t1", "user_id": "u1"})
+
+    items = store.call_args.args[2]
+    assert items == [{"content": "我今年大四", "kind": "profile", "slot": "grade"}]
+
+
+def test_emotion_node_keeps_crisis_reply_when_facts_are_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """隐私条目被拦掉只是不记，回复本身照常返回。"""
+    ds = MagicMock()
+    ds.analyze_emotion_and_reply.return_value = {
+        "core_emotion": "低落", "risk_level": 3, "reply_text": "我在听", "memory_facts": ["我确诊了抑郁症"]
+    }
+    monkeypatch.setattr(graph_app, "get_deepseek", lambda: ds)
+    monkeypatch.setattr(
+        graph_app.memory_store, "remember",
+        MagicMock(return_value=graph_app.memory_store.RememberResult([], [], ["我确诊了抑郁症"])),
+    )
+
+    out = graph_app.emotion_node({"user_question": "我很难受", "tenant_id": "t1", "user_id": "u1"})
+
+    assert out["emotion_data"]["reply_text"] == "我在听"
+
+
 def test_emotion_node_skips_memory_for_guest(monkeypatch: pytest.MonkeyPatch) -> None:
     ds = MagicMock()
     ds.analyze_emotion_and_reply.return_value = {"memory_facts": ["我读大三"]}
     monkeypatch.setattr(graph_app, "get_deepseek", lambda: ds)
     store = MagicMock()
-    monkeypatch.setattr(graph_app.memory_store, "add_memories", store)
+    monkeypatch.setattr(graph_app.memory_store, "remember", store)
 
     graph_app.emotion_node({"user_question": "我读大三", "tenant_id": "t1", "user_id": ""})
     store.assert_not_called()

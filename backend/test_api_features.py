@@ -62,7 +62,16 @@ def test_memories_are_scoped_to_caller(client: TestClient, monkeypatch: pytest.M
     response = client.get("/api/memories", headers=headers())
 
     assert response.status_code == 200
-    assert response.json() == [{"id": "m1", "content": "我读大三", "created_at": 1.0, "origin": "auto"}]
+    assert response.json() == [{
+        "id": "m1",
+        "content": "我读大三",
+        "created_at": 1.0,
+        "origin": "auto",
+        "kind": "fact",
+        "slot": "",
+        "pinned": False,
+        "sensitive": False,
+    }]
     lister.assert_called_once_with("tenant-1", "user-1")
 
 
@@ -77,6 +86,33 @@ def test_add_and_delete_memory(client: TestClient, monkeypatch: pytest.MonkeyPat
 
     assert client.delete("/api/memories/m2", headers=headers()).status_code == 200
     assert client.delete("/api/memories/nope", headers=headers()).status_code == 404
+
+
+def test_update_memory_can_pin_and_edit(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    note = MemoryNote("m3", "我读大四", 3.0, "manual", slot="grade", pinned=True)
+    updater = MagicMock(return_value=note)
+    monkeypatch.setattr(api.memory_store, "update_memory", updater)
+
+    response = client.patch(
+        "/api/memories/m3", json={"content": "我读大四", "pinned": True}, headers=headers()
+    )
+
+    assert response.status_code == 200
+    assert response.json()["pinned"] is True
+    updater.assert_called_once_with("tenant-1", "user-1", "m3", content="我读大四", pinned=True)
+
+
+def test_update_memory_needs_something_to_change(client: TestClient) -> None:
+    assert client.patch("/api/memories/m3", json={}, headers=headers()).status_code == 400
+
+
+def test_clear_memories(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api.memory_store, "clear_memories", lambda t, u: 4)
+
+    response = client.delete("/api/memories", headers=headers())
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "cleared", "removed": 4}
 
 
 @pytest.mark.parametrize(
