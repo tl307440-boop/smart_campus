@@ -117,7 +117,8 @@ def _obj(properties: dict[str, Any] | None = None, required: list[str] | None = 
     return {"type": "object", "properties": properties or {}, "required": required or []}
 
 
-_DAY = {"type": "string", "enum": ["today", "tomorrow", "this_week", "next_week"], "description": "today 今天 / tomorrow 明天 / this_week 本周 / next_week 下周"}
+_DAY = {"type": "string", "enum": ["today", "tomorrow", "this_week", "next_week", "last_week"], "description": "today 今天 / tomorrow 明天 / this_week 本周 / next_week 下周 / last_week 上周"}
+_WEEK = {"type": "integer", "minimum": 1, "maximum": 30, "description": "指定教学周（例如第8周填 8），查该周的课；不填则默认按 day 看今天/明天/本周/下周/上周"}
 _WEEKDAY = {"type": "integer", "minimum": 1, "maximum": 7, "description": "指定星期几（1=周一，7=周日），给了就只看这一天"}
 _TERM = {"type": "string", "enum": ["current", "previous", "all"], "description": "current 本学期 / previous 上学期 / all 全部"}
 
@@ -196,6 +197,11 @@ def _target_days(ctx: ToolContext, day: str, weekday: Any) -> list[tuple[date, i
     monday = today - timedelta(days=today.weekday())
     if day == "tomorrow":
         days = [today + timedelta(days=1)]
+    elif day == "last_week":
+        start = monday - timedelta(days=7)
+        days = [start + timedelta(days=i) for i in range(7)]
+        if weekday:
+            days = [days[weekday - 1]]
     elif day in ("this_week", "next_week"):
         start = monday + timedelta(days=7 if day == "next_week" else 0)
         days = [start + timedelta(days=i) for i in range(7)]
@@ -234,15 +240,39 @@ def _timetable(ctx: ToolContext, args: dict[str, Any]) -> Any:
         data = jw.timetable(xnm, xqm)
     ctx._campus_id = data.get("campus_id", "")
     out = []
-    for day, week_shift in _target_days(ctx, str(args.get("day") or "today"), args.get("weekday")):
-        target_week = (week or 0) + week_shift
-        lessons = lessons_on(data, day, target_week if week else None)
-        out.append({"date": day.isoformat(), "weekday": f"星期{WEEKDAYS[day.weekday()]}", "week": target_week or None, "courses": lessons})
+    req_week = _int_arg(args.get("week"), 1, 30)
+    weekday_arg = _int_arg(args.get("weekday"), 1, 7)
+
+    if req_week is not None and week:
+        start = first_monday(ctx.today, week)
+        target_monday = start + timedelta(weeks=req_week - 1)
+        if weekday_arg:
+            days_info = [(target_monday + timedelta(days=weekday_arg - 1), req_week)]
+        else:
+            days_info = [(target_monday + timedelta(days=i), req_week) for i in range(7)]
+        for day, target_week in days_info:
+            lessons = lessons_on(data, day, target_week)
+            out.append({"date": day.isoformat(), "weekday": f"星期{WEEKDAYS[day.weekday()]}", "week": target_week, "courses": lessons})
+    elif req_week is not None:
+        target_wds = [weekday_arg] if weekday_arg else list(range(1, 8))
+        for wd in target_wds:
+            dummy_day = date(2026, 1, 5 + wd - 1)
+            lessons = lessons_on(data, dummy_day, req_week)
+            out.append({"date": "", "weekday": f"星期{WEEKDAYS[wd - 1]}", "week": req_week, "courses": lessons})
+    else:
+        for day, week_shift in _target_days(ctx, str(args.get("day") or "today"), args.get("weekday")):
+            target_week = (week or 0) + week_shift
+            lessons = lessons_on(data, day, target_week if week else None)
+            out.append({"date": day.isoformat(), "weekday": f"星期{WEEKDAYS[day.weekday()]}", "week": target_week or None, "courses": lessons})
+
     ctx.cite("教务系统·个人课表")
     result: dict[str, Any] = {"current_week": week, "days": out}
     if not week:
-        result["week_unknown"] = "教务没给出当前是第几周（可能在假期或新学期还没开始），上面列的是这个星期几所有的课，没按周次筛，请提醒学生以教务系统为准"
-    rows = [{"day": f"{d['date'][5:]} {d['weekday']}", **c} for d in out for c in d["courses"]]
+        result["week_unknown"] = "教务没给出当前是第几周（可能在假期或新学期还没开始），无法确定当前是第几周，请提醒学生以教务系统为准"
+    rows = [
+        {"day": (f"{d['date'][5:]} " if d["date"] else "") + d["weekday"], **c}
+        for d in out for c in d["courses"]
+    ]
     if rows:
         result["display"] = ctx.table(
             "课表", [("day", "日期"), ("periods", "节次"), ("time", "时间"), ("course", "课程"), ("room", "教室"), ("teacher", "老师")], rows
@@ -504,7 +534,7 @@ def _knowledge(ctx: ToolContext, args: dict[str, Any]) -> Any:
 
 
 _JW_TOOLS = [
-    Tool("jw_timetable", "查课表", "查询当前学生本人的课表（课程、时间、教室、老师）。", _obj({"day": _DAY, "weekday": _WEEKDAY}), _timetable),
+    Tool("jw_timetable", "查课表", "查询当前学生本人的课表（课程、时间、教室、老师），支持按天、按星期或按指定教学周（如第8周）查询。", _obj({"day": _DAY, "weekday": _WEEKDAY, "week": _WEEK}), _timetable),
     Tool("jw_exams", "查考试安排", "查询当前学生本人的考试安排（时间、考场、座位号）。", _obj({"term": {**_TERM, "enum": ["current", "previous"]}}), _exams),
     Tool("jw_grades", "查成绩", "查询当前学生本人的成绩、学分和绩点。", _obj({"term": _TERM}), _grades),
     Tool(
