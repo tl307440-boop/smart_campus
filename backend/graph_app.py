@@ -557,8 +557,8 @@ def retrieve_node(state: GraphState) -> dict:
         │               │
         │               └── route_strategy == "vectordb" 或 (auto 且文档长)
         │                       └──> VectorRAGService.search_chunks(question, top_k, min_score)
-        │                               ├── 宽召回候选 Chunk + BGE CrossEncoder 重排序
-        │                               └── top_k / min_score 取自本校工作区设置
+        │                               ├── 向量召回 → 题级门控(min_score) → 向量 + BM25 融合 → 可选重排
+        │                               └── top_k / min_score 取自本校工作区设置（阈值 0 用平台默认）
         │
         └──> state["context"] / state["sources"] = 检索结果（供 generate_node 与 done 事件使用）
     """
@@ -595,7 +595,7 @@ def retrieve_node(state: GraphState) -> dict:
                     question,
                     tenant_id,
                     top_k=settings.top_k,
-                    min_score=settings.similarity_threshold,
+                    min_score=settings.similarity_threshold or None,
                 )
                 context = vdb.format_context(chunks)
                 sources = _chunk_sources(chunks)
@@ -672,7 +672,9 @@ def _agent_answer(state: GraphState, question: str, settings: WorkspaceSettings,
         vdb = get_vector_db(tenant_id)
         if vdb is None or not query:
             return "", []
-        chunks = vdb.search_chunks(query, tenant_id, top_k=settings.top_k, min_score=settings.similarity_threshold)
+        chunks = vdb.search_chunks(
+            query, tenant_id, top_k=settings.top_k, min_score=settings.similarity_threshold or None
+        )
         return vdb.format_context(chunks), _chunk_sources(chunks)
 
     ctx = agent.ToolContext(

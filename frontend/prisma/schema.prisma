@@ -50,7 +50,7 @@ model TenantSettings {
   persona             String   @default("")
   /// 只按资料回答：检索不到内容时直接拒答，不走闲聊
   queryOnly           Boolean  @default(false)
-  /// 余弦相似度下限（0-1），低于它的片段不进上下文；0 表示不过滤
+  /// 余弦相似度下限（0-1）。题级门控：向量召回的最高相似度低于它，整题按「资料里没有」处理；0 表示用平台默认
   similarityThreshold Float    @default(0)
   /// 每次回答引用的片段数
   topK                Int      @default(3)

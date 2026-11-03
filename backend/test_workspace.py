@@ -196,18 +196,20 @@ def test_kimi_path_sources_list_documents(monkeypatch: pytest.MonkeyPatch) -> No
     assert [s["source"] for s in out["sources"]] == ["a.md", "b.md"]
 
 
-def test_search_chunks_filters_by_threshold() -> None:
+def test_search_chunks_gates_whole_question_by_best_vector_score(monkeypatch: pytest.MonkeyPatch) -> None:
+    """阈值按「题」判：最高向量分够了就整题放行，不再逐片段砍（否则 BM25 救回的片段会被误杀）。"""
     from vector_service import VectorRAGService
 
+    monkeypatch.setenv("RETRIEVAL_HYBRID", "false")
     svc = VectorRAGService.__new__(VectorRAGService)
-    svc.retrieve_candidates = MagicMock(return_value=[
+    svc._vector_candidates = MagicMock(return_value=([
         RetrievedChunk("高", {"source": "a"}, vector_score=0.9),
         RetrievedChunk("低", {"source": "b"}, vector_score=0.2),
-    ])
-    svc.rerank_candidates = lambda query, candidates, top_n: candidates[:top_n]
+    ], [1.0, 0.0]))
+    svc.rerank_candidates = lambda query, candidates, top_n, **kwargs: candidates[:top_n]
 
-    chunks = svc.search_chunks("q", "t1", top_k=3, min_score=0.5)
-    assert [c.text for c in chunks] == ["高"]
+    assert [c.text for c in svc.search_chunks("q", "t1", top_k=3, min_score=0.5)] == ["高", "低"]
+    assert svc.search_chunks("q", "t1", top_k=3, min_score=0.95) == []
 
 
 def test_emotion_node_stores_facts_and_strips_them(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -269,6 +269,12 @@ class KnowledgeBase:
             if content.startswith("Error") or content.startswith("不支持"):
                 logger.error(f"[Knowledge] 读取失败 {name}: {content[:60]}")
                 continue
+            if not content.strip() and source == "preloaded" and name.lower().endswith(".pdf"):
+                # 扫描版 PDF 没有文字层，pypdf 抽出来是空的；有离线 OCR 文本就用它
+                content = _read_ocr_sidecar(directory, name)
+            if not content.strip():
+                logger.warning(f"[Knowledge] {name} 没有可用文字（扫描件？），已跳过")
+                continue
             self._register(name, content, source=source, tenant_id=tenant_id)
 
     def _load_wiki(self, wiki_dir: str) -> None:
@@ -384,6 +390,27 @@ class KnowledgeBase:
             except Exception as exc:
                 logger.warning(f"[Knowledge] 读取索引状态失败 {doc.name}: {exc}")
         return replace(doc, indexed=indexed)
+
+
+def _read_ocr_sidecar(directory: str, pdf_name: str) -> str:
+    """扫描版 PDF 的离线 OCR 文本：与 PDF 同目录的 ocr/ 子目录下，文件名是 PDF 主名加 .txt。
+
+    文档仍以 PDF 的名字登记，引用卡片上显示的来源就是原始文件。
+    OCR 文本放在 ocr/ 里而不是直接放进 data/，是为了不被当成一份独立文档再载入一次。
+    """
+    sidecar = os.path.join(directory, "ocr", os.path.splitext(pdf_name)[0] + ".txt")
+    if not os.path.isfile(sidecar):
+        return ""
+    try:
+        text = FileService.read_file(sidecar)
+    except Exception as exc:
+        logger.error(f"[Knowledge] OCR 文本读取失败 {sidecar}: {exc}")
+        return ""
+    if text.startswith("Error") or text.startswith("不支持") or text.startswith("读取文件时出错"):
+        logger.error(f"[Knowledge] OCR 文本读取失败 {sidecar}: {text[:60]}")
+        return ""
+    logger.info(f"[Knowledge] {pdf_name} 抽不出文字，改用 OCR 文本（{len(text)} 字）")
+    return text
 
 
 def _strip_frontmatter(text: str) -> str:

@@ -1,16 +1,21 @@
 import hashlib
 import os
 import threading
+import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 import chromadb
+import numpy as np
 from env_config import load_backend_env
+from hybrid_search import BM25, ZhipuRerankClient, rrf_fuse
 from langchain_community.embeddings import ZhipuAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from logging_config import get_logger
 from tenancy import (
     chunk_metadata,
+    normalize_tenant,
     owner_filter,
     source_filter,
     visibility_filter,
@@ -25,6 +30,8 @@ class RetrievedChunk:
     text: str
     metadata: dict = field(default_factory=dict)
     vector_score: float = 0.0
+    # Chroma 里的片段 id，混合检索靠它给「向量」和「BM25」两路结果去重
+    chunk_id: str = ""
 
 
 _cross_encoder = None
@@ -42,13 +49,56 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float, low: float, high: float) -> float:
+    try:
+        return max(low, min(high, float(os.getenv(name, str(default)))))
+    except (TypeError, ValueError):
+        return default
+
+
+# 题级门控的平台默认阈值。依据 eval_rag/results/report.md 第 5 节：
+# 0.45 时有答案的题 0% 被误拒，同时挡掉 75%~83% 的库外问题；0.5 开始误拒有答案的题。
+DEFAULT_MIN_SCORE = 0.45
+
+RERANK_PROVIDERS = ("none", "zhipu", "local")
+RERANK_MAX_DOCUMENTS = ZhipuRerankClient.max_documents
+# 云端重排连续失败后暂停多久。不暂停的话，限流或断网时每个问题都要白等一个超时。
+RERANK_COOLDOWN_SECONDS = 30.0
+_rerank_cooldown_until = 0.0
+_warned_providers: set[str] = set()
+
+
+def default_min_score() -> float:
+    """平台默认的题级门控阈值，可用 RAG_MIN_SCORE_DEFAULT 调整；设 0 表示默认不拒答。"""
+    return _env_float("RAG_MIN_SCORE_DEFAULT", DEFAULT_MIN_SCORE, 0.0, 1.0)
+
+
+def hybrid_enabled() -> bool:
+    """BM25 + 向量混合检索开关。出问题时设 RETRIEVAL_HYBRID=false 可退回纯向量。"""
+    return _env_flag("RETRIEVAL_HYBRID", "true")
+
+
+def rerank_provider() -> str:
+    """重排用谁：none（不重排）| zhipu（智谱云端）| local（本机 BGE 交叉编码器，需要 PyTorch）。
+
+    RERANK_PROVIDER 优先；没设时沿用旧开关：RERANK_ENABLED 为真走 local，为假走 none。
+    """
+    raw = os.getenv("RERANK_PROVIDER", "").strip().lower()
+    if raw in RERANK_PROVIDERS:
+        return raw
+    if raw and raw not in _warned_providers:
+        _warned_providers.add(raw)
+        logger.warning(f"[Rerank] 不认识的 RERANK_PROVIDER={raw!r}，改用 RERANK_ENABLED 判断")
+    return "local" if _env_flag("RERANK_ENABLED", "true") else "none"
+
+
 def get_cross_encoder():
     """
     懒加载 BGE 交叉编码器。
-    未安装 sentence-transformers、模型下载失败或关闭 RERANK_ENABLED 时返回 None。
+    未安装 sentence-transformers、模型下载失败或重排方式不是 local 时返回 None。
     """
     global _cross_encoder, _cross_encoder_load_attempted
-    if not _env_flag("RERANK_ENABLED", "true"):
+    if rerank_provider() != "local":
         return None
     if _cross_encoder_load_attempted:
         return _cross_encoder
@@ -64,6 +114,43 @@ def get_cross_encoder():
         logger.warning(f"[Rerank] 交叉编码器不可用，将使用向量相似度截断: {e}")
         _cross_encoder = None
     return _cross_encoder
+
+
+def _rerank_api_key(tenant_id: str | None) -> str:
+    """云端重排用的智谱密钥：学校在「AI 服务」页配的向量化密钥 > 服务器 .env 的 zhi_pu_API_KEY。"""
+    try:
+        from ai_config import embedding_spec
+
+        if tenant_id:
+            spec = embedding_spec(tenant_id)
+            if spec is not None and spec.api_key:
+                return spec.api_key
+    except Exception as exc:
+        logger.warning(f"[Rerank] 读取学校密钥失败，改用服务器密钥: {exc}")
+    value = os.getenv("zhi_pu_API_KEY", "").strip()
+    return "" if value.startswith("your_") else value
+
+
+# BM25 内存索引：每个租户一份，只含该租户可见的片段。
+# 上限防止租户很多时内存涨个不停；被挤掉的下次检索会重建（几百个片段，毫秒级）。
+_BM25_MAX_TENANTS = 32
+_bm25_init_lock = threading.Lock()
+
+
+@dataclass
+class _Bm25Index:
+    ids: list[str]
+    texts: list[str]
+    metadatas: list[dict]
+    bm25: BM25
+
+
+@dataclass
+class _Bm25State:
+    version: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    # 租户 -> ((版本, 片段总数), 索引)
+    indexes: "OrderedDict[str, tuple[tuple[int, int], _Bm25Index]]" = field(default_factory=OrderedDict)
 
 
 # 切片参数变更后必须让已有索引失效。内容没变时 content_hash 不变，
@@ -246,6 +333,7 @@ class VectorRAGService:
         if existing_hash is not None:
             logger.warning(f" [VectorDB] 文件 '{file_path}' 内容已变更，删除旧索引后重建...")
             self.collection.delete(where=source_filter(file_path, tenant_id))
+            self._bump_corpus_version()
 
         chunks = self.split_text(content)
         logger.info(f" [VectorDB] 正在将文档切分为 {len(chunks)} 个片段并建立索引...")
@@ -263,21 +351,136 @@ class VectorRAGService:
                 ids=ids,
                 metadatas=metadata
             )
+            self._bump_corpus_version()
             logger.info(f"[VectorDB] 成功索引 {len(chunks)} 个文档片段")
         except Exception as e:
             logger.error(f" [VectorDB] 索引失败: {e}")
             raise
     
-    def retrieve_candidates(self, query: str, tenant_id: str, k: int = 50) -> list[RetrievedChunk]:
-        """
-        第一阶段：宽召回。用智谱 embedding + Chroma 余弦检索捞一批候选 Chunk。
-        当前仓库没有独立 BM25/hybrid_retriever，因此用向量宽召回承担「大网捞鱼」。
+    # ---------- BM25 内存索引 ----------
 
-        where 过滤把候选限制在「全局文档 + 本租户文档」，跨校资料不会进入召回。
+    def _bm25_state(self) -> "_Bm25State":
+        state = self.__dict__.get("_bm25")
+        if state is None:
+            with _bm25_init_lock:
+                state = self.__dict__.setdefault("_bm25", _Bm25State())
+        return state
+
+    def _bump_corpus_version(self) -> None:
+        """知识库内容变了（上传、重建、清空）：让所有租户的 BM25 索引在下次检索时重建。"""
+        state = self._bm25_state()
+        with state.lock:
+            state.version += 1
+            state.indexes.clear()
+
+    def _bm25_for(self, tenant_id: str) -> "_Bm25Index":
+        """某租户可见文档的 BM25 索引，懒加载。
+
+        语料只取「全局文档 + 本租户文档」（和向量检索用同一个 where 过滤），
+        分词统计和 IDF 也只在这批文档里算，A 校的私有资料不会进 B 校的索引。
+        缓存按租户分开放；版本号或片段总数一变（含别的进程写入）就重建。
         """
+        tenant = normalize_tenant(tenant_id)
+        state = self._bm25_state()
+        stamp = (state.version, self.collection.count())
+        with state.lock:
+            hit = state.indexes.get(tenant)
+            if hit is not None and hit[0] == stamp:
+                state.indexes.move_to_end(tenant)
+                return hit[1]
+
+        rows = self.collection.get(where=visibility_filter(tenant), include=["documents", "metadatas"])
+        ids = rows.get("ids") or []
+        documents = rows.get("documents") or []
+        metadatas = rows.get("metadatas") or []
+        # Chroma 返回的顺序不保证稳定，按 (文档, 文本) 排好，BM25 并列分数时的取舍才可复现
+        items = sorted(
+            (
+                (id_, text, dict(metadatas[i] or {}) if i < len(metadatas) else {})
+                for i, (id_, text) in enumerate(zip(ids, documents, strict=False))
+                if text
+            ),
+            key=lambda item: (item[2].get("source", ""), item[1]),
+        )
+        index = _Bm25Index(
+            ids=[item[0] for item in items],
+            texts=[item[1] for item in items],
+            metadatas=[item[2] for item in items],
+            bm25=BM25([item[1] for item in items]),
+        )
+        with state.lock:
+            state.indexes[tenant] = (stamp, index)
+            state.indexes.move_to_end(tenant)
+            while len(state.indexes) > _BM25_MAX_TENANTS:
+                state.indexes.popitem(last=False)
+        logger.info(f"[BM25] 租户 {tenant} 的关键词索引已建立，共 {len(index.texts)} 个片段")
+        return index
+
+    def _fuse_with_bm25(
+        self, query: str, tenant_id: str, vector_candidates: list[RetrievedChunk], k: int
+    ) -> list[RetrievedChunk]:
+        """向量 Top-k 与 BM25 Top-k 做 RRF 融合，返回融合后的前 k 个。
+
+        BM25 独自捞回来的片段没有向量分，这里先标 0.0，由 search_chunks 在最后补算真实余弦。
+        """
+        index = self._bm25_for(tenant_id)
+        by_key: dict[object, RetrievedChunk] = {}
+        vector_ranking: list[object] = []
+        for chunk in vector_candidates:
+            key = chunk.chunk_id or (chunk.metadata.get("source", ""), chunk.text)
+            by_key.setdefault(key, chunk)
+            vector_ranking.append(key)
+
+        bm25_ranking: list[object] = []
+        for position, _score in index.bm25.top(query, k):
+            chunk_id = index.ids[position]
+            meta = index.metadatas[position]
+            key = chunk_id or (meta.get("source", ""), index.texts[position])
+            by_key.setdefault(
+                key, RetrievedChunk(text=index.texts[position], metadata=dict(meta), vector_score=0.0, chunk_id=chunk_id)
+            )
+            bm25_ranking.append(key)
+
+        fused = rrf_fuse([vector_ranking, bm25_ranking])[:k]
+        return [by_key[key] for key, _ in fused]
+
+    def _fill_vector_scores(
+        self, chunks: list[RetrievedChunk], query_embedding: list[float], known_ids: set[str]
+    ) -> None:
+        """给 BM25 独自捞回来的片段补上真实的余弦相似度，引用卡片上才不会显示 0 分。"""
+        missing = [c for c in chunks if c.chunk_id and c.chunk_id not in known_ids]
+        if not missing:
+            return
+        try:
+            stored = self.collection.get(ids=[c.chunk_id for c in missing], include=["embeddings"])
+            stored_embeddings = stored.get("embeddings")
+            vectors = dict(zip(
+                stored.get("ids") or [],
+                stored_embeddings if stored_embeddings is not None else [],
+                strict=False,
+            ))
+            query_vec = np.asarray(query_embedding, dtype=np.float32)
+            query_norm = float(np.linalg.norm(query_vec))
+            for chunk in missing:
+                vec = vectors.get(chunk.chunk_id)
+                if vec is None or query_norm == 0.0:
+                    continue
+                vec = np.asarray(vec, dtype=np.float32)
+                norm = float(np.linalg.norm(vec))
+                if norm > 0.0:
+                    chunk.vector_score = float(vec @ query_vec) / (norm * query_norm)
+        except Exception as exc:
+            logger.warning(f"[VectorDB] 补算向量相似度失败，引用分数按 0 显示: {exc}")
+
+    # ---------- 召回与重排 ----------
+
+    def _vector_candidates(
+        self, query: str, tenant_id: str, k: int
+    ) -> tuple[list[RetrievedChunk], list[float]]:
+        """向量宽召回，同时把查询向量带出来（题级门控之后补算向量分还要用）。"""
         total = self.collection.count()
         if total <= 0:
-            return []
+            return [], []
 
         n_results = min(k, total)
         query_embedding = self.embedding_model.embed_query(query)
@@ -287,6 +490,7 @@ class VectorRAGService:
             where=visibility_filter(tenant_id),
             include=["documents", "metadatas", "distances"],
         )
+        ids = (results.get("ids") or [[]])[0]
         docs = (results.get("documents") or [[]])[0]
         metas = (results.get("metadatas") or [[]])[0]
         distances = (results.get("distances") or [[]])[0]
@@ -302,29 +506,65 @@ class VectorRAGService:
                     text=doc_text,
                     metadata=meta,
                     vector_score=1.0 - distance,
+                    chunk_id=str(ids[i]) if i < len(ids) else "",
                 )
             )
         logger.info(f"[VectorDB] 宽召回 {len(candidates)} 个候选片段 (请求 k={k})")
-        return candidates
+        return candidates, list(query_embedding)
+
+    def retrieve_candidates(self, query: str, tenant_id: str, k: int = 50) -> list[RetrievedChunk]:
+        """
+        第一阶段：向量宽召回。用智谱 embedding + Chroma 余弦检索捞一批候选 Chunk。
+
+        where 过滤把候选限制在「全局文档 + 本租户文档」，跨校资料不会进入召回。
+        BM25 的那一路在 search_chunks 里融合。
+        """
+        return self._vector_candidates(query, tenant_id, k)[0]
 
     def rerank_candidates(
         self,
         query: str,
         candidates: list[RetrievedChunk],
         top_n: int = 3,
+        tenant_id: str | None = None,
+        keep_order: bool = False,
     ) -> list[RetrievedChunk]:
         """
-        第二阶段：BGE 交叉编码器对 [Query, Document] 对打分，截断 Top-N。
-        模型不可用时退回向量相似度排序。
+        最后一阶段：按 RERANK_PROVIDER 重排并截断 Top-N。
+
+        - zhipu：智谱云端 rerank。超时、限流或任何异常都降级，绝不让问答卡住。
+        - local：本机 BGE 交叉编码器（需要 PyTorch；不可用时降级）。
+        - none：不重排。
+
+        降级时 keep_order=True 保留传进来的顺序（混合检索的 RRF 排序），
+        否则按向量相似度截断（旧行为）。
         """
         if not candidates:
             return []
 
+        def degrade(reason: str) -> list[RetrievedChunk]:
+            if keep_order:
+                logger.info(f"[Rerank] {reason}，保持融合排序取 Top {top_n}")
+                return candidates[:top_n]
+            logger.info(f"[Rerank] {reason}，按向量分截断 Top {top_n}")
+            return sorted(candidates, key=lambda x: x.vector_score, reverse=True)[:top_n]
+
+        provider = rerank_provider()
+        if provider == "zhipu":
+            # 接口单次有条数上限，超出的候选排在后面，本来也轮不到
+            pool = candidates[:RERANK_MAX_DOCUMENTS]
+            scores = self._cloud_rerank_scores(query, pool, tenant_id)
+            if scores is None:
+                return degrade("云端重排不可用")
+            for chunk, score in zip(pool, scores, strict=True):
+                chunk.metadata["rerank_score"] = float(score)
+            reranked = sorted(pool, key=lambda x: x.metadata["rerank_score"], reverse=True)[:top_n]
+            logger.info(f"[Rerank] 智谱云端重排完成，保留 Top {len(reranked)}")
+            return reranked
+
         reranker = get_cross_encoder()
         if reranker is None:
-            ranked = sorted(candidates, key=lambda x: x.vector_score, reverse=True)
-            logger.info(f"[Rerank] 未启用交叉编码器，按向量分截断 Top {top_n}")
-            return ranked[:top_n]
+            return degrade("未启用重排模型")
 
         pairs = [[query, chunk.text] for chunk in candidates]
         scores = reranker.predict(pairs)
@@ -338,6 +578,35 @@ class VectorRAGService:
         )[:top_n]
         logger.info(f"[Rerank] 交叉编码器重排完成，保留 Top {len(reranked)}")
         return reranked
+
+    def _cloud_rerank_scores(
+        self, query: str, candidates: list[RetrievedChunk], tenant_id: str | None
+    ) -> list[float] | None:
+        """调智谱云端重排；任何失败都返回 None，并让后续请求在冷却期内直接跳过。"""
+        global _rerank_cooldown_until
+
+        scorer = self.__dict__.get("cloud_reranker")  # 评测/测试可以注入带缓存的打分器
+        injected = scorer is not None
+        if not injected:
+            if time.monotonic() < _rerank_cooldown_until:
+                return None
+            api_key = _rerank_api_key(tenant_id)
+            if not api_key:
+                logger.warning("[Rerank] RERANK_PROVIDER=zhipu 但没有可用的智谱密钥，跳过重排")
+                return None
+            scorer = ZhipuRerankClient(api_key, timeout=_env_float("RERANK_TIMEOUT_SECONDS", 2.0, 0.2, 30.0))
+        try:
+            started = time.monotonic()
+            scores = scorer.score(query, [c.text for c in candidates])
+            if len(scores) != len(candidates):
+                raise RuntimeError("重排分数条数与候选不一致")
+            logger.info(f"[Rerank] 云端重排耗时 {time.monotonic() - started:.2f}s")
+            return scores
+        except Exception as exc:
+            if not injected:
+                _rerank_cooldown_until = time.monotonic() + RERANK_COOLDOWN_SECONDS
+            logger.warning(f"[Rerank] 云端重排失败，降级为融合排序（{type(exc).__name__}: {exc}）")
+            return None
 
     @staticmethod
     def format_context(chunks: list[RetrievedChunk]) -> str:
@@ -362,27 +631,49 @@ class VectorRAGService:
         query: str,
         tenant_id: str,
         top_k: int = 3,
-        min_score: float = 0.0,
+        min_score: float | None = None,
     ) -> list[RetrievedChunk]:
         """
-        【读取】三阶段 RAG 检索，返回结构化片段（供引用卡片使用）：
-        1. 宽召回 candidate_k 个候选（默认 50，仅限该租户可见的文档）
-        2. 丢掉余弦相似度低于 min_score 的候选（工作区设置里的相似度阈值）
-        3. BGE CrossEncoder 重排序后截断 Top-K
+        【读取】四阶段 RAG 检索，返回结构化片段（供引用卡片使用）：
+        1. 向量宽召回 candidate_k 个候选（默认 50，仅限该租户可见的文档）
+        2. 题级门控：向量候选里的最高相似度低于 min_score，说明整个问题在知识库语义范围之外，
+           直接整题返回空（拒答）。这是按「题」而不是按「片段」判断：
+           逐条过滤会把 BM25 才捞得回来、向量分偏低的正确片段一并砍掉。
+        3. 放行后，向量 Top-k 与 BM25 Top-k（同样只含该租户可见的片段）做 RRF 融合
+        4. 按 RERANK_PROVIDER 重排并截断 Top-K；重排不可用就保持融合排序
+
+        min_score：None 用平台默认（RAG_MIN_SCORE_DEFAULT，默认 0.45）；0 表示关闭门控；
+        学校在工作区设置里配的相似度阈值由调用方传进来，覆盖默认值。
 
         Example:
-            >>> chunks = svc.search_chunks("宿舍门禁", "t1", top_k=2, min_score=0.3)  # doctest: +SKIP
+            >>> chunks = svc.search_chunks("宿舍门禁", "t1", top_k=2, min_score=0.4)  # doctest: +SKIP
         """
         logger.info(f" [VectorDB] 正在检索与 '{query}' 最相关的片段...")
         candidate_k = _env_int("RERANK_CANDIDATE_K", 50)
+        gate = default_min_score() if min_score is None else max(0.0, float(min_score))
 
         try:
-            candidates = self.retrieve_candidates(query, tenant_id, k=candidate_k)
-            if min_score > 0:
-                candidates = [c for c in candidates if c.vector_score >= min_score]
-            reranked_top = self.rerank_candidates(query, candidates, top_n=top_k)
-            logger.info(f" [VectorDB] 检索到 {len(reranked_top)} 个相关片段")
-            return reranked_top
+            candidates, query_embedding = self._vector_candidates(query, tenant_id, candidate_k)
+            if not candidates:
+                return []
+
+            best = max(c.vector_score for c in candidates)
+            if gate > 0 and best < gate:
+                logger.info(f" [VectorDB] 题级门控拒答：最高向量相似度 {best:.3f} < 阈值 {gate:.2f}")
+                return []
+
+            pool, ordered = candidates, False
+            if hybrid_enabled():
+                try:
+                    pool = self._fuse_with_bm25(query, tenant_id, candidates, candidate_k)
+                    ordered = True
+                except Exception as exc:
+                    logger.warning(f" [VectorDB] BM25 融合失败，退回纯向量排序: {exc}")
+
+            top = self.rerank_candidates(query, pool, top_n=top_k, tenant_id=tenant_id, keep_order=ordered)
+            self._fill_vector_scores(top, query_embedding, {c.chunk_id for c in candidates})
+            logger.info(f" [VectorDB] 检索到 {len(top)} 个相关片段")
+            return top
         except Exception as e:
             logger.error(f" [VectorDB] 检索失败: {e}")
             return []
@@ -399,6 +690,7 @@ class VectorRAGService:
         """
         logger.info(f"[VectorDB] 正在清空租户 {tenant_id} 的索引...")
         self.collection.delete(where=owner_filter(tenant_id))
+        self._bump_corpus_version()
         logger.info(f"[VectorDB] 租户 {tenant_id} 的索引已清空")
 
 
