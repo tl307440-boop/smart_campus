@@ -105,7 +105,7 @@ export function WorkspacePane({ onSaved }: Props) {
             <label className="block">
               <span className="field-label">
                 检索严格程度
-                <span className="ml-2 text-[0.8125rem] tabular-nums">相似度阈值 {settings.similarityThreshold.toFixed(2)}</span>
+                <span className="ml-2 text-[0.8125rem] tabular-nums">相似度阈值 {settings.similarityThreshold > 0 ? settings.similarityThreshold.toFixed(2) : "平台默认"}</span>
               </span>
               <input
                 type="range"

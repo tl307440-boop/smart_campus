@@ -56,3 +56,6 @@ Thumbs.db
 
 # Cursor local IDE state
 .cursor/
+
+# RAG 评测的 embedding / 重排缓存（可由评测脚本重建）
+eval_rag/.cache/
