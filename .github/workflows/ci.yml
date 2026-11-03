@@ -47,7 +47,9 @@ jobs:
       # 但它 import 了 vector_service / graph_app，所以要装齐依赖。
       - name: 按锁文件安装
         run: |
-          uv venv
+          # 锁文件是按 3.12 生成的（见 lock 作业）。不指定的话 uv 会用 runner 上最新的 Python，
+          # 3.14 下 pygame 没有预编译包，要现场编译然后缺 SDL 报错
+          uv venv --python 3.12
           # PyTorch 索引也托管 certifi 等通用包但版本滞后；默认策略会只认它，要按版本跨索引挑
           uv pip install --extra-index-url https://download.pytorch.org/whl/cpu \
             --index-strategy unsafe-best-match \
@@ -58,7 +60,7 @@ jobs:
         run: >-
           ../.venv/bin/pytest test_abc_regressions.py test_knowledge_scope.py
           test_memory_store.py test_workspace.py test_web_import.py test_api_features.py
-          test_ai_config.py test_comfort.py -q
+          test_ai_config.py test_comfort.py test_hybrid_retrieval.py -q
 
   lock:
     name: 依赖锁文件
