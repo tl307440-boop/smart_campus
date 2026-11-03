@@ -1,0 +1,29 @@
+{
+  "name": "desk-pet",
+  "version": "1.0.0",
+  "description": "桌面摸鱼解压桌宠 🐾",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^32.3.3",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.smartcampus.deskpet",
+    "productName": "校园桌宠",
+    "win": {
+      "target": "portable",
+      "icon": "assets/icon.ico"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "assets/**/*"
+    ]
+  }
+}
