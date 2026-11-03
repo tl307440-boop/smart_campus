@@ -25,6 +25,8 @@ import redis
 import school_tools
 import session_summary
 import today_card
+import pet_sync
+import term_review
 import usage_log
 import usage_stats
 import vision
@@ -518,6 +520,68 @@ def calendar_feed(token: Annotated[str, Path(min_length=20, max_length=80, patte
     if text is None:
         raise HTTPException(status_code=404, detail="订阅链接无效或已被关闭")
     return Response(content=text.encode("utf-8"), media_type="text/calendar; charset=utf-8", headers={"Cache-Control": "private, max-age=600"})
+
+
+# ============================================================
+# 桌宠联动与学期回顾
+# ============================================================
+
+@app.get("/api/pet/subscription")
+def get_pet_subscription(user: MemberDep) -> dict[str, Any]:
+    """查看当前学生的桌宠令牌状态。"""
+    try:
+        return pet_sync.pet_token_status(user.tenant_id, user.id)
+    except redis.RedisError as exc:
+        raise _calendar_error(exc) from exc
+
+
+@app.post("/api/pet/subscription")
+def create_pet_subscription(user: MemberDep) -> dict[str, Any]:
+    """生成/重新生成桌宠同步令牌。旧令牌立刻作废。"""
+    try:
+        token = pet_sync.create_pet_token(user.tenant_id, user.id)
+    except redis.RedisError as exc:
+        raise _calendar_error(exc) from exc
+    return {"token": token, "feed_path": f"/api/pet/feed/{token}"}
+
+
+@app.delete("/api/pet/subscription", status_code=204)
+def delete_pet_subscription(user: MemberDep) -> None:
+    """撤销桌宠同步令牌。"""
+    try:
+        pet_sync.revoke_pet_token(user.tenant_id, user.id)
+    except redis.RedisError as exc:
+        raise _calendar_error(exc) from exc
+
+
+@app.get("/api/pet/feed/{token}")
+def get_pet_feed(
+    token: Annotated[str, Path(min_length=20, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")],
+    day: str | None = Query(None, max_length=10, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    clock: str | None = Query(None, max_length=5, pattern=r"^\d{2}:\d{2}$"),
+) -> dict[str, Any]:
+    """桌宠客户端专用的只读订阅接口。令牌即凭证，无效或过期返回 404。"""
+    try:
+        today = today_card.clamp_day(day, date.today())
+        data = pet_sync.feed_pet_by_token(token, today, now_clock=clock)
+    except (*JW_ERRORS, redis.RedisError) as exc:
+        raise _jw_http_error(exc) from exc
+    if data is None:
+        raise HTTPException(status_code=404, detail="桌宠令牌无效或已被重置")
+    return data
+
+
+@app.get("/api/term/review")
+def get_term_review(
+    user: MemberDep,
+    day: str | None = Query(None, max_length=10, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+) -> dict[str, Any]:
+    """当前学期回顾卡片数据（课时统计、绩点变化、学业画像）。"""
+    try:
+        today = today_card.clamp_day(day, date.today())
+        return term_review.build_term_review(user.tenant_id, user.id, today)
+    except (*JW_ERRORS, redis.RedisError) as exc:
+        raise _jw_http_error(exc) from exc
 
 
 # ============================================================
