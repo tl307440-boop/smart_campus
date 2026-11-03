@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ServicePane } from "@/components/AgentSettings";
 import { MemoryPane } from "@/components/MemoryPane";
 import { CalendarPane } from "@/components/CalendarPane";
+import { TermReviewPane } from "@/components/TermReviewPane";
 import { ChatHeader } from "@/components/ChatHeader";
 import { ChatLog } from "@/components/ChatLog";
 import { Composer, type ComposerPrefill } from "@/components/Composer";
@@ -129,7 +130,7 @@ export default function ChatPage() {
   }
 
   const jwOn = today.status === "ready" && today.card.enabled;
-  const tabs: ToolTab[] = ["service", "memory", "jw", ...(jwOn ? (["calendar"] as const) : []), ...(isStaff ? (["knowledge"] as const) : []), ...(isAdmin ? (["usage", "workspace", "embeds"] as const) : [])];
+  const tabs: ToolTab[] = ["service", "memory", "jw", ...(jwOn ? (["calendar", "review"] as const) : []), ...(isStaff ? (["knowledge"] as const) : []), ...(isAdmin ? (["usage", "workspace", "embeds"] as const) : [])];
   const noteProps = { canDebug: isStaff, canConfigure: isAdmin, onOpenService: openService };
 
   return (
@@ -234,6 +235,7 @@ export default function ChatPage() {
           {drawer.tab === "memory" && <MemoryPane />}
           {drawer.tab === "jw" && <JwAccountPane />}
           {drawer.tab === "calendar" && <CalendarPane />}
+          {drawer.tab === "review" && <TermReviewPane />}
           {drawer.tab === "knowledge" && isStaff && <KnowledgePane />}
           {drawer.tab === "usage" && isAdmin && <UsagePane />}
           {drawer.tab === "workspace" && isAdmin && <WorkspacePane onSaved={loadWorkspace} />}

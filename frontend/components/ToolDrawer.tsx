@@ -3,7 +3,7 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { CloseIcon } from "@/components/SketchIcons";
 
-export type ToolTab = "service" | "memory" | "jw" | "knowledge" | "workspace" | "embeds" | "usage" | "calendar";
+export type ToolTab = "service" | "memory" | "jw" | "knowledge" | "workspace" | "embeds" | "usage" | "calendar" | "review";
 
 export const TAB_LABEL: Record<ToolTab, string> = {
   service: "AI 服务",
@@ -14,6 +14,7 @@ export const TAB_LABEL: Record<ToolTab, string> = {
   embeds: "挂件",
   usage: "使用情况",
   calendar: "日历",
+  review: "学期回顾",
 };
 
 /** 每一页抽屉的标题和一句说明 */

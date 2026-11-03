@@ -14,6 +14,11 @@ import {
   downloadCalendar,
   errorDetail,
   fetchCalendarSubscription,
+  fetchPetSubscription,
+  createPetSubscription,
+  deletePetSubscription,
+  type PetSubscription,
+  type NewPetSubscription,
 } from "@/lib/api";
 
 const DEFAULT_ALARM: CalendarAlarm = 15;
@@ -227,12 +232,145 @@ function SubscribeSection() {
 }
 
 /** 抽屉页「日历」：把本学期的课表和考试放进手机日历，一次性下载，或订阅后自动更新。 */
+function DeskPetTokenSection() {
+  const toast = useToast();
+  const [status, setStatus] = useState<PetSubscription | null>(null);
+  const [fresh, setFresh] = useState<NewPetSubscription | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const next = await fetchPetSubscription();
+        if (cancelled) return;
+        setStatus(next);
+      } catch (err) {
+        if (!cancelled) setError(errorDetail(err).slice(0, 120) || "没读到桌宠联动状态");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function generate() {
+    setBusy(true);
+    setError(null);
+    try {
+      const created = await createPetSubscription();
+      setFresh(created);
+      setStatus({ active: true });
+      toast.success("桌宠访问令牌已生成！");
+    } catch (err) {
+      setError(errorDetail(err).slice(0, 120) || "生成失败，稍后再试");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function turnOff() {
+    setBusy(true);
+    setError(null);
+    try {
+      await deletePetSubscription();
+      setStatus({ active: false });
+      setFresh(null);
+      toast.success("桌宠联动已解除，旧令牌已失效");
+    } catch (err) {
+      setError(errorDetail(err).slice(0, 120) || "解除失败，稍后再试");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copy(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("令牌已复制到剪贴板");
+    } catch {
+      toast.error("未能自动复制，请手动选中复制");
+    }
+  }
+
+  return (
+    <div className="mt-8 border-t border-border pt-6">
+      <h3 className="font-display text-lg">桌面宠物联动 (Desk Pet)</h3>
+      <p className="mt-1 text-sm text-muted">
+        生成免密只读令牌后，在电脑独立桌宠上右键点击「🎓 绑定校园助手」并填入令牌。桌宠将常驻在桌面提醒你今日课表、下节课倒计时与考场信息。
+      </p>
+
+      {status?.active && !fresh && (
+        <p className="mt-3 text-[0.9375rem] text-ink">
+          ✅ 当前已开启桌宠数据同步。若需要在其他电脑的桌宠上绑定或令牌遗失，可重新生成（旧令牌将立即失效）。
+        </p>
+      )}
+
+      {fresh && (
+        <div className="rise-in mt-3 rounded border border-sketch p-3 bg-paper-sunken">
+          <label htmlFor="pet-token-val" className="field-label text-xs">
+            桌宠专属令牌（仅显示一次，请妥善保管）
+          </label>
+          <div className="mt-1 flex gap-2">
+            <input
+              id="pet-token-val"
+              readOnly
+              value={fresh.token}
+              onFocus={(e) => e.currentTarget.select()}
+              className="field min-w-0 flex-1 font-mono text-sm"
+            />
+            <button
+              type="button"
+              onClick={() => void copy(fresh.token)}
+              className="btn btn-sm btn-primary shrink-0"
+            >
+              复制令牌
+            </button>
+          </div>
+          <p className="mt-2 text-xs text-muted">
+            💡 复制后，在桌面上直接右键桌宠，选择「🎓 绑定校园助手」，粘贴即可完成绑定。
+          </p>
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={() => void generate()}
+          disabled={busy || status === null}
+          className="btn btn-sm btn-primary"
+        >
+          {status?.active ? "重新生成桌宠令牌" : "生成桌宠令牌"}
+        </button>
+        {status?.active && (
+          <button
+            type="button"
+            onClick={() => void turnOff()}
+            disabled={busy}
+            className="link-ink text-sm text-danger"
+          >
+            解除桌宠绑定
+          </button>
+        )}
+      </div>
+
+      {error && (
+        <p className="mt-2 text-[0.9375rem] break-all text-danger" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function CalendarPane() {
   return (
     <section>
-      <PaneTitle title="日历">先在「教务账号」里绑定，再把课表放进手机日历，上课、考试不用自己记。</PaneTitle>
+      <PaneTitle title="日历与桌宠">先在「教务账号」里绑定，再把课表放进手机日历或桌宠，上课、考试不用自己记。</PaneTitle>
       <ExportSection />
       <SubscribeSection />
+      <DeskPetTokenSection />
     </section>
   );
 }

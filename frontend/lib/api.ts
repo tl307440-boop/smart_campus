@@ -605,3 +605,58 @@ function dispatchFrame(frame: string, handlers: ChatHandlers) {
       break;
   }
 }
+
+// ---------------- 桌宠联动与学期回顾 ----------------
+
+export interface PetSubscription {
+  active: boolean;
+  created_at?: number;
+}
+
+export interface NewPetSubscription {
+  token: string;
+  feed_path: string;
+}
+
+export async function fetchPetSubscription(): Promise<PetSubscription> {
+  return request<PetSubscription>("/api/pet/subscription", { cache: "no-store" });
+}
+
+export async function createPetSubscription(): Promise<NewPetSubscription> {
+  return request<NewPetSubscription>("/api/pet/subscription", { method: "POST" });
+}
+
+export async function deletePetSubscription(): Promise<void> {
+  return request<void>("/api/pet/subscription", { method: "DELETE" });
+}
+
+export interface TermReviewData {
+  enabled: boolean;
+  bound: boolean;
+  term?: string;
+  current_week?: number;
+  total_courses?: number;
+  total_lessons_estimated?: number;
+  busiest_day?: string;
+  earliest_class?: string;
+  latest_class?: string;
+  curr_gpa?: number | null;
+  prev_gpa?: number | null;
+  gpa_change?: number | null;
+  overall_gpa?: number | null;
+  tags?: string[];
+  cheer_message?: string;
+  courses_summary?: Array<{
+    course: string;
+    teacher: string;
+    room: string;
+    weeks: string;
+  }>;
+}
+
+export async function fetchTermReview(day?: string): Promise<TermReviewData> {
+  const params = new URLSearchParams();
+  if (day) params.set("day", day);
+  const qs = params.toString();
+  return request<TermReviewData>(`/api/term/review${qs ? `?${qs}` : ""}`, { cache: "no-store" });
+}
