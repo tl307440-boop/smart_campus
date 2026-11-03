@@ -55,6 +55,8 @@ def test_target_days() -> None:
     assert agent._target_days(wednesday, "today", 1) == [(date(2026, 10, 19), 1)]  # 周一已过，指下周一
     assert agent._target_days(wednesday, "next_week", 5) == [(date(2026, 10, 23), 1)]
     assert len(agent._target_days(wednesday, "this_week", None)) == 7
+    assert len(agent._target_days(wednesday, "last_week", None)) == 7
+    assert agent._target_days(wednesday, "last_week", 1) == [(date(2026, 10, 5), -1)]
     assert agent._target_days(_ctx(date(2026, 10, 18)), "tomorrow", None) == [(date(2026, 10, 19), 1)]
 
 
@@ -467,3 +469,30 @@ def test_running_event_carries_the_expected_wait(monkeypatch: pytest.MonkeyPatch
 
     assert events[0] == {"name": "jw_timetable", "label": "查课表", "state": "running", "eta_ms": 2500}
     assert "eta_ms" not in events[1]
+
+
+def test_timetable_supports_historical_or_specified_week(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(jw_account, "school_ai", lambda tenant_id: SchoolAi(jw_mode="demo"))
+    # DemoJw 中当前周是 7，思想道德与法治是 1-8 周周三，线性代数是 2-16(双) 周五
+    ctx = _ctx(date(2026, 10, 12))  # 周一，第 7 周
+
+    # 查第 8 周整周
+    w8 = agent._timetable(ctx, {"week": 8})
+    assert len(w8["days"]) == 7
+    assert w8["days"][0]["week"] == 8
+    # 第 8 周周三应该有思想道德与法治（演示）
+    wed_courses = [c["course"] for c in w8["days"][2]["courses"]]
+    assert "思想道德与法治（演示）" in wed_courses
+    # 第 8 周（双周）周五应该有线性代数（演示）
+    fri_courses = [c["course"] for c in w8["days"][4]["courses"]]
+    assert "线性代数（演示）" in fri_courses
+
+    # 查第 9 周（思想道德与法治 1-8 周已结课，不应出现）
+    w9_wed = agent._timetable(ctx, {"week": 9, "weekday": 3})
+    assert len(w9_wed["days"]) == 1
+    assert [c["course"] for c in w9_wed["days"][0]["courses"]] == []
+
+    # 查上周 (last_week)
+    last_week = agent._timetable(ctx, {"day": "last_week"})
+    assert len(last_week["days"]) == 7
+    assert last_week["days"][0]["week"] == 6
