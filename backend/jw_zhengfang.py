@@ -46,6 +46,7 @@ _PAGE = {"_search": "false", "queryModel.currentPage": "1", "queryModel.sortName
 _NOT_STUDY_ROOMS = ("运动", "体育", "球场", "操场", "田径", "游泳", "办公", "会议", "仓库", "宿舍")
 # 学业情况页：顶部提示框（去掉空白后）与各类课程的学分行，写法沿用 openschoolcn/zfn_api
 _DECIMAL = re.compile(r"\d+\.\d*")
+_ACADEMIA_MAJOR_GPA = re.compile(r"专业必修课平均学分绩点\D{0,6}(\d+\.\d*)")
 _ACADEMIA_PLAN = re.compile(r"计划总课程(\d+)门通过(\d+)门?.*未通过(\d+)门?.*未修(\d+)?.*在读(\d+)门?.*计划外?.*通过(\d+)门?.*未通过(\d+)门")
 _ACADEMIA_CATEGORY = re.compile(
     r"\"(.*)&nbsp.*要求学分.*:(\d+\.\d*|0|&nbsp;).*获得学分.*:(\d+\.\d*|0| ).*未获得学分.*:(\d+\.\d*|0| )[\s\S]*?<span id='showKc(.*)'></span>"
@@ -354,7 +355,13 @@ class ZhengfangClient:
         if not summary and "showKc" not in page:
             raise JwError("教务没有返回学业情况，可能本校没开放这个查询")
         gpa = _DECIMAL.search(summary)
-        result: dict[str, Any] = {"gpa": float(gpa.group(0)) if gpa else None, "plan": None, "categories": []}
+        major = _ACADEMIA_MAJOR_GPA.search(summary)
+        result: dict[str, Any] = {
+            "gpa": float(gpa.group(0)) if gpa else None,
+            "major_required_gpa": float(major.group(1)) if major else None,
+            "plan": None,
+            "categories": [],
+        }
         plan = _ACADEMIA_PLAN.search(summary)
         if plan:
             total, passed, failed, missed, studying, extra_passed, extra_failed = (int(n or 0) for n in plan.groups())

@@ -106,6 +106,7 @@ class FakeSchool:
 ACADEMIA_PAGE = """<html><body>
 <div id="alertBox" class="alert alert-info">
   平均学分绩点(GPA)：3.21
+  专业必修课平均学分绩点：3.05
   计划总课程 48 门通过 30 门, 未通过 1 门；未修 12 门；在读 5 门；计划外：通过 2 门，未通过 0 门
 </div>
 var a = "通识必修课&nbsp;&nbsp;要求学分:40.0&nbsp;获得学分:32.0&nbsp;未获得学分:8.0";
@@ -140,6 +141,7 @@ def test_academia_parses_summary_and_category_credits() -> None:
     client.login("2023001", "secret")
     data = client.academia()
     assert data["gpa"] == 3.21
+    assert data["major_required_gpa"] == 3.05
     assert data["plan"] == {"total": 48, "passed": 30, "failed": 1, "not_taken": 12, "in_progress": 5, "extra_passed": 2, "extra_failed": 0}
     assert data["categories"] == [
         {"name": "通识必修课", "required": 40.0, "earned": 32.0, "missing": 8.0},

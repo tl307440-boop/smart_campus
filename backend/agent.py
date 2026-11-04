@@ -335,23 +335,31 @@ def _grades(ctx: ToolContext, args: dict[str, Any]) -> Any:
     xnm, xqm = _term(ctx, str(args.get("term") or "all"))
     with jw_account.source_for(ctx.tenant_id, ctx.user_id) as jw:
         grades = jw.grades(xnm, xqm)
-    credits = points = 0.0
-    for g in grades:
+        # 总绩点以教务「学生学业情况查询」页面给的数为准，不自己算；这个页面读不到时才退回估算
         try:
-            credit, gpa = float(g["credit"]), float(g["gpa"])
-        except (TypeError, ValueError):
-            continue
-        credits += credit
-        points += credit * gpa
+            official = jw.academia()
+        except (JwError, httpx.HTTPError):
+            official = {}
     ctx.cite("教务系统·成绩")
     terms = gpa_by_term(grades)
     failed = [g for g in grades if is_failed(g)]
-    result: dict[str, Any] = {
-        "count": len(grades),
-        "credit_weighted_gpa": round(points / credits, 2) if credits else None,
-        "gpa_by_term": terms,
-        "grades": grades,
-    }
+    result: dict[str, Any] = {"count": len(grades), "gpa_by_term": terms, "grades": grades}
+    if official.get("gpa") is not None:
+        ctx.cite("教务系统·学业情况")
+        result["official_gpa"] = official["gpa"]
+        result["official_major_required_gpa"] = official.get("major_required_gpa")
+        result["gpa_note"] = "official_gpa 是教务系统给出的全部课程平均学分绩点，问总绩点、平均绩点时直接引用，不要自己重新计算；gpa_by_term 是按学期估算的参考值"
+    else:
+        credits = points = 0.0
+        for g in grades:
+            try:
+                credit, gpa = float(g["credit"]), float(g["gpa"])
+            except (TypeError, ValueError):
+                continue
+            credits += credit
+            points += credit * gpa
+        result["credit_weighted_gpa"] = round(points / credits, 2) if credits else None
+        result["gpa_note"] = "教务的学业情况页面暂时读不到，credit_weighted_gpa 只是按已有成绩估算的值，回答时要说明是估算，以教务系统为准"
     if failed:
         result["failed_courses"] = [{"term": g["term"], "course": g["course"], "score": g["score"], "credit": g["credit"]} for g in failed]
     if len(terms) > 1:
@@ -539,7 +547,7 @@ _JW_TOOLS = [
     Tool("jw_grades", "查成绩", "查询当前学生本人的成绩、学分和绩点。", _obj({"term": _TERM}), _grades),
     Tool(
         "jw_graduation", "查毕业进度",
-        "查询当前学生本人的学业完成情况：平均绩点、培养计划内课程通过/未通过/未修/在读门数、各类课程要求学分和已获学分。问毕业还差多少学分、学业进度时用。",
+        "查询当前学生本人的学业完成情况：教务给出的平均绩点（全部课程、专业必修课）、培养计划内课程通过/未通过/未修/在读门数、各类课程要求学分和已获学分。问毕业还差多少学分、学业进度时用。",
         _obj(), _graduation,
     ),
     Tool(
@@ -714,6 +722,7 @@ def system_prompt(ctx: ToolContext, tools: list[Tool]) -> str:
 你可以调用工具。规则：
 - 涉及具体事实（课程、时间、教室、成绩、通知内容、地点）必须以工具结果为准，不要编造；查不到就直说。
 - 问本人课表、考试、成绩、空教室、毕业还差多少学分：调用教务工具。工具提示没绑定或过期时，告诉学生去「工具 → 教务账号」绑定。
+- 问本人的总绩点、平均绩点（GPA）：直接引用教务工具返回的 official_gpa / gpa（专业必修课的看 major_required_gpa），不要自己用成绩重新计算；只有问某个学期的绩点时才用 gpa_by_term，并说明是按学分加权估算的。
 - 问学校的通知、安排、活动：先用 school_news 找，需要细节再 read_notice 读正文。
 - 问校园里的地方在哪、怎么走：先 search_knowledge 看学校资料，再用地图工具，给出导航链接。{search_rule}
 - 工具结果里带 display 的，完整数据已经画成表格给学生看了，不要再逐行列出；没有 display 的多行结果（如多条通知、多个地点），用 Markdown 表格整理，不要省略行、不要改写数值。
