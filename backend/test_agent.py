@@ -88,7 +88,17 @@ def test_unknown_week_is_flagged_and_ungraded_courses_skip_gpa(monkeypatch: pyte
     assert "week_unknown" in agent._timetable(_ctx(), {"day": "today"})
     grades = [{"credit": "4", "gpa": "4.0"}, {"credit": "2", "gpa": ""}]
     monkeypatch.setattr(jw_account.DemoJw, "grades", lambda self, xnm="", xqm="": grades)
-    assert agent._grades(_ctx(), {})["credit_weighted_gpa"] == 4.0
+    result = agent._grades(_ctx(), {})
+    # 总绩点直接取教务学业情况页的数（演示数据 3.21），不用成绩自己算
+    assert result["official_gpa"] == 3.21 and result["official_major_required_gpa"] == 3.05
+    assert "credit_weighted_gpa" not in result
+
+    def unavailable(self: object) -> dict[str, object]:
+        raise agent.JwError("学业情况暂时查不了")
+
+    monkeypatch.setattr(jw_account.DemoJw, "academia", unavailable)
+    fallback = agent._grades(_ctx(), {})
+    assert fallback["credit_weighted_gpa"] == 4.0 and "official_gpa" not in fallback and "估算" in fallback["gpa_note"]
 
 
 def test_multi_row_results_become_tables_and_model_is_told_not_to_repeat(monkeypatch: pytest.MonkeyPatch) -> None:

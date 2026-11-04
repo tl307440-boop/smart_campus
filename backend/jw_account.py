@@ -276,6 +276,7 @@ class DemoJw:
     def academia(self) -> dict[str, Any]:
         return {
             "gpa": 3.21,
+            "major_required_gpa": 3.05,
             "plan": {"total": 48, "passed": 30, "failed": 1, "not_taken": 12, "in_progress": 5, "extra_passed": 2, "extra_failed": 0},
             "categories": [
                 {"name": "通识必修课（演示）", "required": 40.0, "earned": 32.0, "missing": 8.0},
