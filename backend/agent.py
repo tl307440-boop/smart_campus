@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
 
+import course_planner
 import httpx
 import jw_account
 import redis
@@ -29,7 +30,7 @@ logger = get_logger(__name__)
 MAX_ROUNDS = 4
 TOOL_RESULT_CHARS = 6000
 AUDIT_KEEP = 2000
-WEEKDAYS = "一二三四五六日"
+WEEKDAYS = course_planner.WEEKDAYS
 # 空教室交给模型的行数；完整结果走表格，不受这个限制
 ROOMS_FOR_MODEL = 40
 # 一张表最多带多少行给前端，防止一次查询把消息撑到几百 KB
@@ -39,11 +40,13 @@ TABLE_SHOWN = "完整结果已经以表格形式显示在你的回答下方，�
 
 # 命中这些词就直接走工具问答，不交给意图分类模型去猜（见 needs_tools）
 _JW_WORDS = (
-    "成绩", "绩点", "学分", "挂科", "补考", "重修", "课表", "有课", "什么课", "几节课", "第几节",
+    "成绩", "绩点", "学分", "挂科", "补考", "重修", "课表", "有课", "没课", "什么课", "几节课", "第几节",
     "考试", "考场", "座位号", "空教室", "空闲教室", "自习室", "教室空", "毕业", "学业",
+    "选课", "冲突", "排课", "培养方案", "学分缺口",
     "第几周", "第几个周", "周次", "教学周", "校历", "开学", "放假",
 )
-_NEWS_WORDS = ("通知", "公告", "新闻", "讲座", "活动安排")
+_NEWS_WORDS = ("通知", "公告", "新闻", "讲座", "活动安排", "附件", "名单", "公示")
+_STUDY_WORDS = ("课件", "ppt", "讲义", "伴学", "考点", "闪卡", "个人笔记", "我的笔记", "课程资料", "复习提纲", "模拟题")
 _TIMELY_WORDS = (
     "今年", "明年", "去年", "最新", "现在", "目前", "最近", "几号", "还有多久", "多少钱", "价格", "排名", "排行", "天气",
 )
@@ -126,26 +129,8 @@ _TERM = {"type": "string", "enum": ["current", "previous", "all"], "description"
 # ---------------- 教务 ----------------
 
 
-def _weeks_of(zcd: str) -> set[int]:
-    """「1-8周,10-16周(双)」→ 周次集合。"""
-    weeks: set[int] = set()
-    for part in re.split(r"[,，]", zcd):
-        match = re.search(r"(\d+)(?:-(\d+))?周?(?:\((单|双)\))?", part)
-        if not match:
-            continue
-        start, end = int(match.group(1)), int(match.group(2) or match.group(1))
-        parity = {"单": 1, "双": 0}.get(match.group(3) or "")
-        weeks |= {w for w in range(start, end + 1) if parity is None or w % 2 == parity}
-    return weeks
-
-
-def _periods_of(jcs: str) -> list[int]:
-    match = re.search(r"(\d+)(?:-(\d+))?", jcs)
-    if not match:
-        return []
-    return list(range(int(match.group(1)), int(match.group(2) or match.group(1)) + 1))
-
-
+_weeks_of = course_planner.weeks_of
+_periods_of = course_planner.periods_of
 weeks_of = _weeks_of
 periods_of = _periods_of
 
@@ -299,19 +284,9 @@ def _exams(ctx: ToolContext, args: dict[str, Any]) -> Any:
     return result
 
 
-_FAIL_WORDS = ("不及格", "不合格", "未通过", "挂科", "缺考", "作弊")
-PASS_SCORE = 60
-
-
-def is_failed(grade: dict[str, str]) -> bool:
-    """成绩单里的一行是不是没通过：百分制低于 60，或者等级、文字写着不及格。绩点为 0 但成绩读不出来的不下结论。"""
-    score = str(grade.get("score", "")).strip()
-    if any(word in score for word in _FAIL_WORDS):
-        return True
-    try:
-        return float(score) < PASS_SCORE
-    except ValueError:
-        return False
+_FAIL_WORDS = course_planner._FAIL_WORDS
+PASS_SCORE = course_planner.PASS_SCORE
+is_failed = course_planner.is_failed_grade
 
 
 def gpa_by_term(grades: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -382,9 +357,19 @@ def _graduation(ctx: ToolContext, args: dict[str, Any]) -> Any:
     categories = data.get("categories") or []
     result: dict[str, Any] = {**data}
     if categories:
+        total_req = round(sum(float(c.get("required") or 0) for c in categories), 1)
+        total_earned = round(sum(float(c.get("earned") or 0) for c in categories), 1)
+        total_missing = round(sum(max(0.0, float(c.get("missing") or 0)) for c in categories), 1)
+        result["credit_summary"] = {
+            "total_required": total_req,
+            "total_earned": total_earned,
+            "total_missing": total_missing,
+            "completion_pct": min(100, round(total_earned / total_req * 100)) if total_req > 0 else 0,
+        }
         result["display"] = ctx.table(
             "各类课程学分", [("name", "课程类别"), ("required", "要求"), ("earned", "已获"), ("missing", "还差")], categories
         )
+        result["sandbox_hint"] = "学生想交互式试排课表或看学分进度条时，可告诉他打开右侧「工具 → 学业规划」"
     else:
         result["note"] = "教务没给出分类学分要求，只能看总体通过情况；具体还差哪门课以教务系统「学生学业情况查询」为准"
     if (data.get("plan") or {}).get("failed"):
@@ -392,6 +377,64 @@ def _graduation(ctx: ToolContext, args: dict[str, Any]) -> Any:
     if any((c.get("missing") or 0) > 0 for c in categories):
         ctx.suggest("按现在的进度，学分缺口怎么补")
     return result
+
+
+def _course_conflict(ctx: ToolContext, args: dict[str, Any]) -> Any:
+    xnm, xqm = current_term(ctx.today)
+    with jw_account.source_for(ctx.tenant_id, ctx.user_id) as jw:
+        timetable = jw.timetable(xnm, xqm)
+    ctx._campus_id = timetable.get("campus_id", "")
+
+    raw_candidates = args.get("candidates")
+    candidates: list[dict[str, Any]] = []
+    if isinstance(raw_candidates, list):
+        candidates = [c for c in raw_candidates if isinstance(c, dict)]
+    elif args.get("weekday") is not None or args.get("periods") is not None:
+        candidates = [{
+            "name": args.get("name") or args.get("course") or "拟选课程",
+            "weekday": args.get("weekday"),
+            "periods": args.get("periods"),
+            "weeks": args.get("weeks") or "",
+        }]
+
+    ctx.cite("教务系统·选课冲突与空闲时段")
+    if not candidates:
+        summary = course_planner.summarize_timetable(timetable)
+        rows = [
+            {
+                "day": d["label"],
+                "occupied": "第" + "、".join(str(p) for p in d["occupied_periods"]) + "节" if d["occupied_periods"] else "无课",
+                "free": "；".join(d["free_blocks"]) if d["free_blocks"] else "较满",
+            }
+            for d in summary["daily_load"]
+        ]
+        return {
+            "mode": "free_windows",
+            "free_windows": summary["free_windows"],
+            "daily_load": summary["daily_load"],
+            "display": ctx.table("每周空闲时段", [("day", "星期"), ("occupied", "已排节次"), ("free", "空闲建议")], rows),
+            "sandbox_hint": "也可在右侧「工具 → 学业规划」里可视化试排候选课程并查看学分缺口",
+        }
+
+    checked = course_planner.check_course_conflicts(timetable, candidates)
+    table_rows = [
+        {
+            "name": item["name"],
+            "slot": (
+                f"周{WEEKDAYS[item['weekday'] - 1]} 第{'-'.join(map(str, [item['periods'][0], item['periods'][-1]] if len(item['periods']) > 1 else item['periods']))}节 ({item['weeks_text']})"
+                if item["valid"] else "时间未识别"
+            ),
+            "status": "有冲突" if item["conflict"] else ("可排入" if item["valid"] else "待补全"),
+            "detail": item["summary"],
+        }
+        for item in checked["results"]
+    ]
+    ctx.suggest("我还差多少学分才能毕业")
+    return {
+        "mode": "conflict_check",
+        **checked,
+        "display": ctx.table("选课冲突检测", [("name", "课程"), ("slot", "拟排时段"), ("status", "状态"), ("detail", "检测结果")], table_rows),
+    }
 
 
 def _free_rooms(ctx: ToolContext, args: dict[str, Any]) -> Any:
@@ -486,7 +529,33 @@ def _news(ctx: ToolContext, args: dict[str, Any]) -> Any:
 def _read_notice(ctx: ToolContext, args: dict[str, Any]) -> Any:
     notice = school_tools.read_notice(str(args.get("url") or ""), school_ai(ctx.tenant_id).news_urls)
     ctx.cite(notice["title"], notice["url"], notice["text"])
+    attachments = notice.get("attachments") or []
+    if attachments:
+        readable = [a for a in attachments if a.get("readable")]
+        if readable and len(notice.get("text", "")) < 350:
+            notice["attachment_hint"] = (
+                "正文较短且附有附件，具体名单、时间表或细则可能在附件里；"
+                "请继续调用 read_notice_attachment 读取对应附件（可带学院/专业/课程等 keyword 筛选）。"
+            )
     return notice
+
+
+def _read_notice_attachment(ctx: ToolContext, args: dict[str, Any]) -> Any:
+    att = school_tools.read_notice_attachment(
+        str(args.get("url") or ""),
+        school_ai(ctx.tenant_id).news_urls,
+        str(args.get("keyword") or ""),
+    )
+    snippet = att.get("matched_snippets") or att.get("preview_text") or att.get("text") or ""
+    ctx.cite(f"通知附件·{att['title']}", att["url"], snippet)
+    if att.get("kind") == "table":
+        rows = att.pop("rows", [])
+        columns = att.pop("columns", [])
+        if rows and columns:
+            att["display"] = ctx.table(f"附件：{att['title']}", columns, rows)
+            if not args.get("keyword") and att.get("total_rows", 0) > 15:
+                ctx.suggest("按我的学院或课程筛选这份附件表格")
+    return att
 
 
 def _web_search(ctx: ToolContext, args: dict[str, Any]) -> Any:
@@ -541,6 +610,49 @@ def _knowledge(ctx: ToolContext, args: dict[str, Any]) -> Any:
     return {"context": context or "本校资料里没有找到相关内容"}
 
 
+def _study_space_enabled() -> bool:
+    try:
+        import study_space
+
+        return study_space.enabled()
+    except Exception:
+        return False
+
+
+def _study_materials(ctx: ToolContext, args: dict[str, Any]) -> Any:
+    import study_space
+
+    if not ctx.user_id:
+        return {"error": "请先登录学生账号再查询个人课程伴学资料"}
+    query = str(args.get("query") or "").strip()
+    course_name = str(args.get("course_name") or "").strip()
+    hits = study_space.search_course_chunks(
+        ctx.tenant_id, ctx.user_id, query, course_name=course_name, top_k=6
+    )
+    if not hits:
+        courses = study_space.list_courses(ctx.tenant_id, ctx.user_id)
+        return {
+            "hits": [],
+            "courses": [c["name"] for c in courses],
+            "note": "你的个人伴学空间里还没有匹配的课件或笔记。可在「工具 → 伴学空间」同步课表并上传 PPT/PDF/笔记。",
+        }
+    for hit in hits:
+        ctx.cite(f"伴学空间·{hit['course_name']} / {hit['material_title']}", "", hit["content"])
+    ctx.suggest("帮我从这份课件出 4 道考前自测题", "总结这章最容易考的概念对比")
+    return {
+        "count": len(hits),
+        "chunks": [
+            {
+                "course": h["course_name"],
+                "material": h["material_title"],
+                "score": h["score"],
+                "content": h["content"],
+            }
+            for h in hits
+        ],
+    }
+
+
 _JW_TOOLS = [
     Tool("jw_timetable", "查课表", "查询当前学生本人的课表（课程、时间、教室、老师），支持按天、按星期或按指定教学周（如第8周）查询。", _obj({"day": _DAY, "weekday": _WEEKDAY, "week": _WEEK}), _timetable),
     Tool("jw_exams", "查考试安排", "查询当前学生本人的考试安排（时间、考场、座位号）。", _obj({"term": {**_TERM, "enum": ["current", "previous"]}}), _exams),
@@ -557,10 +669,43 @@ _JW_TOOLS = [
               "building": {"type": "string", "description": "教学楼名称里的关键词，可不填"}}),
         _free_rooms,
     ),
+    Tool(
+        "jw_course_conflict", "选课冲突与空闲时段",
+        "检测拟选课程与当前个人课表是否冲突（支持单双周/分段周次），或不填候选课直接统计每周空闲时段，供选课排课参考。",
+        _obj({
+            "candidates": {
+                "type": "array",
+                "description": "多门拟选课程列表，每门含 name、weekday、periods、weeks（可选，默认 1-16周）",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "weekday": {"description": "星期几，1-7 或 周一..周日"},
+                        "periods": {"description": "节次，如 '1-2节' 或 [1,2]"},
+                        "weeks": {"type": "string", "description": "教学周次，如 '1-16周'、'2-16周(双)'，可不填"},
+                    },
+                },
+            },
+            "name": {"type": "string", "description": "单门试排课程名（不传 candidates 时可用）"},
+            "weekday": {"description": "单门试排星期几（1-7 或 周一..周日）"},
+            "periods": {"description": "单门试排节次，如 '3-4节' 或 [3,4]"},
+            "weeks": {"type": "string", "description": "单门试排周次，如 '1-16周'"},
+        }),
+        _course_conflict,
+    ),
 ]
 _NEWS_TOOLS = [
     Tool("school_news", "查学校通知", "查学校官网和教务处最新的通知、公告、新闻标题，可按关键词筛选。", _obj({"keyword": {"type": "string", "description": "标题关键词，多个用空格分开，可不填"}}), _news),
-    Tool("read_notice", "读通知正文", "打开 school_news 返回的某条通知，读正文。", _obj({"url": {"type": "string"}}, ["url"]), _read_notice),
+    Tool("read_notice", "读通知正文", "打开 school_news 返回的某条通知，读正文并列出页面附件。", _obj({"url": {"type": "string"}}, ["url"]), _read_notice),
+    Tool(
+        "read_notice_attachment", "读通知附件",
+        "下载并解析 read_notice 返回的官网附件（支持 xlsx/csv/docx/pdf/txt），可按学院/专业/课程/姓名等 keyword 在本地筛选匹配行。",
+        _obj({
+            "url": {"type": "string", "description": "read_notice 返回的附件 url"},
+            "keyword": {"type": "string", "description": "用于筛表格行或定位段落的关键词，多个用空格分开，可不填"},
+        }, ["url"]),
+        _read_notice_attachment,
+    ),
 ]
 _SEARCH_TOOL = Tool(
     "web_search", "联网搜索",
@@ -581,11 +726,22 @@ _CALENDAR_TOOL = Tool(
     _calendar,
 )
 _KNOWLEDGE_TOOL = Tool("search_knowledge", "查本校资料", "检索学校上传的资料（学生手册、规章、校园指南、地点介绍等）。", _obj({"query": {"type": "string"}}, ["query"]), _knowledge)
+_STUDY_TOOL = Tool(
+    "study_course_materials", "查个人课件",
+    "检索学生本人在「伴学空间」上传的私人课程资料（PPT、PDF、Word 讲义、课堂笔记），用于重点讲解、考点梳理或答疑。",
+    _obj({
+        "query": {"type": "string", "description": "要检索的知识点、公式或章节关键词"},
+        "course_name": {"type": "string", "description": "课程名称关键词（可不填，跨课检索）"},
+    }, ["query"]),
+    _study_materials,
+)
 
 
 def available_tools(tenant_id: str, user_id: str, settings: WorkspaceSettings) -> list[Tool]:
     school = school_ai(tenant_id)
     tools = [_KNOWLEDGE_TOOL]
+    if user_id and _study_space_enabled():
+        tools.append(_STUDY_TOOL)
     if user_id and school.jw_mode in ("demo", "zhengfang"):
         tools += [*_JW_TOOLS, _CALENDAR_TOOL]  # 周次来自教务，没有教务就没有可靠的周次
     if school.news_urls:
@@ -609,6 +765,8 @@ def needs_tools(question: str, tool_names: set[str]) -> bool:
     工具问答本身也带知识库检索，所以宁可多判进来：最多慢一点，不会答错。
     """
     if "jw_grades" in tool_names and any(word in question for word in _JW_WORDS):
+        return True
+    if "study_course_materials" in tool_names and any(word in question.lower() for word in _STUDY_WORDS):
         return True
     if "school_news" in tool_names and any(word in question for word in _NEWS_WORDS):
         return True
@@ -651,7 +809,7 @@ def read_audit(tenant_id: str, limit: int = AUDIT_KEEP) -> list[dict[str, Any]]:
 
 def tool_labels() -> dict[str, str]:
     """工具名 → 给人看的名字，使用情况页用。"""
-    tools = [*_JW_TOOLS, *_NEWS_TOOLS, _SEARCH_TOOL, *_MAP_TOOLS, _KNOWLEDGE_TOOL]
+    tools = [*_JW_TOOLS, *_NEWS_TOOLS, _SEARCH_TOOL, *_MAP_TOOLS, _KNOWLEDGE_TOOL, _STUDY_TOOL]
     return {tool.name: tool.label for tool in tools}
 
 
@@ -712,18 +870,24 @@ def system_prompt(ctx: ToolContext, tools: list[Tool]) -> str:
     gaps = f"\n目前查不了：{'；'.join(missing)}。被问到时如实说明，并建议去问辅导员或相关部门。" if missing else ""
     if ctx.refusal:
         gaps += f"\n- 本校要求只依据资料回答：答案必须来自工具结果，不能用你自己的知识补充；工具都没查到相关内容时，只回复「{ctx.refusal}」；但工具返回 error 或 how_to_fix 时，照常把那条提示转述给学生。"
-    search_rule = (
-        "\n- 涉及会随时间变化的信息（今年的政策、最新的日期和价格、排名、校外的活动和新闻），或者你对某个事实没有把握时，"
-        "先调用 web_search 再回答，不要凭记忆作答。多搜一次的代价远小于说错。"
-    ) if "web_search" in names else ""
+    if "web_search" in names:
+        search_rule = (
+            "\n- 涉及会随时间变化的信息（今年的政策、最新的日期和价格、排名、校外的活动和新闻），或者你对某个事实没有把握时，"
+            "先调用 web_search 再回答，不要凭记忆作答。多搜一次的代价远小于说错。"
+        )
+    else:
+        search_rule = ""
+    study_rule = (
+        "\n- 学生问到个人课件、PPT、笔记、课程重点整理或考前复习题时，优先调用 study_course_materials 检索他的伴学资料。"
+    ) if "study_course_materials" in names else ""
     return f"""你是"{ctx.settings.assistant_name}"，{school}的智能校园助手，像热心的学长学姐，对刚入学、不认路的新生特别耐心。
 今天是 {ctx.today.isoformat()}（星期{WEEKDAYS[ctx.today.weekday()]}）。
 
 你可以调用工具。规则：
 - 涉及具体事实（课程、时间、教室、成绩、通知内容、地点）必须以工具结果为准，不要编造；查不到就直说。
-- 问本人课表、考试、成绩、空教室、毕业还差多少学分：调用教务工具。工具提示没绑定或过期时，告诉学生去「工具 → 教务账号」绑定。
+- 问本人课表、考试、成绩、空教室、毕业还差多少学分、选课是否冲突或哪天没课：调用教务工具（其中 jw_course_conflict 可检测排课冲突和空闲时段）。工具提示没绑定或过期时，告诉学生去「工具 → 教务账号」绑定。
 - 问本人的总绩点、平均绩点（GPA）：直接引用教务工具返回的 official_gpa / gpa（专业必修课的看 major_required_gpa），不要自己用成绩重新计算；只有问某个学期的绩点时才用 gpa_by_term，并说明是按学分加权估算的。
-- 问学校的通知、安排、活动：先用 school_news 找，需要细节再 read_notice 读正文。
+- 问学校的通知、安排、活动或名单附件：先用 school_news 找，需要细节再 read_notice 读正文；若页面附有表格/PDF/Word 附件，继续用 read_notice_attachment 读附件并可按学院/课程/关键词筛选。{study_rule}
 - 问校园里的地方在哪、怎么走：先 search_knowledge 看学校资料，再用地图工具，给出导航链接。{search_rule}
 - 工具结果里带 display 的，完整数据已经画成表格给学生看了，不要再逐行列出；没有 display 的多行结果（如多条通知、多个地点），用 Markdown 表格整理，不要省略行、不要改写数值。
 - 回答用简体中文 Markdown，先给结论，再分点列细节；链接用 [文字](网址) 的形式。

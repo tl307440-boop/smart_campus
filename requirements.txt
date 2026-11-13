@@ -24,6 +24,8 @@ python-dotenv>=1.0.0            # 用于安全读取 .env 文件中的各类 API
 # --- 3. RAG 知识库与检索组件 ---
 pypdf>=4.0.0                    # 轻量级本地 PDF 解析提取
 python-docx>=1.1.0              # Word(docx) 正文与表格提取
+openpyxl>=3.1.0                 # Excel(xlsx) 通知附件与表格提取
+python-pptx>=1.0.0              # PPT(pptx) 课程幻灯片与讲义备注提取
 beautifulsoup4>=4.12.0          # 网页导入：去掉导航/脚本后取正文
 httpx>=0.27.0                   # 网页导入：逐跳校验跳转、限制体积（openai 本来就依赖它）
 psycopg[binary]>=3.2.0          # 只读 Postgres 里的工作区设置与嵌入挂件配置（表由 Prisma 建）
@@ -37,6 +39,7 @@ zhipuai>=2.0.0                  # 智谱 AI 官方 SDK (用于文本 Embedding �
 
 # --- 4. 语音交互与底层通信组件 ---
 websocket-client>=1.7.0         # WebSocket 通信库 (用于连接科大讯飞流式接口)
+websockets>=13.0                # 异步 WebSocket 长连接 (用于企业微信智能机器人长连接)
 pygame>=2.5.0                   # 音频混音器与播放引擎 (用于播放 TTS 生成的语音)
 
 # --- 5. 辅助与调试工具 ---

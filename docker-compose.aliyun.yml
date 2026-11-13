@@ -60,6 +60,8 @@ services:
       # 超时（2 秒）、限流或报错会自动退回混合检索的排序，不影响问答。每次提问约多消耗 9k tokens。
       # 想关掉改成 none 即可。
       RERANK_PROVIDER: "zhipu"
+      WECOM_BOT_ENABLED: ${WECOM_BOT_ENABLED:-true}
+      IM_SCHEDULER_ENABLED: ${IM_SCHEDULER_ENABLED:-true}
     depends_on:
       redis:
         condition: service_healthy

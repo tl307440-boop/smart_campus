@@ -7,7 +7,7 @@ import { Markdown } from "@/components/Markdown";
 import { MessageActions } from "@/components/MessageActions";
 import { SafetyCard } from "@/components/SafetyCard";
 import { PaperclipIcon, PencilIcon } from "@/components/SketchIcons";
-import type { ChatMessage, ChatSource, ChatToolEvent, FeedbackRating, FeedbackReason } from "@/lib/api";
+import type { ChatMessage, ChatSource, ChatToolEvent, FeedbackRating, FeedbackReason, TicketCategory } from "@/lib/api";
 
 interface Props {
   message: ChatMessage;
@@ -24,6 +24,8 @@ interface Props {
   onEdit?: (text: string) => void;
   /** 点赞 / 点踩；不传（挂件）就没有这两个按钮 */
   onRate?: (id: string, rating: FeedbackRating, reason?: FeedbackReason) => Promise<void>;
+  /** 不满意时转人工求助工单 */
+  onEscalate?: (category: TicketCategory, note: string) => Promise<void>;
 }
 
 function ToolTrace({ tools }: { tools: ChatToolEvent[] }) {
@@ -155,6 +157,7 @@ export function MessageBubble({
   onRegenerate,
   onEdit,
   onRate,
+  onEscalate,
 }: Props) {
   const [editing, setEditing] = useState(false);
   const sources = message.sources ?? [];
@@ -259,6 +262,7 @@ export function MessageBubble({
                 }
               : undefined
           }
+          onEscalate={onEscalate}
         />
       )}
     </div>

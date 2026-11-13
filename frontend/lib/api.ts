@@ -660,3 +660,412 @@ export async function fetchTermReview(day?: string): Promise<TermReviewData> {
   const qs = params.toString();
   return request<TermReviewData>(`/api/term/review${qs ? `?${qs}` : ""}`, { cache: "no-store" });
 }
+
+export interface AcademicCategoryProgress {
+  name: string;
+  required: number;
+  earned: number;
+  missing: number;
+  pct: number;
+  status: "done" | "almost" | "pending";
+}
+
+export interface AcademicDailyLoad {
+  weekday: number;
+  label: string;
+  occupied_periods: number[];
+  course_count: number;
+  courses: Array<{
+    course: string;
+    periods: string;
+    period_nums: number[];
+    weeks: string;
+    week_nums: number[];
+    room: string;
+    teacher: string;
+  }>;
+  free_blocks: string[];
+}
+
+export interface AcademicSandboxData {
+  enabled: boolean;
+  bound: boolean;
+  term?: string;
+  current_week?: number | null;
+  gpa?: number | null;
+  plan?: {
+    total: number;
+    passed: number;
+    failed: number;
+    not_taken: number;
+    in_progress: number;
+    extra_passed?: number;
+    extra_failed?: number;
+  } | null;
+  summary?: {
+    total_required: number;
+    total_earned: number;
+    total_missing: number;
+    completion_pct: number;
+  };
+  categories?: AcademicCategoryProgress[];
+  failed_courses?: Array<{
+    term: string;
+    course: string;
+    score: string;
+    credit: string;
+    type: string;
+  }>;
+  max_period?: number;
+  daily_load?: AcademicDailyLoad[];
+  free_windows?: string[];
+}
+
+export interface ConflictCheckCandidate {
+  name: string;
+  weekday: number | string;
+  periods: string | number[];
+  weeks?: string;
+  credit?: string;
+}
+
+export interface ConflictCheckResultItem {
+  name: string;
+  weekday: number | null;
+  periods: number[];
+  weeks: number[];
+  weeks_text: string;
+  assumed_weeks: boolean;
+  credit: string;
+  valid: boolean;
+  conflict: boolean;
+  conflicts: Array<{
+    course: string;
+    room: string;
+    teacher: string;
+    weekday: number;
+    overlap_periods: number[];
+    overlap_weeks: number[];
+    existing_weeks: string;
+    existing_periods: string;
+  }>;
+  candidate_conflicts: Array<{
+    course: string;
+    overlap_periods: number[];
+    overlap_weeks: number[];
+  }>;
+  summary: string;
+}
+
+export interface ConflictCheckResponse {
+  results: ConflictCheckResultItem[];
+  has_any_conflict: boolean;
+  free_windows: string[];
+  daily_load: AcademicDailyLoad[];
+}
+
+export async function fetchAcademicSandbox(day?: string): Promise<AcademicSandboxData> {
+  const params = new URLSearchParams();
+  if (day) params.set("day", day);
+  const qs = params.toString();
+  return request<AcademicSandboxData>(`/api/academic/sandbox${qs ? `?${qs}` : ""}`, { cache: "no-store" });
+}
+
+export async function checkCourseConflicts(candidates: ConflictCheckCandidate[]): Promise<ConflictCheckResponse> {
+  return jsonPost<ConflictCheckResponse>("/api/academic/check-conflicts", { candidates });
+}
+
+function jsonPost<T>(path: string, body: unknown = {}): Promise<T> {
+  return request<T>(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+// ---------------- HITL 人工求助工单 ----------------
+
+export type TicketCategory = "academic" | "campus" | "tech" | "other";
+export type TicketStatus = "open" | "answered" | "merged" | "closed";
+
+export interface HelpTicket {
+  id: string;
+  category: TicketCategory;
+  category_label: string;
+  message_id: string;
+  question: string;
+  context_summary: string;
+  status: TicketStatus;
+  reply: string;
+  replied_by_name: string;
+  requester_name: string;
+  requester_student_no: string;
+  replied_at: string | null;
+  merged_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export function createTicket(input: {
+  question: string;
+  category?: TicketCategory;
+  message_id?: string;
+  context_summary?: string;
+}): Promise<HelpTicket> {
+  return jsonPost<HelpTicket>("/api/tickets", input);
+}
+
+export function fetchMyTickets(): Promise<HelpTicket[]> {
+  return request<HelpTicket[]>("/api/tickets", { cache: "no-store" });
+}
+
+export function fetchAdminTickets(status = ""): Promise<HelpTicket[]> {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request<HelpTicket[]>(`/api/admin/tickets${qs}`, { cache: "no-store" });
+}
+
+export function replyTicket(ticketId: string, reply: string, close = false): Promise<HelpTicket> {
+  return jsonPost<HelpTicket>(`/api/admin/tickets/${encodeURIComponent(ticketId)}/reply`, { reply, close });
+}
+
+export function mergeTicketToKb(
+  ticketId: string,
+  payload: { reply?: string; title?: string } = {},
+): Promise<{ ticket: HelpTicket; document: string }> {
+  return jsonPost<{ ticket: HelpTicket; document: string }>(
+    `/api/admin/tickets/${encodeURIComponent(ticketId)}/merge`,
+    payload,
+  );
+}
+
+// ---------------- 个人课程伴学空间 ----------------
+
+export interface StudyCourse {
+  id: string;
+  name: string;
+  code: string;
+  teacher: string;
+  term: string;
+  source: "jw" | "manual";
+  created_at: string;
+  updated_at: string;
+  material_count: number;
+  char_count: number;
+  card_count: number;
+  due_card_count: number;
+}
+
+export interface StudyMaterial {
+  id: string;
+  course_id: string;
+  title: string;
+  kind: "file" | "note";
+  filename: string;
+  char_count: number;
+  summary: string;
+  created_at: string;
+}
+
+export interface StudyChunkHit {
+  chunk_id: string;
+  course_id: string;
+  course_name: string;
+  material_id: string;
+  material_title: string;
+  chunk_index: number;
+  content: string;
+  score: number;
+}
+
+export interface StudyFlashcard {
+  id: string;
+  course_id: string;
+  material_id: string;
+  front: string;
+  back: string;
+  tags: string;
+  reps: number;
+  interval_days: number;
+  ease: number;
+  due_at: string;
+  last_reviewed_at: string | null;
+  created_at: string;
+}
+
+export interface StudyQuizQuestion {
+  id: string;
+  type: "choice" | "short";
+  question: string;
+  options: string[];
+}
+
+export interface StudyQuiz {
+  quiz_id: string;
+  course_id: string;
+  course_name: string;
+  questions: StudyQuizQuestion[];
+}
+
+export interface StudyQuizResultItem {
+  id: string;
+  type: "choice" | "short";
+  question: string;
+  your_answer: string;
+  expected_answer: string;
+  correct: boolean;
+  score: number;
+  max_score: number;
+  feedback: string;
+  explanation: string;
+}
+
+export interface StudyQuizGrade {
+  quiz_id: string;
+  course_id: string;
+  course_name: string;
+  score: number;
+  max_score: number;
+  percent: number;
+  results: StudyQuizResultItem[];
+}
+
+export function fetchStudyCourses(): Promise<StudyCourse[]> {
+  return request<StudyCourse[]>("/api/study/courses", { cache: "no-store" });
+}
+
+export function createStudyCourse(input: {
+  name: string;
+  code?: string;
+  teacher?: string;
+  term?: string;
+}): Promise<StudyCourse> {
+  return jsonPost<StudyCourse>("/api/study/courses", input);
+}
+
+export function syncStudyCoursesFromJw(day?: string): Promise<StudyCourse[]> {
+  const qs = day ? `?day=${encodeURIComponent(day)}` : "";
+  return jsonPost<StudyCourse[]>(`/api/study/courses/sync-jw${qs}`, {});
+}
+
+export function deleteStudyCourse(courseId: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/study/courses/${encodeURIComponent(courseId)}`, { method: "DELETE" });
+}
+
+export function fetchStudyMaterials(courseId: string): Promise<StudyMaterial[]> {
+  return request<StudyMaterial[]>(`/api/study/courses/${encodeURIComponent(courseId)}/materials`, { cache: "no-store" });
+}
+
+export function uploadStudyFile(courseId: string, file: File): Promise<StudyMaterial> {
+  const body = new FormData();
+  body.append("file", file);
+  return request<StudyMaterial>(`/api/study/courses/${encodeURIComponent(courseId)}/materials/file`, {
+    method: "POST",
+    body,
+  });
+}
+
+export function createStudyNote(courseId: string, title: string, content: string): Promise<StudyMaterial> {
+  return jsonPost<StudyMaterial>(`/api/study/courses/${encodeURIComponent(courseId)}/materials/note`, {
+    title,
+    content,
+  });
+}
+
+export function deleteStudyMaterial(materialId: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/study/materials/${encodeURIComponent(materialId)}`, { method: "DELETE" });
+}
+
+export function searchStudyCourse(courseId: string, query: string, topK = 6): Promise<StudyChunkHit[]> {
+  return jsonPost<StudyChunkHit[]>(`/api/study/courses/${encodeURIComponent(courseId)}/search`, {
+    query,
+    top_k: topK,
+  });
+}
+
+export function fetchFlashcards(courseId: string, dueOnly = false): Promise<StudyFlashcard[]> {
+  return request<StudyFlashcard[]>(
+    `/api/study/courses/${encodeURIComponent(courseId)}/flashcards?due_only=${dueOnly ? "true" : "false"}`,
+    { cache: "no-store" },
+  );
+}
+
+export function generateFlashcards(
+  courseId: string,
+  payload: { material_id?: string; topic?: string; count?: number },
+): Promise<StudyFlashcard[]> {
+  return jsonPost<StudyFlashcard[]>(`/api/study/courses/${encodeURIComponent(courseId)}/flashcards/generate`, payload);
+}
+
+export function reviewFlashcard(cardId: string, quality: 1 | 2 | 3 | 4): Promise<StudyFlashcard> {
+  return jsonPost<StudyFlashcard>(`/api/study/flashcards/${encodeURIComponent(cardId)}/review`, { quality });
+}
+
+export function deleteFlashcard(cardId: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/study/flashcards/${encodeURIComponent(cardId)}`, { method: "DELETE" });
+}
+
+export function generateStudyQuiz(
+  courseId: string,
+  payload: { material_id?: string; topic?: string; count?: number },
+): Promise<StudyQuiz> {
+  return jsonPost<StudyQuiz>(`/api/study/courses/${encodeURIComponent(courseId)}/quiz`, payload);
+}
+
+export function gradeStudyQuiz(quizId: string, answers: Record<string, string>): Promise<StudyQuizGrade> {
+  return jsonPost<StudyQuizGrade>(`/api/study/quizzes/${encodeURIComponent(quizId)}/grade`, { answers });
+}
+
+// ---------------- 企微 / QQ 机器人与主动推送 ----------------
+
+export interface ImBinding {
+  id: string;
+  platform: "wecom" | "qq";
+  external_id: string;
+  display_name: string;
+  morning_digest: boolean;
+  digest_time: string;
+  grade_alert: boolean;
+  ticket_alert: boolean;
+  news_keywords: string;
+}
+
+export interface ImBindingsState {
+  wecom_enabled: boolean;
+  qq_enabled: boolean;
+  bindings: ImBinding[];
+}
+
+export function fetchImBindings(): Promise<ImBindingsState> {
+  return request<ImBindingsState>("/api/im/bindings", { cache: "no-store" });
+}
+
+export function createImBindCode(): Promise<{ code: string; expires_in: number }> {
+  return jsonPost<{ code: string; expires_in: number }>("/api/im/bind-code", {});
+}
+
+export function updateImBinding(
+  bindingId: string,
+  patch: Partial<{
+    morning_digest: boolean;
+    digest_time: string;
+    grade_alert: boolean;
+    ticket_alert: boolean;
+    news_keywords: string;
+  }>,
+): Promise<ImBinding> {
+  return jsonPost<ImBinding>(`/api/im/bindings/${encodeURIComponent(bindingId)}`, patch);
+}
+
+export function deleteImBinding(bindingId: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/im/bindings/${encodeURIComponent(bindingId)}`, { method: "DELETE" });
+}
+
+export function fetchDigestPreview(keywords = "", day?: string): Promise<{ date: string; content: string }> {
+  const params = new URLSearchParams();
+  if (keywords) params.set("keywords", keywords);
+  if (day) params.set("day", day);
+  const qs = params.toString();
+  return request<{ date: string; content: string }>(`/api/im/digest-preview${qs ? `?${qs}` : ""}`, {
+    cache: "no-store",
+  });
+}

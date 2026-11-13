@@ -14,6 +14,8 @@ python-dotenv>=1.0.0
 
 pypdf>=4.0.0
 python-docx>=1.1.0
+openpyxl>=3.1.0
+python-pptx>=1.0.0
 beautifulsoup4>=4.12.0
 httpx>=0.27.0
 psycopg[binary]>=3.2.0
@@ -26,6 +28,7 @@ redis>=5.0.0
 zhipuai>=2.0.0
 
 websocket-client>=1.7.0
+websockets>=13.0
 
 colorama>=0.4.6
 

@@ -5,14 +5,17 @@
 """
 from __future__ import annotations
 
+import io
 import math
+import os
 import re
 import time
+import zipfile
 from dataclasses import dataclass
 from datetime import date
 from functools import lru_cache
 from typing import Any
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import quote, unquote, urljoin, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -24,6 +27,8 @@ logger = get_logger(__name__)
 
 TIMEOUT = httpx.Timeout(12.0)
 MAX_PAGE_BYTES = 2 * 1024 * 1024
+MAX_ATTACHMENT_BYTES = 6 * 1024 * 1024
+MAX_ATTACHMENTS = 10
 NOTICE_CHARS = 4000
 AMAP = "https://restapi.amap.com"
 BOCHA = "https://api.bochaai.com/v1/web-search"
@@ -35,6 +40,12 @@ AMAP_RETRIES = 2
 AMAP_RETRY_WAIT = 0.5
 _AMAP_BUSY = frozenset({"CUQPS_HAS_EXCEEDED_THE_LIMIT", "CKQPS_HAS_EXCEEDED_THE_LIMIT", "CQPS_HAS_EXCEEDED_THE_LIMIT", "ACCESS_TOO_FREQUENT"})
 _DATE = re.compile(r"(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})|(?<!\d)(\d{1,2})[-/](\d{1,2})(?!\d)")
+ATTACHMENT_EXTS = (".xlsx", ".xls", ".docx", ".doc", ".pdf", ".csv", ".txt")
+READABLE_ATTACHMENT_EXTS = frozenset({".xlsx", ".docx", ".pdf", ".csv", ".txt"})
+_DOWNLOAD_LINK_HINT = re.compile(r"download|attach|file|fj", re.I)
+_EXT_IN_TEXT = re.compile(r"(\.(?:xlsx|xls|docx|doc|pdf|csv|txt))\b", re.I)
+_DISPOSITION_STAR = re.compile(r"filename\*\s*=\s*([^']*)''([^;]+)", re.I)
+_DISPOSITION_PLAIN = re.compile(r'filename\s*=\s*"?([^";]+)"?', re.I)
 
 
 class ToolError(Exception):
@@ -119,9 +130,67 @@ def school_news(news_urls: tuple[str, ...], keyword: str = "", limit: int = 8) -
     return sorted(hits, key=lambda item: item["date"], reverse=True)[:limit]
 
 
-def read_notice(url: str, news_urls: tuple[str, ...]) -> dict[str, str]:
-    hosts = frozenset(h for h in (urlsplit(u).hostname for u in news_urls) if h)
-    if urlsplit(url).hostname not in hosts:
+def _extract_attachments(soup: BeautifulSoup, page_url: str, hosts: frozenset[str]) -> list[dict[str, Any]]:
+    """提取通知正文及附件区内的同站附件链接（支持静态路径与博达/VSB download.jsp）。"""
+    containers = soup.select(
+        ".v_news_content, #vsb_content, .article, article, .vsb_fj, [class*='attach'], [id*='attach'], [class*='fujian'], [class*='fj']"
+    )
+    if not containers:
+        root = BeautifulSoup(str(soup), "html.parser")
+        for tag in root.select("nav, header, footer"):
+            tag.decompose()
+        containers = [root]
+
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for container in containers:
+        for a in container.find_all("a", href=True):
+            href = str(a["href"]).strip()
+            if not href or href.startswith(("#", "javascript:", "mailto:")):
+                continue
+            att_url = urljoin(page_url, href)
+            parsed = urlsplit(att_url)
+            if parsed.scheme not in ("http", "https") or (parsed.hostname or "").lower() not in hosts:
+                continue
+            if att_url == page_url or att_url in seen:
+                continue
+
+            name = re.sub(r"\s+", " ", a.get_text(" ", strip=True) or str(a.get("title") or "")).strip()
+            path_ext = os.path.splitext(parsed.path)[1].lower()
+            download_attr = str(a.get("download") or "")
+            is_download = bool(_DOWNLOAD_LINK_HINT.search(att_url) or a.get("download") is not None)
+
+            ext = ""
+            if path_ext in ATTACHMENT_EXTS:
+                ext = path_ext
+            elif is_download:
+                for candidate in (name, download_attr, str(a.get("title") or "")):
+                    match = _EXT_IN_TEXT.search(candidate)
+                    if match:
+                        ext = match.group(1).lower()
+                        break
+            else:
+                continue
+
+            if not ext and not (is_download and len(name) >= 2):
+                continue
+
+            seen.add(att_url)
+            display_name = name or os.path.basename(unquote(parsed.path)) or f"附件{len(items) + 1}{ext}"
+            items.append({
+                "name": display_name[:120],
+                "url": att_url,
+                "ext": ext,
+                "readable": (ext in READABLE_ATTACHMENT_EXTS) if ext else True,
+            })
+            if len(items) >= MAX_ATTACHMENTS:
+                return items
+    return items
+
+
+def read_notice(url: str, news_urls: tuple[str, ...]) -> dict[str, Any]:
+    hosts = frozenset(h.lower() for h in (urlsplit(u).hostname for u in news_urls) if h)
+    if (urlsplit(url).hostname or "").lower() not in hosts:
         raise ToolError("只能打开学校官网上的通知")
     with _client(hosts) as client:
         html = _get_html(client, url)
@@ -129,7 +198,239 @@ def read_notice(url: str, news_urls: tuple[str, ...]) -> dict[str, str]:
     body = soup.select_one(".v_news_content, #vsb_content, .article, article")
     title, text = html_to_text(str(body) if body else html)
     heading = soup.find("title")
-    return {"title": (heading.get_text(strip=True) if heading else title), "url": url, "text": text[:NOTICE_CHARS]}
+    attachments = _extract_attachments(soup, url, hosts)
+    return {
+        "title": (heading.get_text(strip=True) if heading else title),
+        "url": url,
+        "text": text[:NOTICE_CHARS],
+        "attachments": attachments,
+    }
+
+
+def _attachment_filename(url: str, headers: httpx.Headers) -> str:
+    disp = headers.get("content-disposition", "")
+    star = _DISPOSITION_STAR.search(disp)
+    if star:
+        charset = star.group(1).strip() or "utf-8"
+        try:
+            return unquote(star.group(2).strip(), encoding=charset)
+        except Exception:
+            return unquote(star.group(2).strip())
+    plain = _DISPOSITION_PLAIN.search(disp)
+    if plain:
+        raw_name = plain.group(1).strip()
+        try:
+            # 处理服务端按 latin-1 拼进头部的 UTF-8/GBK 文件名
+            return raw_name.encode("latin-1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            return raw_name
+    path_name = os.path.basename(unquote(urlsplit(url).path))
+    return path_name or "通知附件"
+
+
+def _detect_attachment_ext(filename: str, url: str, content_type: str, data: bytes) -> str:
+    for candidate in (os.path.splitext(filename)[1].lower(), os.path.splitext(urlsplit(url).path)[1].lower()):
+        if candidate in ATTACHMENT_EXTS:
+            return candidate
+    ctype = content_type.split(";")[0].strip().lower()
+    ctype_map = {
+        "application/pdf": ".pdf",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+        "application/vnd.ms-excel": ".xls",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "application/msword": ".doc",
+        "text/csv": ".csv",
+        "text/plain": ".txt",
+    }
+    if ctype in ctype_map:
+        return ctype_map[ctype]
+    if data.startswith(b"%PDF-"):
+        return ".pdf"
+    if data.startswith(b"\xd0\xcf\x11\xe0"):
+        return ".xls" if filename.lower().endswith(".xls") else ".doc"
+    if data.startswith(b"PK\x03\x04"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                names = zf.namelist()
+                if any(n.startswith("xl/") for n in names):
+                    return ".xlsx"
+                if any(n.startswith("word/") for n in names):
+                    return ".docx"
+        except zipfile.BadZipFile:
+            pass
+    return ""
+
+
+def _split_terms(keyword: str) -> list[str]:
+    return [t.strip().lower() for t in re.split(r"[\s,，;；]+", keyword.strip()) if t.strip()]
+
+
+def _filter_sheet_rows(
+    sheets: list[dict[str, Any]],
+    terms: list[str],
+    max_rows: int,
+) -> tuple[list[tuple[str, str]], list[dict[str, str]], list[dict[str, Any]], int, int, str]:
+    """跨工作表筛选与整理表格行。多关键词先做全匹配，未命中再退回任一匹配。"""
+    sheet_stats: list[dict[str, Any]] = []
+    matched_entries: list[tuple[dict[str, Any], list[list[str]]]] = []
+    match_mode = "all" if terms else "none"
+    total_rows = 0
+
+    for sheet in sheets:
+        total_rows += len(sheet["rows"])
+
+    if not terms:
+        for sheet in sheets:
+            sheet_stats.append({"name": sheet["name"], "total_rows": len(sheet["rows"]), "matched_rows": len(sheet["rows"])})
+            if sheet["rows"]:
+                matched_entries.append((sheet, sheet["rows"]))
+        total_matched = total_rows
+    else:
+        def _collect(require_all: bool) -> tuple[list[dict[str, Any]], list[tuple[dict[str, Any], list[list[str]]]], int]:
+            stats: list[dict[str, Any]] = []
+            entries: list[tuple[dict[str, Any], list[list[str]]]] = []
+            count = 0
+            for sheet in sheets:
+                hits = []
+                for row in sheet["rows"]:
+                    joined = " ".join(row).lower()
+                    ok = all(t in joined for t in terms) if require_all else any(t in joined for t in terms)
+                    if ok:
+                        hits.append(row)
+                count += len(hits)
+                stats.append({"name": sheet["name"], "total_rows": len(sheet["rows"]), "matched_rows": len(hits)})
+                if hits:
+                    entries.append((sheet, hits))
+            return stats, entries, count
+
+        sheet_stats, matched_entries, total_matched = _collect(True)
+        if total_matched == 0 and len(terms) > 1:
+            sheet_stats, matched_entries, total_matched = _collect(False)
+            if total_matched > 0:
+                match_mode = "any"
+
+    if not matched_entries:
+        first = sheets[0]
+        columns = [(f"c{i}", h) for i, h in enumerate(first["headers"])]
+        return columns, [], sheet_stats, total_rows, 0, match_mode
+
+    primary_sheet, _ = matched_entries[0]
+    multi_sheet = len(matched_entries) > 1
+    base_headers = primary_sheet["headers"]
+    columns: list[tuple[str, str]] = ([("_sheet", "工作表")] if multi_sheet else []) + [
+        (f"c{i}", h) for i, h in enumerate(base_headers)
+    ]
+    rows: list[dict[str, str]] = []
+    for sheet, hits in matched_entries:
+        for raw_row in hits:
+            if len(rows) >= max_rows:
+                break
+            item: dict[str, str] = {}
+            if multi_sheet:
+                item["_sheet"] = sheet["name"]
+            for i, _ in enumerate(base_headers):
+                item[f"c{i}"] = raw_row[i] if i < len(raw_row) else ""
+            rows.append(item)
+        if len(rows) >= max_rows:
+            break
+    return columns, rows, sheet_stats, total_rows, total_matched, match_mode
+
+
+def read_notice_attachment(
+    url: str,
+    news_urls: tuple[str, ...],
+    keyword: str = "",
+    max_rows: int = 80,
+) -> dict[str, Any]:
+    """下载并解析学校通知里的附件（xlsx/csv/docx/pdf/txt），支持按关键词在本地筛行。"""
+    from file_service import extract_sheets_from_bytes, extract_text_from_bytes
+
+    hosts = frozenset(h.lower() for h in (urlsplit(u).hostname for u in news_urls) if h)
+    if (urlsplit(url).hostname or "").lower() not in hosts:
+        raise ToolError("只能打开学校官网上的通知附件")
+
+    with _client(hosts) as client:
+        resp = client.get(url)
+    if resp.status_code != 200:
+        raise ToolError(f"附件下载失败（HTTP {resp.status_code}）")
+    declared = resp.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_ATTACHMENT_BYTES:
+        raise ToolError("附件超过 6MB，请点击原链接下载后查看")
+    data = resp.content
+    if len(data) > MAX_ATTACHMENT_BYTES:
+        raise ToolError("附件超过 6MB，请点击原链接下载后查看")
+
+    filename = _attachment_filename(url, resp.headers)
+    ext = _detect_attachment_ext(filename, url, resp.headers.get("content-type", ""), data)
+    if ext in {".xls", ".doc"}:
+        raise ToolError(f"附件「{filename}」是旧版 {ext} 格式，暂不支持直接解析，请点击原链接下载查看")
+    if ext not in READABLE_ATTACHMENT_EXTS:
+        raise ToolError(f"附件「{filename}」不是支持的文档或表格格式（支持 xlsx / csv / docx / pdf / txt）")
+
+    terms = _split_terms(keyword)
+    if ext in {".xlsx", ".csv"}:
+        try:
+            sheets = extract_sheets_from_bytes(data, ext)
+        except Exception as exc:
+            raise ToolError(f"表格附件「{filename}」解析失败：{exc}") from exc
+        if not sheets:
+            return {"title": filename, "url": url, "kind": "table", "total_rows": 0, "matched_rows": 0, "preview_text": "附件表格是空的。"}
+
+        columns, rows, sheet_stats, total_rows, total_matched, match_mode = _filter_sheet_rows(sheets, terms, max_rows)
+        preview_lines = [f"附件《{filename}》共 {total_rows} 行（{len(sheets)} 个工作表）"]
+        if terms:
+            preview_lines.append(f"按关键词「{keyword.strip()}」匹配到 {total_matched} 行（匹配方式：{match_mode}）")
+        if rows:
+            preview_lines.append(" | ".join(label for _, label in columns))
+            for r in rows[:12]:
+                preview_lines.append(" | ".join(r.get(k, "") for k, _ in columns))
+            if total_matched > 12:
+                preview_lines.append(f"…其余 {total_matched - 12} 行已在下方表格中展示")
+        return {
+            "title": filename,
+            "url": url,
+            "kind": "table",
+            "sheets": sheet_stats,
+            "columns": columns,
+            "rows": rows,
+            "total_rows": total_rows,
+            "matched_rows": total_matched,
+            "match_mode": match_mode,
+            "preview_text": "\n".join(preview_lines)[:NOTICE_CHARS],
+        }
+
+    try:
+        text = extract_text_from_bytes(data, ext)
+    except Exception as exc:
+        raise ToolError(f"文档附件「{filename}」解析失败：{exc}") from exc
+
+    if ext == ".pdf" and len(text.strip()) < 20:
+        return {
+            "title": filename,
+            "url": url,
+            "kind": "text",
+            "scanned": True,
+            "text": "这份 PDF 附件可能是扫描版或图片版，未提取到可检索文字，建议点击原链接下载查看。",
+        }
+
+    snippets: list[str] = []
+    if terms and text:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        hit_indices: set[int] = set()
+        for idx, line in enumerate(lines):
+            low = line.lower()
+            if all(t in low for t in terms) or (len(terms) > 1 and any(t in low for t in terms)):
+                hit_indices.update(range(max(0, idx - 1), min(len(lines), idx + 2)))
+        snippets = [lines[i] for i in sorted(hit_indices)][:40]
+
+    return {
+        "title": filename,
+        "url": url,
+        "kind": "text",
+        "scanned": False,
+        "matched_snippets": "\n".join(snippets)[:NOTICE_CHARS] if snippets else "",
+        "text": text[:NOTICE_CHARS],
+    }
 
 
 # ---------------- 联网搜索（博查） ----------------

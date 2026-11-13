@@ -506,3 +506,44 @@ def test_timetable_supports_historical_or_specified_week(monkeypatch: pytest.Mon
     last_week = agent._timetable(ctx, {"day": "last_week"})
     assert len(last_week["days"]) == 7
     assert last_week["days"][0]["week"] == 6
+
+
+def test_course_conflict_tool_and_notice_attachment_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(jw_account, "school_ai", lambda tenant_id: SchoolAi(jw_mode="demo"))
+    ctx = _ctx(date(2026, 10, 12))
+
+    # 空参数返回空闲时段表
+    free_res = agent._course_conflict(ctx, {})
+    assert free_res["mode"] == "free_windows" and ctx.tables[-1]["title"] == "每周空闲时段"
+
+    # 带候选课做冲突检测
+    conflict_res = agent._course_conflict(ctx, {
+        "candidates": [{"name": "心理健康", "weekday": "周三", "periods": "1-2节", "weeks": "9-16周"}],
+    })
+    assert conflict_res["mode"] == "conflict_check" and not conflict_res["has_any_conflict"]
+    assert ctx.tables[-1]["title"] == "选课冲突检测"
+
+    # 通知附件读取工具将表格交给 ctx.table，并从返回值剥离原始行
+    monkeypatch.setattr(agent, "school_ai", lambda tenant_id: SchoolAi(news_urls=("https://jwc.test.edu.cn/",)))
+    monkeypatch.setattr(
+        agent.school_tools,
+        "read_notice_attachment",
+        lambda url, news_urls, keyword="": {
+            "title": "补考名单.xlsx",
+            "url": url,
+            "kind": "table",
+            "columns": [("c0", "姓名"), ("c1", "课程")],
+            "rows": [{"c0": "张三", "c1": "高数"}],
+            "total_rows": 20,
+            "matched_rows": 1,
+            "preview_text": "共20行",
+        },
+    )
+    att_ctx = _ctx()
+    att_res = agent._read_notice_attachment(att_ctx, {"url": "https://jwc.test.edu.cn/a.xlsx"})
+    assert "rows" not in att_res and att_res["display"] == agent.TABLE_SHOWN
+    assert att_ctx.tables[0]["title"] == "附件：补考名单.xlsx"
+    assert "read_notice_attachment" in agent.tool_labels()
+    assert "jw_course_conflict" in agent.tool_labels()
+    assert agent.needs_tools("周三1-2节选修课冲突吗", {"jw_grades"})
+    assert agent.needs_tools("帮我看下补考名单附件", {"school_news"})

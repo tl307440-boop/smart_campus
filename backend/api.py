@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import time
 import uuid
@@ -16,17 +18,18 @@ from urllib.parse import quote
 
 import calendar_ics
 import chat_history
+import course_planner
 import desk_log
 import httpx
 import jw_account
 import memory_store
 import outbound
+import pet_sync
 import redis
 import school_tools
 import session_summary
-import today_card
-import pet_sync
 import term_review
+import today_card
 import usage_log
 import usage_stats
 import vision
@@ -45,6 +48,12 @@ from ai_config import (
     search_key,
     vision_endpoint,
 )
+import im_gateway
+import im_scheduler
+import qq_bot
+import study_space
+import tickets
+import wecom_bot
 from auth import (
     AdminDep,
     CurrentUser,
@@ -56,20 +65,29 @@ from auth import (
 )
 from chat_stream import sse, sse_from_graph_stream
 from env_config import load_backend_env
-from fastapi import FastAPI, File, HTTPException, Path, Query, Response, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, Path, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from graph_app import MAX_STORED_TURNS, build_graph, configure_memory_embedding, get_vector_db, refusal_text
 from jw_zhengfang import JwAuthError, JwCaptcha, JwError
 from knowledge import knowledge_base
-from llm_request import LlmRequest, stream_with_llm_request
+from llm_request import LlmRequest, pop_llm_request, push_llm_request, stream_with_llm_request
 from llm_service import FAILED_PREFIX, NOT_CONFIGURED, RAG_FAILED_PREFIX
 from logging_config import get_logger, setup_logging
 from openai import OpenAI
 from pydantic import BaseModel, Field, field_validator
 from rate_limit import enforce_chat_quota, enforce_embed_quota
+from tenancy import GLOBAL_TENANT
 from web_import import UnsafeUrlError
-from workspace import embed_settings, forget_school_ai, school_ai, school_name, workspace_settings
+from workspace import (
+    embed_settings,
+    forget_school_ai,
+    list_configured_im_tenants,
+    school_ai,
+    school_im,
+    school_name,
+    workspace_settings,
+)
 
 logger = get_logger(__name__)
 
@@ -90,7 +108,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     knowledge_base.autoload()
     # 记忆检索复用学校配的智谱 embedding；没配的学校自动退回词匹配
     configure_memory_embedding()
-    yield
+    wecom_bot.manager.start()
+    im_scheduler.scheduler.start()
+    try:
+        yield
+    finally:
+        await im_scheduler.scheduler.stop()
+        await wecom_bot.manager.stop()
 
 
 app = FastAPI(title="智悦校园 API", version="1.0.0", lifespan=lifespan)
@@ -105,7 +129,7 @@ app.add_middleware(
     allow_credentials=True,
     # 收敛到实际用到的方法与请求头。配合 allow_credentials 时，
     # 通配会把任意跨站页面能发的请求面放到最大。
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
     max_age=600,
 )
@@ -580,6 +604,48 @@ def get_term_review(
     try:
         today = today_card.clamp_day(day, date.today())
         return term_review.build_term_review(user.tenant_id, user.id, today)
+    except (*JW_ERRORS, redis.RedisError) as exc:
+        raise _jw_http_error(exc) from exc
+
+
+class CourseCandidateInput(BaseModel):
+    name: str = Field(..., min_length=1, max_length=80)
+    weekday: int | str
+    periods: list[int] | str
+    weeks: list[int] | str = ""
+    credit: str = Field("", max_length=16)
+
+
+class ConflictCheckRequest(BaseModel):
+    candidates: list[CourseCandidateInput] = Field(..., min_length=1, max_length=20)
+    day: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+@app.get("/api/academic/sandbox")
+def get_academic_sandbox(
+    user: MemberDep,
+    day: str | None = Query(None, max_length=10, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+) -> dict[str, Any]:
+    """学业学分缺口沙盘 + 每周课表占用与空闲时段。"""
+    try:
+        today = today_card.clamp_day(day, date.today())
+        return course_planner.build_academic_sandbox(user.tenant_id, user.id, today)
+    except (*JW_ERRORS, redis.RedisError) as exc:
+        raise _jw_http_error(exc) from exc
+
+
+@app.post("/api/academic/check-conflicts")
+def post_check_course_conflicts(body: ConflictCheckRequest, user: MemberDep) -> dict[str, Any]:
+    """将试排候选课程与学生当前课表（及候选课相互之间）做时间冲突检测。"""
+    try:
+        today = today_card.clamp_day(body.day, date.today())
+        xnm, xqm = course_planner.current_term(today)
+        with jw_account.source_for(user.tenant_id, user.id) as jw:
+            timetable = jw.timetable(xnm, xqm)
+        return course_planner.check_course_conflicts(
+            timetable,
+            [item.model_dump() for item in body.candidates],
+        )
     except (*JW_ERRORS, redis.RedisError) as exc:
         raise _jw_http_error(exc) from exc
 
@@ -1113,3 +1179,448 @@ def clear_memories(user: MemberDep) -> dict[str, Any]:
     """一键忘掉全部：学生换号、转专业或单纯不想被记住时有处可去。"""
     removed = memory_store.clear_memories(user.tenant_id, user.id)
     return {"status": "cleared", "removed": removed}
+
+
+# ============================================================
+# HITL 人工求助工单闭环
+# ============================================================
+
+
+class TicketCreate(BaseModel):
+    question: str = Field(..., min_length=1, max_length=tickets.MAX_QUESTION_CHARS)
+    category: Literal["academic", "campus", "tech", "other"] = "other"
+    message_id: str = Field(default="", max_length=64)
+    context_summary: str = Field(default="", max_length=tickets.MAX_CONTEXT_CHARS)
+
+
+class TicketReply(BaseModel):
+    reply: str = Field(default="", max_length=tickets.MAX_REPLY_CHARS)
+    close: bool = False
+
+
+class TicketMergeRequest(BaseModel):
+    reply: str = Field(default="", max_length=tickets.MAX_REPLY_CHARS)
+    title: str = Field(default="", max_length=100)
+
+
+def _require_db(enabled_flag: bool, feature_name: str) -> None:
+    if not enabled_flag:
+        raise HTTPException(status_code=503, detail=f"未配置 Postgres 数据库，{feature_name}暂不可用")
+
+
+@app.post("/api/tickets")
+def create_ticket(payload: TicketCreate, user: MemberDep) -> dict[str, Any]:
+    _require_db(tickets.enabled(), "人工求助工单")
+    try:
+        item = tickets.create_ticket(
+            user.tenant_id,
+            user.id,
+            payload.question,
+            category=payload.category,
+            message_id=payload.message_id,
+            context_summary=payload.context_summary,
+        )
+        return item.to_dict()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/tickets")
+def list_my_tickets(user: MemberDep) -> list[dict[str, Any]]:
+    _require_db(tickets.enabled(), "人工求助工单")
+    return [t.to_dict() for t in tickets.list_user_tickets(user.tenant_id, user.id)]
+
+
+@app.get("/api/admin/tickets")
+def list_school_tickets(
+    user: KnowledgeManagerDep,
+    status: str = Query(default="", max_length=20),
+) -> list[dict[str, Any]]:
+    _require_db(tickets.enabled(), "人工求助工单")
+    return [t.to_dict() for t in tickets.list_tenant_tickets(user.tenant_id, status=status)]
+
+
+@app.post("/api/admin/tickets/{ticket_id}/reply")
+def reply_school_ticket(
+    ticket_id: str,
+    payload: TicketReply,
+    user: KnowledgeManagerDep,
+) -> dict[str, Any]:
+    _require_db(tickets.enabled(), "人工求助工单")
+    try:
+        updated = tickets.reply_ticket(user.tenant_id, ticket_id, user.id, payload.reply, close=payload.close)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail="工单不存在")
+    return updated.to_dict()
+
+
+@app.post("/api/admin/tickets/{ticket_id}/merge")
+def merge_school_ticket(
+    ticket_id: str,
+    payload: TicketMergeRequest,
+    user: KnowledgeManagerDep,
+) -> dict[str, Any]:
+    _require_db(tickets.enabled(), "人工求助工单")
+    try:
+        updated, doc = tickets.merge_ticket_to_kb(
+            user.tenant_id, ticket_id, user.id, reply_override=payload.reply, title=payload.title
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail="工单不存在")
+    return {"ticket": updated.to_dict(), "document": doc.name if doc else ""}
+
+
+# ============================================================
+# 个人课程伴学空间
+# ============================================================
+
+
+class StudyCourseCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=80)
+    code: str = Field(default="", max_length=40)
+    teacher: str = Field(default="", max_length=80)
+    term: str = Field(default="", max_length=40)
+
+
+class StudyNoteCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=120)
+    content: str = Field(..., min_length=1, max_length=study_space.MAX_MATERIAL_CHARS)
+
+
+class StudySearchRequest(BaseModel):
+    query: str = Field(default="", max_length=300)
+    top_k: int = Field(default=6, ge=1, le=20)
+
+
+class FlashcardGenerateRequest(BaseModel):
+    material_id: str = Field(default="", max_length=64)
+    topic: str = Field(default="", max_length=120)
+    count: int = Field(default=6, ge=1, le=study_space.MAX_FLASHCARD_COUNT)
+    llm: LlmConfig | None = None
+
+
+class FlashcardReviewRequest(BaseModel):
+    quality: int = Field(..., ge=1, le=4)
+
+
+class QuizGenerateRequest(BaseModel):
+    material_id: str = Field(default="", max_length=64)
+    topic: str = Field(default="", max_length=120)
+    count: int = Field(default=4, ge=1, le=study_space.MAX_QUIZ_QUESTIONS)
+    llm: LlmConfig | None = None
+
+
+class QuizGradeRequest(BaseModel):
+    answers: dict[str, str] = Field(default_factory=dict)
+
+
+@app.get("/api/study/courses")
+def list_study_courses(user: MemberDep) -> list[dict[str, Any]]:
+    _require_db(study_space.enabled(), "个人伴学空间")
+    return study_space.list_courses(user.tenant_id, user.id)
+
+
+@app.post("/api/study/courses")
+def create_study_course(payload: StudyCourseCreate, user: MemberDep) -> dict[str, Any]:
+    _require_db(study_space.enabled(), "个人伴学空间")
+    try:
+        return study_space.create_course(
+            user.tenant_id, user.id, payload.name, code=payload.code, teacher=payload.teacher, term=payload.term
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/study/courses/sync-jw")
+def sync_study_courses_from_jw(
+    user: MemberDep,
+    day: str | None = Query(None, max_length=10, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+) -> list[dict[str, Any]]:
+    _require_db(study_space.enabled(), "个人伴学空间")
+    try:
+        today = today_card.clamp_day(day, date.today())
+        return study_space.sync_courses_from_jw(user.tenant_id, user.id, today)
+    except (*JW_ERRORS, redis.RedisError) as exc:
+        raise _jw_http_error(exc) from exc
+
+
+@app.delete("/api/study/courses/{course_id}")
+def delete_study_course(course_id: str, user: MemberDep) -> dict[str, str]:
+    _require_db(study_space.enabled(), "个人伴学空间")
+    if not study_space.delete_course(user.tenant_id, user.id, course_id):
+        raise HTTPException(status_code=404, detail="课程不存在")
+    return {"status": "deleted"}
+
+
+@app.get("/api/study/courses/{course_id}/materials")
+def list_study_materials(course_id: str, user: MemberDep) -> list[dict[str, Any]]:
+    _require_db(study_space.enabled(), "个人伴学空间")
+    return study_space.list_materials(user.tenant_id, user.id, course_id)
+
+
+@app.post("/api/study/courses/{course_id}/materials/file")
+async def upload_study_material(
+    course_id: str,
+    user: MemberDep,
+    file: Annotated[UploadFile, File()],
+) -> dict[str, Any]:
+    _require_db(study_space.enabled(), "个人伴学空间")
+    data = await _read_capped(file)
+    if not data:
+        raise HTTPException(status_code=400, detail="文件内容为空")
+    try:
+        return study_space.add_file_material(
+            user.tenant_id, user.id, course_id, file.filename or "课程课件", data
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/study/courses/{course_id}/materials/note")
+def create_study_note(course_id: str, payload: StudyNoteCreate, user: MemberDep) -> dict[str, Any]:
+    _require_db(study_space.enabled(), "个人伴学空间")
+    try:
+        return study_space.add_material(
+            user.tenant_id, user.id, course_id, payload.title, payload.content, kind="note"
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/study/materials/{material_id}")
+def delete_study_material(material_id: str, user: MemberDep) -> dict[str, str]:
+    _require_db(study_space.enabled(), "个人伴学空间")
+    if not study_space.delete_material(user.tenant_id, user.id, material_id):
+        raise HTTPException(status_code=404, detail="资料不存在")
+    return {"status": "deleted"}
+
+
+@app.post("/api/study/courses/{course_id}/search")
+def search_study_materials(course_id: str, payload: StudySearchRequest, user: MemberDep) -> list[dict[str, Any]]:
+    _require_db(study_space.enabled(), "个人伴学空间")
+    return study_space.search_course_chunks(
+        user.tenant_id, user.id, payload.query, course_id=course_id, top_k=payload.top_k
+    )
+
+
+@app.get("/api/study/courses/{course_id}/flashcards")
+def list_study_flashcards(
+    course_id: str,
+    user: MemberDep,
+    due_only: bool = Query(default=False),
+) -> list[dict[str, Any]]:
+    _require_db(study_space.enabled(), "个人伴学空间")
+    try:
+        return study_space.list_flashcards(user.tenant_id, user.id, course_id, due_only=due_only)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/study/courses/{course_id}/flashcards/generate")
+def generate_study_flashcards(
+    course_id: str,
+    payload: FlashcardGenerateRequest,
+    user: MemberDep,
+) -> list[dict[str, Any]]:
+    _require_db(study_space.enabled(), "个人伴学空间")
+    llm_req = _as_llm_request(payload.llm)
+    token = push_llm_request(llm_req) if llm_req else None
+    try:
+        return study_space.generate_flashcards(
+            user.tenant_id, user.id, course_id, material_id=payload.material_id, topic=payload.topic, count=payload.count
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        if token is not None:
+            pop_llm_request(token)
+
+
+@app.post("/api/study/flashcards/{card_id}/review")
+def review_study_flashcard(card_id: str, payload: FlashcardReviewRequest, user: MemberDep) -> dict[str, Any]:
+    _require_db(study_space.enabled(), "个人伴学空间")
+    try:
+        card = study_space.review_flashcard(user.tenant_id, user.id, card_id, payload.quality)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if card is None:
+        raise HTTPException(status_code=404, detail="闪卡不存在")
+    return card
+
+
+@app.delete("/api/study/flashcards/{card_id}")
+def delete_study_flashcard(card_id: str, user: MemberDep) -> dict[str, str]:
+    _require_db(study_space.enabled(), "个人伴学空间")
+    if not study_space.delete_flashcard(user.tenant_id, user.id, card_id):
+        raise HTTPException(status_code=404, detail="闪卡不存在")
+    return {"status": "deleted"}
+
+
+@app.post("/api/study/courses/{course_id}/quiz")
+def generate_study_quiz(course_id: str, payload: QuizGenerateRequest, user: MemberDep) -> dict[str, Any]:
+    _require_db(study_space.enabled(), "个人伴学空间")
+    llm_req = _as_llm_request(payload.llm)
+    token = push_llm_request(llm_req) if llm_req else None
+    try:
+        return study_space.generate_quiz(
+            user.tenant_id, user.id, course_id, material_id=payload.material_id, topic=payload.topic, count=payload.count
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        if token is not None:
+            pop_llm_request(token)
+
+
+@app.post("/api/study/quizzes/{quiz_id}/grade")
+def grade_study_quiz(quiz_id: str, payload: QuizGradeRequest, user: MemberDep) -> dict[str, Any]:
+    _require_db(study_space.enabled(), "个人伴学空间")
+    try:
+        return study_space.grade_quiz(user.tenant_id, user.id, quiz_id, payload.answers)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ============================================================
+# 企微 / QQ 机器人与主动推送
+# ============================================================
+
+
+class ImPreferencePatch(BaseModel):
+    morning_digest: bool | None = None
+    digest_time: str | None = Field(default=None, max_length=10)
+    grade_alert: bool | None = None
+    ticket_alert: bool | None = None
+    news_keywords: str | None = Field(default=None, max_length=200)
+
+
+@app.get("/api/im/bindings")
+def get_my_im_bindings(user: MemberDep) -> dict[str, Any]:
+    _require_db(chat_history.enabled(), "消息推送绑定")
+    im_cfg = school_im(user.tenant_id)
+    return {
+        "wecom_enabled": im_cfg.has_wecom,
+        "qq_enabled": im_cfg.has_qq,
+        "bindings": im_gateway.list_user_bindings(user.tenant_id, user.id),
+    }
+
+
+@app.post("/api/im/bind-code")
+def create_im_bind_code(user: MemberDep) -> dict[str, Any]:
+    _require_db(chat_history.enabled(), "消息推送绑定")
+    code = im_gateway.create_bind_code(user.tenant_id, user.id)
+    return {"code": code, "expires_in": im_gateway.BIND_CODE_TTL}
+
+
+@app.post("/api/im/bindings/{binding_id}")
+def update_my_im_binding(binding_id: str, payload: ImPreferencePatch, user: MemberDep) -> dict[str, Any]:
+    _require_db(chat_history.enabled(), "消息推送绑定")
+    try:
+        updated = im_gateway.update_binding_preferences(
+            user.tenant_id, user.id, binding_id, payload.model_dump()
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail="绑定记录不存在")
+    return updated
+
+
+@app.delete("/api/im/bindings/{binding_id}")
+def delete_my_im_binding(binding_id: str, user: MemberDep) -> dict[str, str]:
+    _require_db(chat_history.enabled(), "消息推送绑定")
+    if not im_gateway.delete_binding(user.tenant_id, user.id, binding_id):
+        raise HTTPException(status_code=404, detail="绑定记录不存在")
+    return {"status": "deleted"}
+
+
+@app.get("/api/im/digest-preview")
+def preview_morning_digest(
+    user: MemberDep,
+    keywords: str = Query(default="", max_length=200),
+    day: str | None = Query(None, max_length=10, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+) -> dict[str, str]:
+    today = today_card.clamp_day(day, date.today())
+    content = im_scheduler.build_morning_digest(user.tenant_id, user.id, today, keywords)
+    return {"date": today.isoformat(), "content": content}
+
+
+async def _handle_qq_onebot_webhook(
+    tenant_id: str,
+    request: Request,
+    x_signature: str,
+    authorization: str,
+) -> dict[str, Any]:
+    raw_body = await request.body()
+    im_cfg = school_im(tenant_id)
+    if not qq_bot.verify_signature(
+        raw_body, x_signature, im_cfg.qq_onebot_token, bearer_token=authorization
+    ):
+        raise HTTPException(status_code=401, detail="OneBot webhook signature invalid")
+    try:
+        payload = json.loads(raw_body.decode("utf-8") or "{}")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+
+    evt = qq_bot.parse_onebot_event(payload)
+    if evt is None:
+        return {"ok": True, "ignored": True}
+
+    reply = await asyncio.to_thread(
+        im_gateway.handle_incoming_message,
+        "qq",
+        evt["external_id"],
+        evt["text"],
+        tenant_id_hint=tenant_id,
+        display_name=evt["display_name"],
+    )
+    delivered = False
+    if im_cfg.has_qq:
+        if evt["is_group"] and evt["group_id"]:
+            delivered = await asyncio.to_thread(
+                qq_bot.send_group_message,
+                im_cfg.qq_onebot_url,
+                im_cfg.qq_onebot_token,
+                evt["group_id"],
+                reply,
+                at_user_id=evt["external_id"],
+            )
+        else:
+            delivered = await asyncio.to_thread(
+                qq_bot.send_private_message,
+                im_cfg.qq_onebot_url,
+                im_cfg.qq_onebot_token,
+                evt["external_id"],
+                reply,
+            )
+    # 已主动调 OneBot 发送接口成功时不附带 reply 字段，避免 OneBot HTTP POST 重复回复
+    return {"ok": True, "delivered": delivered} if delivered else {"ok": True, "reply": reply}
+
+
+@app.post("/api/im/qq/event")
+async def qq_onebot_event_default(
+    request: Request,
+    x_signature: Annotated[str, Header(alias="X-Signature")] = "",
+    authorization: Annotated[str, Header(alias="Authorization")] = "",
+) -> dict[str, Any]:
+    tenants = [tid for tid, cfg in list_configured_im_tenants() if cfg.has_qq]
+    tenant_id = tenants[0] if len(tenants) == 1 else GLOBAL_TENANT
+    return await _handle_qq_onebot_webhook(tenant_id, request, x_signature, authorization)
+
+
+@app.post("/api/im/qq/event/{tenant_id}")
+async def qq_onebot_event_for_tenant(
+    tenant_id: Annotated[str, Path(min_length=1, max_length=64)],
+    request: Request,
+    x_signature: Annotated[str, Header(alias="X-Signature")] = "",
+    authorization: Annotated[str, Header(alias="Authorization")] = "",
+) -> dict[str, Any]:
+    return await _handle_qq_onebot_webhook(tenant_id, request, x_signature, authorization)
