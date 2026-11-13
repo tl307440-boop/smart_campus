@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { PaneTitle } from "@/components/ToolDrawer";
 import { useToast } from "@/components/Toast";
+import { copyText } from "@/hooks/useCopy";
 import {
   CALENDAR_ALARMS,
   type CalendarAlarm,
@@ -164,10 +165,9 @@ function SubscribeSection() {
   }
 
   async function copy(url: string) {
-    try {
-      await navigator.clipboard.writeText(url);
+    if (await copyText(url)) {
       toast.success("链接已复制");
-    } catch {
+    } else {
       toast.error("没能复制，长按链接手动复制吧");
     }
   }
@@ -286,10 +286,9 @@ function DeskPetTokenSection() {
   }
 
   async function copy(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
+    if (await copyText(text)) {
       toast.success("令牌已复制到剪贴板");
-    } catch {
+    } else {
       toast.error("未能自动复制，请手动选中复制");
     }
   }

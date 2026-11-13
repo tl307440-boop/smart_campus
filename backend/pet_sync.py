@@ -83,6 +83,15 @@ def _time_to_minutes(clock: str) -> int:
         return -1
 
 
+def _due_flashcard_count(tenant_id: str, user_id: str) -> int:
+    try:
+        import study_space
+
+        return study_space.count_due_flashcards(tenant_id, user_id)
+    except Exception:
+        return 0
+
+
 def build_pet_feed(tenant_id: str, user_id: str, today: date, now_clock: str | None = None) -> dict[str, Any]:
     """根据今日课表和考试，为桌宠生成结构化摘要与气泡台词。"""
     card = today_card.build_card(tenant_id, user_id, today)
@@ -141,7 +150,12 @@ def build_pet_feed(tenant_id: str, user_id: str, today: date, now_clock: str | N
         else:
             bubble_lines.append(f"今天还有 {lessons_left} 节课要上哦～")
 
-    # 3. 兜底生活台词
+    # 3. 伴学闪卡复习提醒（可选，未配置时为 0）
+    due_cards = _due_flashcard_count(tenant_id, user_id)
+    if due_cards > 0:
+        bubble_lines.append(f"你有 {due_cards} 张课程复习卡待记忆，抽 3 分钟刷一下吧～ 📚")
+
+    # 4. 兜底生活台词
     bubble_lines.append("摸鱼虽好，下节课可别迟到了哦～")
 
     return {
@@ -153,6 +167,7 @@ def build_pet_feed(tenant_id: str, user_id: str, today: date, now_clock: str | N
         "total_lessons_today": len(lessons),
         "lessons_left": lessons_left,
         "next_lesson": next_lesson,
+        "due_cards": due_cards,
         "bubble_lines": bubble_lines,
         "today_lessons": lessons,
         "upcoming_exams": exams,

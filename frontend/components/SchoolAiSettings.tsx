@@ -12,6 +12,8 @@ import {
   type JwMode,
   type KeyInput,
   type KeyService,
+  type QqOnebotInput,
+  type WecomBotInput,
 } from "@/lib/ai-config/schema";
 import { type AiServiceName, type AiStatus, errorDetail, fetchAiStatus, testAiService } from "@/lib/api";
 import { fetchAiConfig, saveAiConfig } from "@/lib/workspace/client";
@@ -66,7 +68,13 @@ const KEY_HELP: Record<KeyService, { title: string; placeholder: string; link: s
 };
 
 type Drafts = Record<AiService, AiEndpointInput> &
-  Record<KeyService, KeyInput> & { jw: JwConfig; newsUrls: string; embedding: EmbeddingInput };
+  Record<KeyService, KeyInput> & {
+    jw: JwConfig;
+    newsUrls: string;
+    embedding: EmbeddingInput;
+    wecom: WecomBotInput;
+    qq: QqOnebotInput;
+  };
 
 type TestState = { pending: boolean; ok?: boolean; text?: string };
 
@@ -91,6 +99,16 @@ function toDrafts(view: AiConfigView): Drafts {
       baseUrl: view.embedding.baseUrl,
       apiKey: "",
       clearKey: false,
+    },
+    wecom: {
+      botId: view.wecom?.botId ?? "",
+      secret: "",
+      clearSecret: false,
+    },
+    qq: {
+      url: view.qq?.url ?? "",
+      token: "",
+      clearToken: false,
     },
   };
 }
@@ -516,6 +534,103 @@ export function SchoolAiSettings({ isAdmin }: { isAdmin: boolean }) {
               />
             </fieldset>
           ))}
+          <fieldset className="mt-4 border-t border-dashed border-rule pt-3">
+            <legend className="pr-2 font-display text-base">企微 / QQ 机器人推送（可选）</legend>
+            <div className="space-y-3">
+              <p className="text-sm text-muted">
+                学生绑定后可通过企业微信智能机器人长连接或 QQ OneBot 直接提问、接收每日早报、出分通知与工单回复。
+              </p>
+              <label className="block">
+                <span className="field-label">企业微信智能机器人 Bot ID（长连接模式，免公网回调域名）</span>
+                <input
+                  value={drafts.wecom.botId}
+                  onChange={(event) =>
+                    setDrafts((prev) => prev && { ...prev, wecom: { ...prev.wecom, botId: event.target.value } })
+                  }
+                  placeholder="企微后台创建智能机器人后获取的 Bot ID"
+                  className="field"
+                />
+              </label>
+              <label className="block">
+                <span className="field-label">企业微信机器人 Secret（加密保存）</span>
+                <input
+                  type="password"
+                  value={drafts.wecom.secret}
+                  onChange={(event) =>
+                    setDrafts(
+                      (prev) =>
+                        prev && {
+                          ...prev,
+                          wecom: { ...prev.wecom, secret: event.target.value, clearSecret: false },
+                        },
+                    )
+                  }
+                  autoComplete="off"
+                  placeholder={
+                    view.wecom?.hasSecret ? `已保存 ···${view.wecom.secretHint || "****"}，留空不改` : "留空则暂不启用企微机器人"
+                  }
+                  className="field"
+                />
+              </label>
+              {view.wecom?.hasSecret && (
+                <label className="flex items-center gap-2 text-sm text-muted">
+                  <input
+                    type="checkbox"
+                    checked={drafts.wecom.clearSecret}
+                    onChange={(event) =>
+                      setDrafts(
+                        (prev) =>
+                          prev && { ...prev, wecom: { ...prev.wecom, clearSecret: event.target.checked, secret: "" } },
+                      )
+                    }
+                    className="size-4 accent-pink"
+                  />
+                  清除已保存的企微 Secret
+                </label>
+              )}
+              <label className="block">
+                <span className="field-label">QQ OneBot v11 HTTP 接口地址（如 NapCat / Lagrange）</span>
+                <input
+                  value={drafts.qq.url}
+                  onChange={(event) =>
+                    setDrafts((prev) => prev && { ...prev, qq: { ...prev.qq, url: event.target.value } })
+                  }
+                  placeholder="http://napcat:3000 或 https://bot.xxx.edu.cn"
+                  className="field"
+                />
+              </label>
+              <label className="block">
+                <span className="field-label">QQ OneBot Access Token / Webhook Secret（可选）</span>
+                <input
+                  type="password"
+                  value={drafts.qq.token}
+                  onChange={(event) =>
+                    setDrafts(
+                      (prev) => prev && { ...prev, qq: { ...prev.qq, token: event.target.value, clearToken: false } },
+                    )
+                  }
+                  autoComplete="off"
+                  placeholder={
+                    view.qq?.hasToken ? `已保存 ···${view.qq.tokenHint || "****"}，留空不改` : "Webhook 签名校验与发送鉴权 Token"
+                  }
+                  className="field"
+                />
+              </label>
+              {view.qq?.hasToken && (
+                <label className="flex items-center gap-2 text-sm text-muted">
+                  <input
+                    type="checkbox"
+                    checked={drafts.qq.clearToken}
+                    onChange={(event) =>
+                      setDrafts((prev) => prev && { ...prev, qq: { ...prev.qq, clearToken: event.target.checked, token: "" } })
+                    }
+                    className="size-4 accent-pink"
+                  />
+                  清除已保存的 QQ Token
+                </label>
+              )}
+            </div>
+          </fieldset>
           <button type="button" disabled={saving} onClick={() => void handleSave()} className="btn btn-primary mt-5">
             {saving ? "保存并测试中…" : "保存并测试"}
           </button>

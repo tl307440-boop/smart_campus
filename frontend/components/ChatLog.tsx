@@ -3,7 +3,7 @@
 import { ErrorNote } from "@/components/ErrorNote";
 import { MessageBubble } from "@/components/MessageBubble";
 import { WaitingNote } from "@/components/WaitingNote";
-import type { ChatMessage, FeedbackRating, FeedbackReason } from "@/lib/api";
+import type { ChatMessage, FeedbackRating, FeedbackReason, TicketCategory } from "@/lib/api";
 import type { ChatProgress } from "@/lib/chat-progress";
 import { describeFailure, isFallbackAnswer, mayBeFallback } from "@/lib/friendly-error";
 
@@ -29,6 +29,14 @@ interface Props {
   onRate?: (id: string, rating: FeedbackRating, reason?: FeedbackReason) => Promise<void>;
   /** 点一下「接着问」的按钮就把这句话发出去；不传就不显示 */
   onAsk?: (question: string) => void;
+  /** 回答不满意或答不出时转人工求助工单 */
+  onEscalate?: (info: {
+    question: string;
+    messageId: string;
+    answer: string;
+    category: TicketCategory;
+    note: string;
+  }) => Promise<void>;
 }
 
 interface Row {
@@ -68,6 +76,16 @@ function collapseRepeatedFailures(messages: ChatMessage[]): Row[] {
   return rows;
 }
 
+function precedingQuestion(messages: ChatMessage[], messageId: string): string {
+  const idx = messages.findIndex((m) => m.id === messageId);
+  for (let i = idx - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === "user" && messages[i].content.trim()) {
+      return messages[i].content.trim();
+    }
+  }
+  return "AI 回答未能解决我的问题";
+}
+
 /** 对话正文：消息、正在写的回答、等待提示和最后的报错。主页面和嵌入挂件共用。 */
 export function ChatLog({
   messages,
@@ -82,6 +100,7 @@ export function ChatLog({
   onEdit,
   onRate,
   onAsk,
+  onEscalate,
 }: Props) {
   const last = messages.at(-1);
   const answerFailed = failedAnswer(last);
@@ -114,6 +133,18 @@ export function ChatLog({
             onRegenerate={onRegenerate}
             onEdit={onEdit}
             onRate={onRate}
+            onEscalate={
+              message.role === "assistant" && onEscalate
+                ? (category, note) =>
+                    onEscalate({
+                      question: precedingQuestion(messages, message.id),
+                      messageId: message.serverId ?? message.id,
+                      answer: message.content,
+                      category,
+                      note,
+                    })
+                : undefined
+            }
           />
         );
       })}

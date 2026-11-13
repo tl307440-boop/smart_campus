@@ -167,3 +167,13 @@ export function ArrowDownIcon(props: IconProps) {
     </Svg>
   );
 }
+
+export function LifeBuoyIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="12" cy="12" r="8.2" />
+      <circle cx="12" cy="12" r="3.6" />
+      <path d="M9.4 9.4L6.2 6.2M14.6 9.4l3.2-3.2M9.4 14.6l-3.2 3.2M14.6 14.6l3.2 3.2" />
+    </Svg>
+  );
+}

@@ -3,7 +3,7 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { CloseIcon } from "@/components/SketchIcons";
 
-export type ToolTab = "service" | "memory" | "jw" | "knowledge" | "workspace" | "embeds" | "usage" | "calendar" | "review";
+export type ToolTab = "service" | "memory" | "jw" | "knowledge" | "workspace" | "embeds" | "usage" | "calendar" | "plan" | "review" | "study" | "tickets" | "push";
 
 export const TAB_LABEL: Record<ToolTab, string> = {
   service: "AI 服务",
@@ -15,6 +15,10 @@ export const TAB_LABEL: Record<ToolTab, string> = {
   usage: "使用情况",
   calendar: "日历",
   review: "学期回顾",
+  plan: "学业规划",
+  study: "伴学空间",
+  tickets: "求助工单",
+  push: "消息推送",
 };
 
 /** 每一页抽屉的标题和一句说明 */
@@ -65,7 +69,7 @@ export function ToolDrawer({ tabs, tab, open, onOpen, onClose, children }: Props
     <>
       <nav
         aria-label="工具"
-        className={`fixed top-28 left-[calc(50%+24rem-2px)] z-20 hidden flex-col gap-2 transition-opacity duration-200 lg:flex ${
+        className={`fixed top-16 left-[calc(50%+24rem-2px)] z-20 hidden max-h-[calc(100dvh-5rem)] flex-col gap-2 overflow-y-auto py-1 pr-2 transition-opacity duration-200 lg:flex ${
           open ? "pointer-events-none opacity-0" : ""
         }`}
       >

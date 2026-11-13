@@ -72,6 +72,24 @@ class SchoolVision:
 
 
 @dataclass(frozen=True)
+class SchoolIm:
+    """学校配的企业微信智能机器人与 QQ OneBot v11 推送配置。"""
+
+    wecom_bot_id: str = ""
+    wecom_bot_secret: str = ""
+    qq_onebot_url: str = ""
+    qq_onebot_token: str = ""
+
+    @property
+    def has_wecom(self) -> bool:
+        return bool(self.wecom_bot_id and self.wecom_bot_secret)
+
+    @property
+    def has_qq(self) -> bool:
+        return bool(self.qq_onebot_url)
+
+
+@dataclass(frozen=True)
 class EmbedSettings:
     id: str
     tenant_id: str
@@ -82,6 +100,7 @@ class EmbedSettings:
 DEFAULT_SETTINGS = WorkspaceSettings()
 NO_SCHOOL_AI = SchoolAi()
 NO_VISION = SchoolVision()
+NO_IM = SchoolIm()
 
 _cache: dict[tuple[str, str], tuple[float, Any]] = {}
 _cache_lock = threading.Lock()
@@ -128,6 +147,7 @@ def forget_school_ai(tenant_id: str) -> None:
     with _cache_lock:
         _cache.pop(("ai", tenant_id), None)
         _cache.pop(("vision", tenant_id), None)
+        _cache.pop(("im", tenant_id), None)
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -245,6 +265,68 @@ def school_vision(tenant_id: str) -> SchoolVision:
         return SchoolVision((base_url or "").strip().rstrip("/"), (model or "").strip(), _decrypt(tenant_id, key))
 
     return _cached("vision", tenant_id, load, NO_VISION)
+
+
+def school_im(tenant_id: str) -> SchoolIm:
+    """学校自配的企微智能机器人 / QQ OneBot v11 参数。迁移未跑或查库失败时回退平台 env。"""
+
+    def env_fallback() -> SchoolIm:
+        return SchoolIm(
+            wecom_bot_id=os.getenv("WECOM_BOT_ID", "").strip(),
+            wecom_bot_secret=os.getenv("WECOM_BOT_SECRET", "").strip(),
+            qq_onebot_url=os.getenv("QQ_ONEBOT_URL", "").strip().rstrip("/"),
+            qq_onebot_token=os.getenv("QQ_ONEBOT_TOKEN", "").strip(),
+        )
+
+    def load() -> SchoolIm:
+        row = _fetch_one(
+            'SELECT "wecomBotId", "wecomBotSecret", "qqOnebotUrl", "qqOnebotToken" '
+            'FROM tenant_ai_configs WHERE "tenantId" = %s',
+            (tenant_id,),
+        )
+        if row is None:
+            return env_fallback()
+        bot_id = (row[0] or "").strip() or os.getenv("WECOM_BOT_ID", "").strip()
+        bot_secret = _decrypt(tenant_id, row[1]) or os.getenv("WECOM_BOT_SECRET", "").strip()
+        qq_url = (row[2] or "").strip().rstrip("/") or os.getenv("QQ_ONEBOT_URL", "").strip().rstrip("/")
+        qq_token = _decrypt(tenant_id, row[3]) or os.getenv("QQ_ONEBOT_TOKEN", "").strip()
+        return SchoolIm(
+            wecom_bot_id=bot_id,
+            wecom_bot_secret=bot_secret,
+            qq_onebot_url=qq_url,
+            qq_onebot_token=qq_token,
+        )
+
+    return _cached("im", tenant_id, load, NO_IM)
+
+
+def list_configured_im_tenants() -> list[tuple[str, SchoolIm]]:
+    """列出开启了企微或 QQ 机器人的租户（给企微长连接管理器启动用）。"""
+    url = _database_url()
+    if not url:
+        return []
+    found: list[tuple[str, SchoolIm]] = []
+    try:
+        with psycopg.connect(url, connect_timeout=_CONNECT_TIMEOUT_SECONDS) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    'SELECT c."tenantId", c."wecomBotId", c."wecomBotSecret", c."qqOnebotUrl", c."qqOnebotToken" '
+                    'FROM tenant_ai_configs c JOIN tenants t ON t."id" = c."tenantId" '
+                    'WHERE NOT t."disabled" AND (c."wecomBotId" <> \'\' OR c."qqOnebotUrl" <> \'\')'
+                )
+                for row in cur.fetchall():
+                    tenant_id = str(row[0])
+                    im = SchoolIm(
+                        wecom_bot_id=(row[1] or "").strip(),
+                        wecom_bot_secret=_decrypt(tenant_id, row[2]),
+                        qq_onebot_url=(row[3] or "").strip().rstrip("/"),
+                        qq_onebot_token=_decrypt(tenant_id, row[4]),
+                    )
+                    if im.has_wecom or im.has_qq:
+                        found.append((tenant_id, im))
+    except Exception as exc:
+        logger.warning(f"[Workspace] 读取已配置 IM 租户失败: {exc}")
+    return found
 
 
 def school_name(tenant_id: str) -> str:

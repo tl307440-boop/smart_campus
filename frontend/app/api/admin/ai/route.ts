@@ -42,6 +42,12 @@ const EMPTY: Row = {
   embeddingBaseUrl: "",
   embeddingKey: "",
   embeddingKeyHint: "",
+  wecomBotId: "",
+  wecomBotSecret: "",
+  wecomBotSecretHint: "",
+  qqOnebotUrl: "",
+  qqOnebotToken: "",
+  qqOnebotTokenHint: "",
 };
 
 /** 读回时密文一律不出服务端，只说有没有、末四位是什么 */
@@ -71,6 +77,16 @@ function toView(row: Row): AiConfigView {
       baseUrl: row.embeddingBaseUrl,
       hasKey: Boolean(row.embeddingKey),
       keyHint: row.embeddingKeyHint,
+    },
+    wecom: {
+      botId: row.wecomBotId,
+      hasSecret: Boolean(row.wecomBotSecret),
+      secretHint: row.wecomBotSecretHint,
+    },
+    qq: {
+      url: row.qqOnebotUrl,
+      hasToken: Boolean(row.qqOnebotToken),
+      tokenHint: row.qqOnebotTokenHint,
     },
   };
 }
@@ -109,7 +125,7 @@ export async function PUT(request: Request): Promise<NextResponse> {
   const parsed = parseAiConfig(body);
   if (!parsed.ok) return authError(AUTH_ERROR.INVALID_INPUT, parsed.message);
 
-  const { chat, reader, vision, map, search, jw, newsUrls, embedding } = parsed.value;
+  const { chat, reader, vision, map, search, jw, newsUrls, embedding, wecom, qq } = parsed.value;
   try {
     const chatKey = keyChange(chat);
     const readerKey = keyChange(reader);
@@ -117,6 +133,8 @@ export async function PUT(request: Request): Promise<NextResponse> {
     const mapKey = keyChange(map);
     const searchKey = keyChange(search);
     const embeddingKey = keyChange(embedding);
+    const wecomSecret = wecom ? keyChange({ apiKey: wecom.secret, clearKey: wecom.clearSecret }) : null;
+    const qqToken = qq ? keyChange({ apiKey: qq.token, clearKey: qq.clearToken }) : null;
     const data = {
       chatBaseUrl: chat.baseUrl,
       chatModel: chat.model,
@@ -131,12 +149,16 @@ export async function PUT(request: Request): Promise<NextResponse> {
       embeddingProvider: embedding.provider,
       embeddingModel: embedding.model,
       embeddingBaseUrl: embedding.baseUrl,
+      ...(wecom && { wecomBotId: wecom.botId }),
+      ...(qq && { qqOnebotUrl: qq.url }),
       ...(chatKey && { chatKey: chatKey.key, chatKeyHint: chatKey.hint }),
       ...(readerKey && { readerKey: readerKey.key, readerKeyHint: readerKey.hint }),
       ...(visionKey && { visionKey: visionKey.key, visionKeyHint: visionKey.hint }),
       ...(mapKey && { mapKey: mapKey.key, mapKeyHint: mapKey.hint }),
       ...(searchKey && { searchKey: searchKey.key, searchKeyHint: searchKey.hint }),
       ...(embeddingKey && { embeddingKey: embeddingKey.key, embeddingKeyHint: embeddingKey.hint }),
+      ...(wecomSecret && { wecomBotSecret: wecomSecret.key, wecomBotSecretHint: wecomSecret.hint }),
+      ...(qqToken && { qqOnebotToken: qqToken.key, qqOnebotTokenHint: qqToken.hint }),
     };
     const saved = await getPrisma().tenantAiConfig.upsert({
       where: { tenantId: check.tenant.id },

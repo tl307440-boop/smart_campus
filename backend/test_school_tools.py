@@ -181,3 +181,80 @@ def test_amap_key_errors_are_explained(monkeypatch: pytest.MonkeyPatch) -> None:
     _mock(monkeypatch, lambda request: httpx.Response(200, json={"status": "0", "info": "USERKEY_PLAT_NOMATCH"}))
     with pytest.raises(ToolError, match="Web 服务"):
         school_tools.find_places("k", "测试学院", "图书馆")
+
+
+def test_read_notice_extracts_same_site_attachments_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    page = """
+    <title>关于2026年补考安排的通知</title>
+    <div id="vsb_content">
+      <p>详情见附件。</p>
+      <p><a href="/files/makeup_2026.xlsx">附件1：2026年补考名单.xlsx</a></p>
+      <p><a href="/system/_content/download.jsp?urltype=news.DownloadAttachUrl&wbfileid=123">附件2：考场须知.docx</a></p>
+      <p><a href="https://evil.example.com/leak.xlsx">外部表格.xlsx</a></p>
+    </div>
+    """
+    _mock(monkeypatch, lambda request: httpx.Response(200, text=page))
+    notice = school_tools.read_notice("https://jwc.test.edu.cn/info/1/9.htm", ("https://jwc.test.edu.cn/",))
+    assert len(notice["attachments"]) == 2
+    assert notice["attachments"][0]["url"] == "https://jwc.test.edu.cn/files/makeup_2026.xlsx"
+    assert notice["attachments"][0]["ext"] == ".xlsx"
+    assert notice["attachments"][1]["url"].startswith("https://jwc.test.edu.cn/system/_content/download.jsp")
+    assert notice["attachments"][1]["ext"] == ".docx"
+
+
+def test_read_notice_attachment_parses_xlsx_and_filters_locally(monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "补考名单"
+    ws.append(["2026年春季学期补考安排表"])  # 单格合并标题行
+    ws.append(["学号", "姓名", "学院", "课程", "时间", "考场"])
+    ws.append([20260001, "张三", "计算机学院", "高等数学", "2026-09-05 09:00", "1-101"])
+    ws.append([20260002, "李四", "文学院", "大学语文", "2026-09-05 14:00", "2-203"])
+    ws.append([20260003, "王五", "计算机学院", "线性代数", "2026-09-06 09:00", "1-102"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    xlsx_bytes = buf.getvalue()
+
+    _mock(
+        monkeypatch,
+        lambda request: httpx.Response(
+            200,
+            content=xlsx_bytes,
+            headers={
+                "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "Content-Disposition": "attachment; filename*=UTF-8''%E8%A1%A5%E8%80%83%E5%90%8D%E5%8D%95.xlsx",
+            },
+        ),
+    )
+
+    # 跨站附件拦截
+    with pytest.raises(ToolError, match="只能打开学校官网"):
+        school_tools.read_notice_attachment("https://evil.example.com/a.xlsx", ("https://jwc.test.edu.cn/",))
+
+    # 多关键词精确筛行（本地过滤，不外传学生信息）
+    filtered = school_tools.read_notice_attachment(
+        "https://jwc.test.edu.cn/system/_content/download.jsp?wbfileid=1",
+        ("https://jwc.test.edu.cn/",),
+        keyword="计算机学院 张三",
+    )
+    assert filtered["title"] == "补考名单.xlsx"
+    assert filtered["kind"] == "table"
+    assert filtered["total_rows"] == 3
+    assert filtered["matched_rows"] == 1
+    assert filtered["rows"][0]["c0"] == "20260001"
+    assert filtered["rows"][0]["c3"] == "高等数学"
+
+
+def test_read_notice_attachment_supports_gb18030_csv_and_blocks_legacy_xls(monkeypatch: pytest.MonkeyPatch) -> None:
+    csv_bytes = "课程,教室,时间\n数据结构,实验楼305,周二1-2节\n".encode("gb18030")
+    _mock(monkeypatch, lambda request: httpx.Response(200, content=csv_bytes))
+    csv_res = school_tools.read_notice_attachment("https://jwc.test.edu.cn/files/list.csv", ("https://jwc.test.edu.cn/",))
+    assert csv_res["kind"] == "table" and csv_res["rows"][0]["c0"] == "数据结构"
+
+    _mock(monkeypatch, lambda request: httpx.Response(200, content=b"\xd0\xcf\x11\xe0legacy"))
+    with pytest.raises(ToolError, match="旧版 .xls"):
+        school_tools.read_notice_attachment("https://jwc.test.edu.cn/files/old.xls", ("https://jwc.test.edu.cn/",))

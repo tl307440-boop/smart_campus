@@ -5,6 +5,10 @@ import { ServicePane } from "@/components/AgentSettings";
 import { MemoryPane } from "@/components/MemoryPane";
 import { CalendarPane } from "@/components/CalendarPane";
 import { TermReviewPane } from "@/components/TermReviewPane";
+import { AcademicSandboxPane } from "@/components/AcademicSandboxPane";
+import { ImPushPane } from "@/components/ImPushPane";
+import { StudySpacePane } from "@/components/StudySpacePane";
+import { TicketsPane } from "@/components/TicketsPane";
 import { ChatHeader } from "@/components/ChatHeader";
 import { ChatLog } from "@/components/ChatLog";
 import { Composer, type ComposerPrefill } from "@/components/Composer";
@@ -25,7 +29,7 @@ import { PET_LOOK_EVENT } from "@/hooks/useDeskPet";
 import { useLessonReminders } from "@/hooks/useLessonReminders";
 import { useStickToBottom } from "@/hooks/useStickToBottom";
 import { useToday } from "@/hooks/useToday";
-import { fetchWorkspace } from "@/lib/api";
+import { type TicketCategory, createTicket, fetchWorkspace } from "@/lib/api";
 import { useAuth } from "@/lib/auth/context";
 import { canManageKnowledge } from "@/lib/auth/session";
 import { isFallbackAnswer } from "@/lib/friendly-error";
@@ -48,7 +52,7 @@ export default function ChatPage() {
   const isStaff = canManageKnowledge(user?.role);
   const isAdmin = user?.role === "ADMIN";
   const [speech] = useSpeechSettings();
-  const { notice } = useToast();
+  const { notice, success } = useToast();
   const { state: today, reload: reloadToday } = useToday();
   const [reminder, setReminder] = useReminderSettings();
   // 提醒挂在页面上而不是卡片上：开始聊天后卡片会收起，该提醒的课还是要提醒
@@ -130,7 +134,27 @@ export default function ChatPage() {
   }
 
   const jwOn = today.status === "ready" && today.card.enabled;
-  const tabs: ToolTab[] = ["service", "memory", "jw", ...(jwOn ? (["calendar", "review"] as const) : []), ...(isStaff ? (["knowledge"] as const) : []), ...(isAdmin ? (["usage", "workspace", "embeds"] as const) : [])];
+  async function handleEscalate(info: {
+    question: string;
+    messageId: string;
+    answer: string;
+    category: TicketCategory;
+    note: string;
+  }) {
+    const snippet = info.answer.trim().slice(0, 240);
+    const context_summary = info.note
+      ? `学生补充：${info.note}\n\n原 AI 回答摘要：${snippet}`
+      : `原 AI 回答摘要：${snippet}`;
+    await createTicket({
+      question: info.question,
+      category: info.category,
+      message_id: info.messageId,
+      context_summary,
+    });
+    success("已提交人工工单，可在右侧「求助工单」查看处理进度");
+  }
+
+  const tabs: ToolTab[] = ["service", "memory", "jw", ...(jwOn ? (["calendar", "plan", "review"] as const) : []), "study", "tickets", "push", ...(isStaff ? (["knowledge"] as const) : []), ...(isAdmin ? (["usage", "workspace", "embeds"] as const) : [])];
   const noteProps = { canDebug: isStaff, canConfigure: isAdmin, onOpenService: openService };
 
   return (
@@ -182,6 +206,7 @@ export default function ChatPage() {
                   onRegenerate={chat.regenerate}
                   onEdit={chat.editLast}
                   onRate={chat.rate}
+                  onEscalate={handleEscalate}
                   onAsk={handleSend}
                 />
               </>
@@ -235,7 +260,26 @@ export default function ChatPage() {
           {drawer.tab === "memory" && <MemoryPane />}
           {drawer.tab === "jw" && <JwAccountPane />}
           {drawer.tab === "calendar" && <CalendarPane />}
+          {drawer.tab === "plan" && (
+            <AcademicSandboxPane
+              onAsk={(question) => {
+                closeTool();
+                setPrefill((p) => ({ text: question, n: p.n + 1 }));
+              }}
+            />
+          )}
           {drawer.tab === "review" && <TermReviewPane />}
+          {drawer.tab === "study" && (
+            <StudySpacePane
+              jwOn={jwOn}
+              onAsk={(question) => {
+                closeTool();
+                setPrefill((p) => ({ text: question, n: p.n + 1 }));
+              }}
+            />
+          )}
+          {drawer.tab === "tickets" && <TicketsPane isStaff={isStaff} />}
+          {drawer.tab === "push" && <ImPushPane />}
           {drawer.tab === "knowledge" && isStaff && <KnowledgePane />}
           {drawer.tab === "usage" && isAdmin && <UsagePane />}
           {drawer.tab === "workspace" && isAdmin && <WorkspacePane onSaved={loadWorkspace} />}

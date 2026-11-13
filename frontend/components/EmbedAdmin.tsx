@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { PaneTitle } from "@/components/ToolDrawer";
 import { errorText } from "@/components/WorkspaceAdmin";
 import { type EmbedConfig, createEmbed, deleteEmbed, embedSnippet, fetchEmbeds, updateEmbed } from "@/lib/workspace/client";
+import { copyText } from "@/hooks/useCopy";
 
 /** 抽屉页「挂件」（仅管理员）：学校官网上的聊天挂件，新建 / 停用 / 删除 / 复制嵌入代码。 */
 export function EmbedPane() {
@@ -66,10 +67,9 @@ export function EmbedPane() {
   }
 
   async function handleCopy(embed: EmbedConfig) {
-    try {
-      await navigator.clipboard.writeText(embedSnippet(embed.id));
+    if (await copyText(embedSnippet(embed.id))) {
       setNotice(`已复制「${embed.name}」的嵌入代码`);
-    } catch {
+    } else {
       setNotice(embedSnippet(embed.id));
     }
   }

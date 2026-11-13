@@ -37,6 +37,11 @@ model Tenant {
   questionLogs   QuestionLog[]
   feedbacks      MessageFeedback[]
   memories       UserMemory[]
+  helpTickets    HelpTicket[]
+  studyCourses   StudyCourse[]
+  studyMaterials StudyMaterial[]
+  studyCards     StudyCard[]
+  imBindings     ImBinding[]
 
   @@map("tenants")
 }
@@ -107,6 +112,14 @@ model TenantAiConfig {
   visionModel   String   @default("")
   visionKey     String   @default("")
   visionKeyHint String   @default("")
+  /// 企业微信智能机器人（长连接模式：botId + encrypted secret）
+  wecomBotId         String   @default("")
+  wecomBotSecret     String   @default("")
+  wecomBotSecretHint String   @default("")
+  /// QQ OneBot v11 接入：服务地址 + 可选鉴权 Token 密文
+  qqOnebotUrl        String   @default("")
+  qqOnebotToken      String   @default("")
+  qqOnebotTokenHint  String   @default("")
   updatedAt     DateTime @updatedAt
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -162,6 +175,12 @@ model User {
   chatTombstones ChatSessionTombstone[]
   feedbacks      MessageFeedback[]
   memories       UserMemory[]
+  helpTickets    HelpTicket[]      @relation("TicketRequester")
+  repliedTickets HelpTicket[]      @relation("TicketReplier")
+  studyCourses   StudyCourse[]
+  studyMaterials StudyMaterial[]
+  studyCards     StudyCard[]
+  imBindings     ImBinding[]
 
   /// 学号只在同一学校内唯一
   @@unique([tenantId, studentNo])
@@ -307,4 +326,150 @@ model UserMemory {
 
   @@index([tenantId, userId])
   @@map("user_memories")
+}
+
+/// HITL 人工求助工单：AI 拒答、未检索到资料或学生点踩后升级给校方/学长解答，并可一键回流进学校知识库
+model HelpTicket {
+  id             String    @id
+  tenantId       String
+  userId         String
+  messageId      String    @default("")
+  /// academic 教务学业 / campus 生活资助 / tech 账号系统 / other 其他
+  category       String    @default("other")
+  question       String
+  contextSummary String    @default("")
+  /// open 待处理 / answered 已回复 / merged 已回流知识库 / closed 已关闭
+  status         String    @default("open")
+  reply          String    @default("")
+  repliedById    String?
+  repliedAt      DateTime?
+  mergedAt       DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @default(now())
+
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user      User   @relation("TicketRequester", fields: [userId], references: [id], onDelete: Cascade)
+  repliedBy User?  @relation("TicketReplier", fields: [repliedById], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, status, createdAt])
+  @@index([tenantId, userId, createdAt])
+  @@map("help_tickets")
+}
+
+/// 个人课程伴学空间：每名学生私有的课程目录，严格按 (tenantId, userId) 隔离
+model StudyCourse {
+  id        String   @id
+  tenantId  String
+  userId    String
+  name      String
+  code      String   @default("")
+  teacher   String   @default("")
+  term      String   @default("")
+  source    String   @default("manual")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+
+  tenant    Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  materials StudyMaterial[]
+  chunks    StudyChunk[]
+  cards     StudyCard[]
+
+  @@unique([tenantId, userId, name])
+  @@index([tenantId, userId])
+  @@map("study_courses")
+}
+
+/// 学生上传或保存的私人课程资料（PPTX/PDF/DOCX/MD/笔记），绝不进入公共校方知识库
+model StudyMaterial {
+  id        String   @id
+  tenantId  String
+  userId    String
+  courseId  String
+  title     String
+  kind      String   @default("file")
+  filename  String   @default("")
+  content   String
+  charCount Int      @default(0)
+  summary   String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+
+  tenant Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  course StudyCourse  @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  chunks StudyChunk[]
+
+  @@index([tenantId, userId, courseId])
+  @@map("study_materials")
+}
+
+/// 私人课程资料切片（带可选智谱向量），仅在伴学与当前学生问答中检索
+model StudyChunk {
+  id         String   @id
+  tenantId   String
+  userId     String
+  courseId   String
+  materialId String
+  chunkIndex Int      @default(0)
+  content    String
+  embedding  Float[]  @default([])
+  createdAt  DateTime @default(now())
+
+  course   StudyCourse   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  material StudyMaterial @relation(fields: [materialId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId, courseId])
+  @@index([materialId])
+  @@map("study_chunks")
+}
+
+/// 课程考点闪卡：支持间隔重复 (SM-2) 复习调度
+model StudyCard {
+  id             String    @id
+  tenantId       String
+  userId         String
+  courseId       String
+  materialId     String    @default("")
+  front          String
+  back           String
+  tags           String    @default("")
+  reps           Int       @default(0)
+  intervalDays   Int       @default(0)
+  ease           Float     @default(2.5)
+  dueAt          DateTime  @default(now())
+  lastReviewedAt DateTime?
+  createdAt      DateTime  @default(now())
+
+  tenant Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  course StudyCourse @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId, courseId, dueAt])
+  @@map("study_cards")
+}
+
+/// 企业微信 / QQ 机器人账号绑定及主动早报/出分/工单推送偏好
+model ImBinding {
+  id            String   @id
+  tenantId      String
+  userId        String
+  platform      String
+  externalId    String
+  displayName   String   @default("")
+  morningDigest Boolean  @default(true)
+  digestTime    String   @default("07:30")
+  gradeAlert    Boolean  @default(true)
+  ticketAlert   Boolean  @default(true)
+  newsKeywords  String   @default("")
+  lastGradeHash String   @default("")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, platform, externalId])
+  @@index([tenantId, userId])
+  @@map("im_bindings")
 }

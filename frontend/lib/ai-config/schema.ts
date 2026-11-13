@@ -57,12 +57,6 @@ export interface EmbeddingInput {
   clearKey: boolean;
 }
 
-export interface AiConfigInput extends Record<AiService, AiEndpointInput>, Record<KeyService, KeyInput> {
-  jw: JwConfig;
-  newsUrls: string[];
-  embedding: EmbeddingInput;
-}
-
 export interface AiEndpointView {
   baseUrl: string;
   model: string;
@@ -83,10 +77,44 @@ export interface EmbeddingView {
   keyHint: string;
 }
 
+export interface WecomBotInput {
+  botId: string;
+  secret: string;
+  clearSecret: boolean;
+}
+
+export interface WecomBotView {
+  botId: string;
+  hasSecret: boolean;
+  secretHint: string;
+}
+
+export interface QqOnebotInput {
+  url: string;
+  token: string;
+  clearToken: boolean;
+}
+
+export interface QqOnebotView {
+  url: string;
+  hasToken: boolean;
+  tokenHint: string;
+}
+
+export interface AiConfigInput extends Record<AiService, AiEndpointInput>, Record<KeyService, KeyInput> {
+  jw: JwConfig;
+  newsUrls: string[];
+  embedding: EmbeddingInput;
+  wecom?: WecomBotInput;
+  qq?: QqOnebotInput;
+}
+
 export interface AiConfigView extends Record<AiService, AiEndpointView>, Record<KeyService, KeyView> {
   jw: JwConfig;
   newsUrls: string[];
   embedding: EmbeddingView;
+  wecom: WecomBotView;
+  qq: QqOnebotView;
 }
 
 const SERVICE_NAME: Record<AiService | KeyService, string> = {
@@ -238,6 +266,40 @@ function parseEmbedding(raw: unknown): ValidationResult<EmbeddingInput> {
   };
 }
 
+function parseWecom(raw: unknown): ValidationResult<WecomBotInput> {
+  const source = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+  const botId = typeof source.botId === "string" ? source.botId.trim() : "";
+  const secret = typeof source.secret === "string" ? source.secret.trim() : "";
+  if (botId.length > MODEL_MAX || /\s/.test(botId)) {
+    return { ok: false, message: `企微 Bot ID 不能含空格，且不超过 ${MODEL_MAX} 字符` };
+  }
+  if (secret.length > API_KEY_MAX || /\s/.test(secret)) {
+    return { ok: false, message: `企微 Bot Secret 不能含空格，且不超过 ${API_KEY_MAX} 字符` };
+  }
+  return { ok: true, value: { botId, secret, clearSecret: source.clearSecret === true } };
+}
+
+function parseQq(raw: unknown): ValidationResult<QqOnebotInput> {
+  const source = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+  const rawUrl = typeof source.url === "string" ? source.url.trim().replace(/\/+$/, "") : "";
+  const token = typeof source.token === "string" ? source.token.trim() : "";
+  if (rawUrl) {
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(rawUrl);
+    } catch {
+      return { ok: false, message: "QQ OneBot 地址需要是合法的 http/https 网址" };
+    }
+    if (!["http:", "https:"].includes(parsedUrl.protocol) || rawUrl.length > BASE_URL_MAX) {
+      return { ok: false, message: "QQ OneBot 地址需要是合法的 http/https 网址" };
+    }
+  }
+  if (token.length > API_KEY_MAX || /\s/.test(token)) {
+    return { ok: false, message: `QQ OneBot Token 不能含空格，且不超过 ${API_KEY_MAX} 字符` };
+  }
+  return { ok: true, value: { url: rawUrl, token, clearToken: source.clearToken === true } };
+}
+
 export function parseAiConfig(body: unknown): ValidationResult<AiConfigInput> {
   if (typeof body !== "object" || body === null) return { ok: false, message: "请求体格式不正确" };
   const source = body as Record<string, unknown>;
@@ -257,6 +319,10 @@ export function parseAiConfig(body: unknown): ValidationResult<AiConfigInput> {
   if (!newsUrls.ok) return newsUrls;
   const embedding = parseEmbedding(source.embedding);
   if (!embedding.ok) return embedding;
+  const wecom = parseWecom(source.wecom);
+  if (!wecom.ok) return wecom;
+  const qq = parseQq(source.qq);
+  if (!qq.ok) return qq;
   return {
     ok: true,
     value: {
@@ -268,6 +334,8 @@ export function parseAiConfig(body: unknown): ValidationResult<AiConfigInput> {
       jw: jw.value,
       newsUrls: newsUrls.value,
       embedding: embedding.value,
+      wecom: wecom.value,
+      qq: qq.value,
     },
   };
 }

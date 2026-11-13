@@ -687,3 +687,177 @@ def test_session_messages_carry_ids_and_the_students_own_rating(client: TestClie
 
     assert body[0]["id"] == "" and body[0]["feedback"] == 0
     assert body[1]["id"] == "m-7" and body[1]["feedback"] == -1 and body[1]["feedback_reason"] == "wrong"
+
+
+def test_academic_sandbox_and_conflict_endpoints(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    import course_planner
+    import jw_account
+    from workspace import SchoolAi
+
+    monkeypatch.setattr(course_planner, "school_ai", lambda tid: SchoolAi(jw_mode="demo"))
+    monkeypatch.setattr(jw_account, "school_ai", lambda tid: SchoolAi(jw_mode="demo"))
+
+    # 访客挂件不可访问学业规划接口
+    assert client.get("/api/academic/sandbox", headers=headers("GUEST")).status_code == 403
+
+    res = client.get("/api/academic/sandbox?day=2026-10-12", headers=headers())
+    assert res.status_code == 200
+    data = res.json()
+    assert data["bound"] is True and data["summary"]["total_missing"] == 44.5
+
+    check = client.post(
+        "/api/academic/check-conflicts",
+        headers=headers(),
+        json={"candidates": [{"name": "美术鉴赏", "weekday": 3, "periods": "1-2节", "weeks": "9-16周"}]},
+    )
+    assert check.status_code == 200
+    assert check.json()["has_any_conflict"] is False
+
+
+# ---------- Phase 2/3: HITL 工单、个人伴学空间与企微/QQ IM API ----------
+
+
+def test_ticket_endpoints_permissions_and_flow(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    import tickets
+    from datetime import datetime, timezone
+
+    # 未开 Postgres 时优雅返回 503
+    monkeypatch.setattr(tickets, "enabled", lambda: False)
+    assert client.post("/api/tickets", json={"question": "转专业要求"}, headers=headers()).status_code == 503
+
+    monkeypatch.setattr(tickets, "enabled", lambda: True)
+    now = datetime(2026, 11, 13, 10, 0, tzinfo=timezone.utc)
+    sample = tickets.Ticket(
+        id="tk-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        message_id="m-9",
+        category="academic",
+        question="跨院选课上限是多少？",
+        context_summary="原 AI 回答未查到具体学分上限",
+        status="open",
+        reply="",
+        replied_by_id=None,
+        replied_at=None,
+        merged_at=None,
+        created_at=now,
+        updated_at=now,
+        requester_name="张三",
+        requester_student_no="20260001",
+    )
+    monkeypatch.setattr(tickets, "create_ticket", lambda *a, **kw: sample)
+    monkeypatch.setattr(tickets, "list_user_tickets", lambda tid, uid: [sample])
+    monkeypatch.setattr(tickets, "list_tenant_tickets", lambda tid, status="": [sample])
+
+    # 访客不能提工单；普通学生不能访问教工管理端点
+    assert client.post("/api/tickets", json={"question": "test"}, headers=headers("GUEST")).status_code == 403
+    assert client.get("/api/admin/tickets", headers=headers("STUDENT")).status_code == 403
+
+    created = client.post("/api/tickets", json={"question": "跨院选课上限是多少？", "category": "academic"}, headers=headers())
+    assert created.status_code == 200 and created.json()["id"] == "tk-1"
+    assert len(client.get("/api/tickets", headers=headers()).json()) == 1
+    assert len(client.get("/api/admin/tickets", headers=headers("STAFF")).json()) == 1
+
+    merged_ticket = tickets.Ticket(**{**sample.__dict__, "status": "merged", "reply": "每学期最多跨院选 6 学分。", "merged_at": now})
+    monkeypatch.setattr(tickets, "reply_ticket", lambda *a, **kw: merged_ticket)
+    monkeypatch.setattr(tickets, "merge_ticket_to_kb", lambda *a, **kw: (merged_ticket, DocumentInfo(name="工单答疑_tk-1.md", chars=60, indexed=False, source="uploaded")))
+
+    rep = client.post("/api/admin/tickets/tk-1/reply", json={"reply": "每学期最多跨院选 6 学分。"}, headers=headers("STAFF"))
+    assert rep.status_code == 200 and rep.json()["reply"] == "每学期最多跨院选 6 学分。"
+
+    mrg = client.post("/api/admin/tickets/tk-1/merge", json={"title": "跨院选课学分上限"}, headers=headers("STAFF"))
+    assert mrg.status_code == 200
+    assert mrg.json()["ticket"]["status"] == "merged"
+    assert mrg.json()["document"] == "工单答疑_tk-1.md"
+
+
+def test_study_space_endpoints_pptx_flashcards_and_quiz(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+    import study_space
+    from pptx import Presentation
+
+    monkeypatch.setattr(study_space, "enabled", lambda: False)
+    assert client.get("/api/study/courses", headers=headers()).status_code == 503
+
+    monkeypatch.setattr(study_space, "enabled", lambda: True)
+    assert client.get("/api/study/courses", headers=headers("GUEST")).status_code == 403
+
+    course = {"id": "c1", "name": "算法设计与分析", "code": "CS301", "teacher": "刘教授", "term": "2026-1", "source": "manual", "created_at": "", "updated_at": "", "material_count": 0, "char_count": 0, "card_count": 0, "due_card_count": 0}
+    monkeypatch.setattr(study_space, "list_courses", lambda t, u: [course])
+    monkeypatch.setattr(study_space, "create_course", lambda *a, **kw: course)
+    monkeypatch.setattr(study_space, "add_file_material", lambda t, u, cid, fname, data: {"id": "m1", "course_id": cid, "title": "课件", "kind": "file", "filename": fname, "char_count": len(data), "chunk_count": 2, "summary": "动态规划", "created_at": ""})
+    monkeypatch.setattr(study_space, "generate_flashcards", lambda *a, **kw: [{"id": "k1", "course_id": "c1", "material_id": "", "front": "DP 无后效性", "back": "未来状态只依赖当前状态", "tags": "核心", "reps": 0, "interval_days": 0, "ease": 2.5, "due_at": "", "last_reviewed_at": None, "created_at": ""}])
+    monkeypatch.setattr(study_space, "generate_quiz", lambda *a, **kw: {"quiz_id": "q1", "course_id": "c1", "course_name": "算法设计与分析", "questions": [{"id": "q1", "type": "choice", "question": "DP核心?", "options": ["A. 贪心", "B. 最优子结构"]}]})
+    monkeypatch.setattr(study_space, "grade_quiz", lambda *a, **kw: {"quiz_id": "q1", "course_id": "c1", "course_name": "算法设计与分析", "score": 10, "max_score": 10, "percent": 100, "results": []})
+
+    assert client.get("/api/study/courses", headers=headers()).status_code == 200
+    assert client.post("/api/study/courses", json={"name": "算法设计与分析"}, headers=headers()).status_code == 200
+
+    prs = Presentation()
+    s1 = prs.slides.add_slide(prs.slide_layouts[1])
+    s1.shapes.title.text = "动态规划"
+    buf = io.BytesIO()
+    prs.save(buf)
+    up = client.post(
+        "/api/study/courses/c1/materials/file",
+        files={"file": ("dp.pptx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.presentationml.presentation")},
+        headers=headers(),
+    )
+    assert up.status_code == 200 and up.json()["filename"] == "dp.pptx"
+
+    fc = client.post("/api/study/courses/c1/flashcards/generate", json={"count": 3}, headers=headers())
+    assert fc.status_code == 200 and fc.json()[0]["id"] == "k1"
+
+    qz = client.post("/api/study/courses/c1/quiz", json={"count": 1}, headers=headers())
+    assert qz.status_code == 200 and qz.json()["quiz_id"] == "q1"
+
+    gr = client.post("/api/study/quizzes/q1/grade", json={"answers": {"q1": "B"}}, headers=headers())
+    assert gr.status_code == 200 and gr.json()["percent"] == 100
+
+
+def test_im_endpoints_and_qq_onebot_webhook_signature(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    import hashlib
+    import hmac
+    import im_gateway
+    import im_scheduler
+    import qq_bot
+    from workspace import SchoolIm
+
+    _history_on(monkeypatch)
+    monkeypatch.setattr(api, "school_im", lambda tid: SchoolIm(wecom_bot_id="wb-1", wecom_bot_secret="sec", qq_onebot_url="http://127.0.0.1:5700", qq_onebot_token="qq-secret"))
+    monkeypatch.setattr(api, "list_configured_im_tenants", lambda: [("tenant-1", SchoolIm(qq_onebot_url="http://127.0.0.1:5700", qq_onebot_token="qq-secret"))])
+    monkeypatch.setattr(im_gateway, "create_bind_code", lambda t, u: "654321")
+    monkeypatch.setattr(im_gateway, "list_user_bindings", lambda t, u: [{"id": "b1", "platform": "qq", "external_id": "10001"}])
+    monkeypatch.setattr(im_scheduler, "build_morning_digest", lambda t, u, d, kw="": f"早报({t}):{kw}")
+
+    bindings = client.get("/api/im/bindings", headers=headers())
+    assert bindings.status_code == 200
+    assert bindings.json()["wecom_enabled"] is True and bindings.json()["qq_enabled"] is True
+
+    code = client.post("/api/im/bind-code", headers=headers())
+    assert code.status_code == 200 and code.json()["code"] == "654321"
+
+    preview = client.get("/api/im/digest-preview?keywords=%E5%A5%96%E5%AD%A6%E9%87%91", headers=headers())
+    assert preview.status_code == 200 and preview.json()["content"] == "早报(tenant-1):奖学金"
+
+    # QQ OneBot Webhook 验签：伪造签名 401，正确 HMAC-SHA1 放行并回复
+    raw_payload = json.dumps({
+        "post_type": "message",
+        "message_type": "private",
+        "self_id": 99999,
+        "user_id": 10001,
+        "message": "帮助",
+    }).encode("utf-8")
+
+    bad_sig = client.post("/api/im/qq/event/tenant-1", content=raw_payload, headers={"X-Signature": "sha1=0000"})
+    assert bad_sig.status_code == 401
+
+    good_hmac = hmac.new(b"qq-secret", raw_payload, hashlib.sha1).hexdigest()
+    sent_calls: list[tuple] = []
+    monkeypatch.setattr(im_gateway, "handle_incoming_message", lambda *a, **kw: "IM 助手已回复")
+    monkeypatch.setattr(qq_bot, "send_private_message", lambda url, tok, uid, txt: sent_calls.append((url, tok, uid, txt)) or True)
+
+    ok_resp = client.post("/api/im/qq/event", content=raw_payload, headers={"X-Signature": f"sha1={good_hmac}"})
+    assert ok_resp.status_code == 200
+    assert ok_resp.json() == {"ok": True, "delivered": True}
+    assert sent_calls == [("http://127.0.0.1:5700", "qq-secret", "10001", "IM 助手已回复")]
