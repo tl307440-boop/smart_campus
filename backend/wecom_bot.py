@@ -160,12 +160,26 @@ async def _run_tenant_client(tenant_id: str, im: SchoolIm, stop_event: asyncio.E
         try:
             async with websockets.connect(url, ping_interval=None) as ws:
                 await ws.send(json.dumps(build_subscribe_frame(im.wecom_bot_id, im.wecom_bot_secret), ensure_ascii=False))
+
+                # 读取首帧企微网关的认证结果帧
+                raw_first = await ws.recv()
+                try:
+                    first_frame = json.loads(raw_first) if isinstance(raw_first, str) else {}
+                except Exception:
+                    first_frame = {}
+                errcode = first_frame.get("errcode")
+                if errcode is not None and errcode != 0:
+                    errmsg = first_frame.get("errmsg") or "未知错误"
+                    logger.error(f"[WeCom] 租户 {tenant_id} 机器人鉴权失败 (errcode={errcode}): {errmsg}")
+                    backoff = min(60.0, max(20.0, backoff * 2.0))
+                    continue
+
                 loop = asyncio.get_running_loop()
                 with _CONNS_LOCK:
                     _CONNS[tenant_id] = (loop, ws)
                 hb_task = asyncio.create_task(_heartbeat_loop(ws, hb_stop))
                 backoff = 2.0
-                logger.info(f"[WeCom] 租户 {tenant_id} 智能机器人长连接已建立")
+                logger.info(f"[WeCom] 租户 {tenant_id} 智能机器人长连接已建立且认证通过")
 
                 async for raw in ws:
                     if stop_event.is_set():

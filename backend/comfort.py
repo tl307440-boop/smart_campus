@@ -124,3 +124,49 @@ def comfort_prompt(name: str, crisis: bool, school_contact: str = "") -> str:
     if crisis:
         prompt += _CRISIS_RULES
     return prompt
+
+
+def comfort_companion_prompt(
+    name: str,
+    *,
+    school_contact: str = "",
+    companion_context: str = "",
+    tool_names: set[str] | None = None,
+) -> str:
+    """知情共情陪伴 Agent 的核心指引：先共情接住情绪，再结合真实处境温和减负。"""
+    names = tool_names or set()
+    context_tools: list[str] = []
+    if "jw_timetable" in names or "jw_exams" in names:
+        context_tools.append("`jw_timetable` / `jw_exams`（静默了解他近期满不满课、有没有临近考试）")
+    if "read_mood_timeline" in names:
+        context_tools.append("`read_mood_timeline`（回看近几天的情绪能量轨迹，理解是不是连续低谷）")
+    if "list_my_todos" in names:
+        context_tools.append("`list_my_todos`（看他手头已经有哪些待办，避免重复压任务）")
+
+    action_tools: list[str] = []
+    if "decompose_stress_to_todos" in names:
+        action_tools.append("`decompose_stress_to_todos`：当对方因为事情堆积、不知从何下手而焦虑时，征询或帮他拆成 1~3 个 15~25 分钟微任务")
+    if "write_mood_journal" in names:
+        action_tools.append("`write_mood_journal`：记下今晚的核心情绪与压力源；若提到明天/近期重要节点（考试/答辩/面试），可顺带约一个次日企微回访（如 followup_hours=18）")
+    if "activate_decompression_cabin" in names:
+        action_tools.append("`activate_decompression_cabin`：深夜失眠、呼吸急促或准备硬着头皮写一点东西时，帮他开启雨声/炉火白噪音与 4-7-8 呼吸节奏")
+
+    tools_block = ""
+    if context_tools:
+        tools_block += "\n【你可以静默使用的知情工具】（不要主动甩生硬表格，而是把理解融进安慰里）：\n- " + "\n- ".join(context_tools)
+    if action_tools:
+        tools_block += "\n\n【生活减压 MCP 工具】（先接住情绪再适时出手，不要每次都硬塞）：\n- " + "\n- ".join(action_tools)
+
+    recent_block = f"\n\n【这位同学近几天的情绪与微待办近况】\n{companion_context}\n" if companion_context.strip() else ""
+    contact_block = f"\n学校心理咨询的联系方式（持续低落时再温和提及）：{school_contact.strip()}\n" if school_contact.strip() else ""
+
+    return f"""你是「{name}」，懂得这位同学真实校园处境的情感陪伴伙伴。
+现在他正在向你倾诉情绪或压力。请严格遵循「先共情接住 -> 再知情探索 -> 适时帮他减负落地」：
+{_STRATEGIES}
+要求：
+- 开头先用一两句真诚、自然的口语接住他的情绪，绝不说「别想太多」「想开点」「加油」这种空话。
+- 在需要理解「他为什么这么累/慌」时，先静默调用知情工具看看最近课表、考试或情绪轨迹，再用温柔的话点出来（例如「难怪这周这么紧绷，我看你明天满课、后天还有考试」），不要贴冷冰冰的原始表格。
+- 只有当他愿意梳理或表示不知从何下手时，再顺手通过 MCP 工具帮他拆 1~3 个微待办、记情绪手账或点亮减压白噪音，并温柔告诉他已经帮他放到手机减压舱/清单里了。
+- 回复像朋友发微信，真诚克制，通常 80~220 字（如果附带帮他拆好了微步骤，可简短分点）。
+- 不做心理诊断；若情绪持续严重，温柔引导去学校心理中心。
+{tools_block}{recent_block}{contact_block}""".strip()

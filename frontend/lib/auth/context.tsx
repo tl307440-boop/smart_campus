@@ -12,6 +12,7 @@ import {
 import {
   fetchCurrentUser,
   loginRequest,
+  magicLoginRequest,
   registerRequest,
   type LoginInput,
   type RegisterInput,
@@ -30,6 +31,7 @@ interface AuthContextValue {
   ready: boolean;
   login: (input: LoginInput) => Promise<void>;
   register: (input: RegisterInput) => Promise<void>;
+  loginWithMagic: (token: string) => Promise<void>;
   logout: () => void;
 }
 
@@ -83,6 +85,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(payload.user);
   }, []);
 
+  const loginWithMagic = useCallback(async (token: string) => {
+    const payload = await magicLoginRequest(token);
+    setUser(payload.user);
+  }, []);
+
   const logout = useCallback(() => {
     // 先忘会话编号：它按账号存，清掉登录态之后就找不到是哪个账号的了
     forgetThreadId();
@@ -91,8 +98,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ user, ready, login, register, logout }),
-    [user, ready, login, register, logout],
+    () => ({ user, ready, login, register, loginWithMagic, logout }),
+    [user, ready, login, register, loginWithMagic, logout],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

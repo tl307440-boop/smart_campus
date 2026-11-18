@@ -8,6 +8,7 @@ import {
   type ImBinding,
   type ImBindingsState,
   createImBindCode,
+  createMobileMagicLink,
   deleteImBinding,
   errorDetail,
   fetchDigestPreview,
@@ -29,6 +30,7 @@ function BindingRow({
   const [digestTime, setDigestTime] = useState(binding.digest_time || "07:30");
   const [gradeAlert, setGradeAlert] = useState(binding.grade_alert);
   const [ticketAlert, setTicketAlert] = useState(binding.ticket_alert);
+  const [companionFollowup, setCompanionFollowup] = useState(binding.companion_followup ?? true);
   const [newsKeywords, setNewsKeywords] = useState(binding.news_keywords || "");
   const [saving, setSaving] = useState(false);
 
@@ -40,6 +42,7 @@ function BindingRow({
         digest_time: digestTime,
         grade_alert: gradeAlert,
         ticket_alert: ticketAlert,
+        companion_followup: companionFollowup,
         news_keywords: newsKeywords.trim(),
       });
       onSaved(updated);
@@ -123,6 +126,16 @@ function BindingRow({
           人工求助工单被老师回复时提醒我
         </label>
 
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={companionFollowup}
+            onChange={(e) => setCompanionFollowup(e.target.checked)}
+            className="size-4 accent-pink"
+          />
+          次日温和情绪回访（白天主动关心昨晚牵挂的考试/答辩）
+        </label>
+
         <label className="block pt-1">
           <span className="field-label">重点订阅的通知关键词（空格分隔，如 计算机 四六级 奖学金）</span>
           <input
@@ -150,6 +163,8 @@ export function ImPushPane() {
   const [error, setError] = useState<string | null>(null);
   const [bindCode, setBindCode] = useState<{ code: string; expires_in: number } | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [magicLink, setMagicLink] = useState<string | null>(null);
+  const [magicBusy, setMagicBusy] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
 
@@ -196,6 +211,18 @@ export function ImPushPane() {
     }
   }
 
+  async function handleCreateMagicLink() {
+    setMagicBusy(true);
+    try {
+      const res = await createMobileMagicLink("/?view=archive");
+      setMagicLink(res.url);
+    } catch (err) {
+      toast.error(errorDetail(err));
+    } finally {
+      setMagicBusy(false);
+    }
+  }
+
   async function handlePreview() {
     setPreviewing(true);
     try {
@@ -231,7 +258,7 @@ export function ImPushPane() {
       <div className="sketch bg-paper p-3.5 space-y-2.5">
         <h3 className="font-display text-base">第一步：生成 6 位绑定码</h3>
         <p className="text-sm text-muted">
-          绑定码 10 分钟内有效。生成后在企微或 QQ 机器人对话框发送 <code className="rounded bg-skin px-1.5 py-0.5">绑定 数字码</code> 即可关联本人账号；也支持随时发 <code className="rounded bg-skin px-1.5 py-0.5">早报</code>、<code className="rounded bg-skin px-1.5 py-0.5">帮助</code>、<code className="rounded bg-skin px-1.5 py-0.5">解绑</code>。
+          绑定码 10 分钟内有效。在企微发送 <code className="rounded bg-skin px-1.5 py-0.5">绑定 数字码</code> 即可关联；关联后发 <code className="rounded bg-skin px-1.5 py-0.5">减压</code> / <code className="rounded bg-skin px-1.5 py-0.5">早报</code> / <code className="rounded bg-skin px-1.5 py-0.5">帮助</code> 或直接吐槽聊天即可，完全不用每次打开网页登录。
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <button type="button" disabled={generating} onClick={() => void handleGenerateCode()} className="btn btn-sm btn-primary">
@@ -240,7 +267,18 @@ export function ImPushPane() {
           <button type="button" onClick={() => void load()} className="btn btn-sm">
             刷新已绑定账号
           </button>
+          <button type="button" disabled={magicBusy} onClick={() => void handleCreateMagicLink()} className="btn btn-sm">
+            {magicBusy ? "生成中…" : "生成手机免密直达链接"}
+          </button>
         </div>
+        {magicLink && (
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded border border-dashed border-rule bg-flower/15 px-3 py-2 text-xs">
+            <span className="min-w-0 flex-1 break-all text-muted">{magicLink}</span>
+            <button type="button" onClick={() => void copy(magicLink)} className="btn btn-sm">
+              复制免登链接
+            </button>
+          </div>
+        )}
         {bindCode && (
           <div className="mt-2 flex flex-wrap items-center justify-between gap-3 rounded border border-dashed border-rule bg-skin/70 px-3 py-2">
             <div>

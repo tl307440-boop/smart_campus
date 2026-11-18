@@ -54,6 +54,11 @@ export function registerRequest(input: RegisterInput): Promise<AuthSuccess> {
   return postAuth("/api/auth/register", input, 201);
 }
 
+/** 企微免登魔术链接换发标准访问令牌。 */
+export function magicLoginRequest(token: string): Promise<AuthSuccess> {
+  return postAuth("/api/auth/magic", { token }, 200);
+}
+
 /** 用现有令牌回查账号是否仍可用（停用/删除时要清本地态）。 */
 export async function fetchCurrentUser(): Promise<AuthUser> {
   const token = readStoredToken();

@@ -9,6 +9,7 @@ import {
   type ChatDone,
   type ChatMessage,
   type ChatToolEvent,
+  type CompanionEffect,
   type FeedbackRating,
   type FeedbackReason,
   type SessionSummary,
@@ -26,6 +27,8 @@ import {
 export interface UseChatOptions {
   /** 嵌入挂件：会话只存 sessionStorage、不改地址栏、不带自带密钥、不迁移记忆、没有会话列表 */
   embedded?: boolean;
+  /** 收到 MCP / 情感陪伴实时副作用时回调，驱动减压舱/桌宠/微待办刷新 */
+  onCompanion?: (effect: CompanionEffect) => void;
 }
 
 /** 只发图没打字时的提问；与后端 vision.DEFAULT_QUESTION 保持一致 */
@@ -187,6 +190,9 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
             }));
           }
         },
+        onCompanion: (effect: CompanionEffect) => {
+          options.onCompanion?.(effect);
+        },
         onDelta: (chunk: string) => {
           window.clearTimeout(slowTimer);
           streamed += chunk;
@@ -241,7 +247,7 @@ export function useChat(onAnswer?: (text: string) => void, options: UseChatOptio
         setProgress(null);
       }
     },
-    [threadId, onAnswer, embedded, freshSession, refreshSessions],
+    [threadId, onAnswer, embedded, freshSession, refreshSessions, options],
   );
 
   /** 用最后一轮的提问再答一次，替换掉原来的回答（或报错） */

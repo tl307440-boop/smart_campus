@@ -50,16 +50,19 @@ from ai_config import (
 )
 import im_gateway
 import im_scheduler
+import mcp_client
 import qq_bot
 import study_space
 import tickets
 import wecom_bot
+import wellness_store
 from auth import (
     AdminDep,
     CurrentUser,
     CurrentUserDep,
     KnowledgeManagerDep,
     MemberDep,
+    build_magic_url,
     jwt_secret,
     scoped_thread_id,
 )
@@ -110,11 +113,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     configure_memory_embedding()
     wecom_bot.manager.start()
     im_scheduler.scheduler.start()
+    asyncio.create_task(asyncio.to_thread(mcp_client.manager.ensure_started))
     try:
         yield
     finally:
         await im_scheduler.scheduler.stop()
         await wecom_bot.manager.stop()
+        mcp_client.manager.close()
 
 
 app = FastAPI(title="智悦校园 API", version="1.0.0", lifespan=lifespan)
@@ -1499,6 +1504,7 @@ class ImPreferencePatch(BaseModel):
     digest_time: str | None = Field(default=None, max_length=10)
     grade_alert: bool | None = None
     ticket_alert: bool | None = None
+    companion_followup: bool | None = None
     news_keywords: str | None = Field(default=None, max_length=200)
 
 
@@ -1624,3 +1630,143 @@ async def qq_onebot_event_for_tenant(
     authorization: Annotated[str, Header(alias="Authorization")] = "",
 ) -> dict[str, Any]:
     return await _handle_qq_onebot_webhook(tenant_id, request, x_signature, authorization)
+
+
+# ============================================================
+# 情感陪伴减压舱、微待办、情绪轨迹与 MCP 状态
+# ============================================================
+
+
+class TodoCreateRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=100)
+    detail: str = Field(default="", max_length=240)
+    est_minutes: int = Field(default=20, ge=5, le=120)
+    priority: Literal["high", "medium", "low"] = "medium"
+    due_label: str = Field(default="", max_length=40)
+
+
+class TodoToggleRequest(BaseModel):
+    done: bool | None = None
+
+
+class MoodJournalCreateRequest(BaseModel):
+    mood: str = Field(..., min_length=1, max_length=24)
+    energy: int = Field(default=5, ge=1, le=10)
+    stressor: str = Field(default="日常", max_length=32)
+    summary: str = Field(..., min_length=1, max_length=500)
+    followup_hours: int | None = Field(default=None, ge=1, le=168)
+    followup_note: str = Field(default="", max_length=200)
+
+
+class CabinPatchRequest(BaseModel):
+    ambient_sound: Literal["none", "rain", "library", "night_fire", "waves"] | None = None
+    breathing_mode: Literal["none", "4-7-8", "box"] | None = None
+    focus_minutes: int | None = Field(default=None, ge=5, le=90)
+    night_mode: bool | None = None
+    pet_mood: Literal["normal", "listening", "cheering", "night_care", "relaxed"] | None = None
+    note: str | None = Field(default=None, max_length=160)
+
+
+@app.post("/api/im/magic-link")
+def create_mobile_magic_link(
+    user: MemberDep,
+    next_path: str = Query(default="/?view=archive", max_length=120),
+) -> dict[str, Any]:
+    """生成 15 分钟有效期的手机端免密直达链接（用于从企微 / 二维码快速切换）。"""
+    return {
+        "url": build_magic_url(user.tenant_id, user.id, next_path=next_path),
+        "expires_in": 900,
+    }
+
+
+@app.get("/api/mcp/status")
+def get_mcp_status(_: MemberDep) -> dict[str, Any]:
+    """实时展示服务端挂载的 MCP Server 与发现的工具列表（供答辩驾驶舱可视化）。"""
+    return mcp_client.manager.status()
+
+
+@app.get("/api/wellness/dashboard")
+def get_wellness_dashboard(
+    user: MemberDep,
+    days: Annotated[int, Query(ge=1, le=90)] = 14,
+) -> dict[str, Any]:
+    todos = wellness_store.list_todos(user.tenant_id, user.id, status="all", limit=40)
+    journals = wellness_store.list_mood_journals(user.tenant_id, user.id, days=days, limit=30)
+    cabin = wellness_store.get_cabin_state(user.tenant_id, user.id)
+    avg_energy = round(sum(j["energy"] for j in journals) / len(journals), 1) if journals else None
+    return {
+        "todos": todos,
+        "journals": journals,
+        "avg_energy": avg_energy,
+        "cabin": cabin,
+        "mcp": mcp_client.manager.status(),
+    }
+
+
+@app.post("/api/wellness/todos")
+def create_wellness_todo(payload: TodoCreateRequest, user: MemberDep) -> dict[str, Any]:
+    created = wellness_store.add_todos(
+        user.tenant_id,
+        user.id,
+        [payload.model_dump()],
+        source="manual",
+    )
+    if not created:
+        raise HTTPException(status_code=400, detail="待办标题不能为空")
+    return created[0]
+
+
+@app.patch("/api/wellness/todos/{todo_id}")
+def toggle_wellness_todo(
+    todo_id: str, payload: TodoToggleRequest, user: MemberDep
+) -> dict[str, Any]:
+    updated = wellness_store.toggle_todo(user.tenant_id, user.id, todo_id, done=payload.done)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="微待办不存在")
+    return updated
+
+
+@app.delete("/api/wellness/todos/{todo_id}")
+def delete_wellness_todo(todo_id: str, user: MemberDep) -> dict[str, str]:
+    if not wellness_store.delete_todo(user.tenant_id, user.id, todo_id):
+        raise HTTPException(status_code=404, detail="微待办不存在")
+    return {"status": "deleted"}
+
+
+@app.post("/api/wellness/journals")
+def create_wellness_journal(payload: MoodJournalCreateRequest, user: MemberDep) -> dict[str, Any]:
+    created = wellness_store.add_mood_journal(
+        user.tenant_id,
+        user.id,
+        mood=payload.mood,
+        energy=payload.energy,
+        stressor=payload.stressor,
+        summary=payload.summary,
+        source="manual",
+        followup_hours=payload.followup_hours,
+        followup_note=payload.followup_note,
+    )
+    if created is None:
+        raise HTTPException(status_code=400, detail="心情手账内容不能为空")
+    return created
+
+
+@app.delete("/api/wellness/journals/{journal_id}")
+def delete_wellness_journal(journal_id: str, user: MemberDep) -> dict[str, str]:
+    if not wellness_store.delete_mood_journal(user.tenant_id, user.id, journal_id):
+        raise HTTPException(status_code=404, detail="情绪手账不存在")
+    return {"status": "deleted"}
+
+
+@app.patch("/api/wellness/cabin")
+def patch_wellness_cabin(payload: CabinPatchRequest, user: MemberDep) -> dict[str, Any]:
+    return wellness_store.update_cabin_state(
+        user.tenant_id,
+        user.id,
+        ambient_sound=payload.ambient_sound,
+        breathing_mode=payload.breathing_mode,
+        focus_minutes=payload.focus_minutes,
+        night_mode=payload.night_mode,
+        pet_mood=payload.pet_mood,
+        note=payload.note,
+    )

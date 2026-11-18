@@ -230,7 +230,7 @@ export function TermReviewPane() {
         {/* 温馨寄语 */}
         <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 text-center">
           <div className="text-xs font-semibold text-primary">💬 桌宠伴读寄语</div>
-          <p className="mt-1.5 text-sm italic text-foreground/90">"{data.cheer_message}"</p>
+          <p className="mt-1.5 text-sm italic text-foreground/90">&ldquo;{data.cheer_message}&rdquo;</p>
         </div>
       </div>
     </div>

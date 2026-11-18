@@ -39,6 +39,21 @@ body {
   font-family: var(--font-body);
   font-size: 16px;
   line-height: 1.7;
+  transition: background-color 0.35s ease, color 0.35s ease;
+}
+
+/* 深夜树洞温柔护眼模式（由减压舱或 MCP 工具自动激活） */
+[data-night="true"] {
+  --color-desk: #18131b;
+  --color-paper: #231c27;
+  --color-ink: #f4ebe1;
+  --color-muted: #b8a9ad;
+  --color-rule: rgba(244, 235, 225, 0.16);
+  --color-marker: rgba(232, 72, 126, 0.34);
+  --color-skin: #342938;
+  --color-flower: #4da7c4;
+  background-color: var(--color-desk);
+  color: var(--color-ink);
 }
 
 ::selection {

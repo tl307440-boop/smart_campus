@@ -13,12 +13,20 @@ const marker = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "智悦校园",
-  description: "校园问答助手：问规章、查资助、解疑惑。",
+  title: "智悦校园 · 情绪与学习伴侣",
+  description: "懂你课表与情绪节奏的校园伴侣：知情共情、压力微待办拆解与深夜树洞减压舱。",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "default",
+    title: "智悦伴侣",
+  },
 };
 
 export const viewport: Viewport = {
   themeColor: "#fffaf4",
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

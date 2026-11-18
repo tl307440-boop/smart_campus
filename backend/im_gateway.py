@@ -29,6 +29,10 @@ VALID_PLATFORMS = ("wecom", "qq")
 _BIND_CMD_RE = re.compile(r"^\s*(?:/?bind|绑定)\s+(\d{6})\s*$", re.IGNORECASE)
 _UNBIND_CMD_RE = re.compile(r"^\s*(?:/?unbind|解绑|取消绑定)\s*$", re.IGNORECASE)
 _DIGEST_CMD_RE = re.compile(r"^\s*(?:/?digest|早报|今日早报)\s*$", re.IGNORECASE)
+_WELLNESS_CMD_RE = re.compile(
+    r"^\s*(?:/?(?:cabin|todos|mood)|减压|减压舱|微待办|待办|心情|树洞|手机端|打开面板)\s*$",
+    re.IGNORECASE,
+)
 _HELP_CMD_RE = re.compile(r"^\s*(?:/?help|帮助|菜单|\?)\s*$", re.IGNORECASE)
 _DIGEST_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
@@ -107,6 +111,7 @@ class ImBinding:
     ticket_alert: bool
     news_keywords: str
     last_grade_hash: str
+    companion_followup: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -118,6 +123,7 @@ class ImBinding:
             "digest_time": self.digest_time,
             "grade_alert": self.grade_alert,
             "ticket_alert": self.ticket_alert,
+            "companion_followup": self.companion_followup,
             "news_keywords": self.news_keywords,
         }
 
@@ -136,12 +142,13 @@ def _row_to_binding(row: tuple[Any, ...]) -> ImBinding:
         ticket_alert=bool(row[9]),
         news_keywords=str(row[10] or ""),
         last_grade_hash=str(row[11] or ""),
+        companion_followup=bool(row[12]) if len(row) > 12 and isinstance(row[12], bool) else True,
     )
 
 
 _SELECT_COLS = (
     '"id", "tenantId", "userId", "platform", "externalId", "displayName", '
-    '"morningDigest", "digestTime", "gradeAlert", "ticketAlert", "newsKeywords", "lastGradeHash"'
+    '"morningDigest", "digestTime", "gradeAlert", "ticketAlert", "newsKeywords", "lastGradeHash", "companionFollowup"'
 )
 
 
@@ -250,6 +257,9 @@ def update_binding_preferences(
     if "ticket_alert" in patch and patch["ticket_alert"] is not None:
         sets.append('"ticketAlert" = %s')
         params.append(bool(patch["ticket_alert"]))
+    if "companion_followup" in patch and patch["companion_followup"] is not None:
+        sets.append('"companionFollowup" = %s')
+        params.append(bool(patch["companion_followup"]))
     if "news_keywords" in patch and patch["news_keywords"] is not None:
         sets.append('"newsKeywords" = %s')
         params.append(str(patch["news_keywords"]).strip()[:200])
@@ -350,7 +360,38 @@ def format_im_answer(
     return "\n".join(parts).strip()
 
 
+def _build_wellness_card_reply(tenant_id: str, user_id: str) -> str:
+    import auth
+    import wellness_store
+
+    todos = wellness_store.list_todos(tenant_id, user_id, status="pending", limit=5)
+    journals = wellness_store.list_mood_journals(tenant_id, user_id, days=7, limit=5)
+    cabin = wellness_store.get_cabin_state(tenant_id, user_id)
+    lines: list[str] = ["**🌿 你的手机减压舱与微待办**"]
+
+    if todos:
+        lines.append(f"\n**待完成微任务（{len(todos)} 项）**")
+        for item in todos[:5]:
+            due = f"（{item['due_label']}）" if item.get("due_label") else ""
+            lines.append(f"- [ ] {item['title']} · 约{item['est_minutes']}分钟{due}")
+    else:
+        lines.append("\n当前还没有待办微任务，直接跟我说说最近发愁的事，我可以帮你拆解成小步骤～")
+
+    if journals:
+        avg = round(sum(j["energy"] for j in journals) / len(journals), 1)
+        latest = journals[0]
+        lines.append(f"\n**近期情绪状态**：7 日平均能量 `{avg}/10`，最近一次「{latest['mood']}」")
+
+    if cabin.get("ambient_sound") and cabin["ambient_sound"] != "none":
+        lines.append(f"\n**减压舱状态**：白噪音 `{cabin['ambient_sound']}` / 呼吸 `{cabin['breathing_mode']}`")
+
+    magic = auth.build_magic_url(tenant_id, user_id, next_path="/?view=archive")
+    lines.append(f"\n[点击免密直达手机减压舱 & 勾选待办（15分钟有效）]({magic})")
+    return "\n".join(lines)
+
+
 def _ask_campus_graph(tenant_id: str, user_id: str, thread_id: str, question: str) -> str:
+    import auth
     from graph_app import ask_question
     from knowledge import knowledge_base
 
@@ -363,11 +404,19 @@ def _ask_campus_graph(tenant_id: str, user_id: str, thread_id: str, question: st
         tenant_id=tenant_id,
         user_id=user_id,
     )
-    return format_im_answer(
+    text = format_im_answer(
         str(result.get("final_answer") or ""),
         result.get("tables"),
         result.get("sources"),
     )
+    effects = result.get("companion_effects") or []
+    if any(
+        isinstance(e, dict) and e.get("kind") in {"todos_added", "todo_completed", "cabin_updated", "journal_saved"}
+        for e in effects
+    ):
+        magic = auth.build_magic_url(tenant_id, user_id, next_path="/?view=archive")
+        text += f"\n\n📱 [点击免密打开手机减压舱 / 勾选微待办]({magic})"
+    return text
 
 
 def handle_incoming_message(
@@ -381,15 +430,16 @@ def handle_incoming_message(
     """企微与 QQ 统一入站消息处理入口：指令路由 + 校园智能体问答。"""
     cleaned = (text or "").strip()
     if not cleaned:
-        return "发句话给我吧，比如 `帮助`、`早报` 或直接问课表/校园规定～"
+        return "发句话给我吧，比如 `帮助`、`早报`、`减压` 或直接和我聊聊～"
 
     if _HELP_CMD_RE.match(cleaned):
         return (
-            "你好，我是智悦校园助手！支持以下快捷指令：\n"
+            "你好，我是智悦校园伴侣助手！支持以下快捷指令：\n"
             "1. `绑定 123456` — 绑定你在网页端生成的 6 位绑定码\n"
-            "2. `早报` — 立即获取今日课表、临近考试与匹配通知\n"
-            "3. `解绑` — 解除当前端推送绑定\n"
-            "也可以直接发自然语言提问（例如：明天高数在哪上 / 国家奖学金怎么评 / 查一下我的物理课件重点）。"
+            "2. `早报` — 获取今日课表、临近考试与匹配通知\n"
+            "3. `减压` / `待办` — 查看微待办、情绪近况并获取手机免密直达链接\n"
+            "4. `解绑` — 解除当前端推送绑定\n"
+            "也可以直接聊天吐槽心情、让我帮你拆解焦虑任务，或者问课表/校园规定～"
         )
 
     if match := _BIND_CMD_RE.match(cleaned):
@@ -399,7 +449,7 @@ def handle_incoming_message(
             )
             return (
                 f"绑定成功！已关联学校 `{binding.tenant_id}`。\n"
-                "现在可以直接在聊天框问我课表、成绩、通知或发 `早报` 试试，每天早上也会按偏好推送今日摘要。"
+                "现在可以直接在聊天框吐槽倾诉、拆解任务、查课表，或者发 `早报` / `减压` 试试～"
             )
         except Exception as exc:
             return f"绑定失败：{exc}"
@@ -408,7 +458,7 @@ def handle_incoming_message(
     if binding is None:
         return (
             "还没有绑定校园账号哦～\n"
-            "请先登录智悦校园网页端，打开右侧「工具 → 消息推送」获取 6 位绑定码，然后发送：`绑定 123456`。"
+            "请先登录智悦校园网页端，打开「连接设置」获取 6 位绑定码，然后发送：`绑定 123456`。"
         )
 
     if _UNBIND_CMD_RE.match(cleaned):
@@ -421,6 +471,9 @@ def handle_incoming_message(
         return im_scheduler.build_morning_digest(
             binding.tenant_id, binding.user_id, date.today(), binding.news_keywords
         )
+
+    if _WELLNESS_CMD_RE.match(cleaned):
+        return _build_wellness_card_reply(binding.tenant_id, binding.user_id)
 
     thread_id = f"im:{binding.tenant_id}:{binding.user_id}:{platform}:{external_id}"
     try:

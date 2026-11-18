@@ -1,45 +1,44 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ServicePane } from "@/components/AgentSettings";
-import { MemoryPane } from "@/components/MemoryPane";
-import { CalendarPane } from "@/components/CalendarPane";
-import { TermReviewPane } from "@/components/TermReviewPane";
-import { AcademicSandboxPane } from "@/components/AcademicSandboxPane";
-import { ImPushPane } from "@/components/ImPushPane";
-import { StudySpacePane } from "@/components/StudySpacePane";
-import { TicketsPane } from "@/components/TicketsPane";
-import { ChatHeader } from "@/components/ChatHeader";
+import { ArchivePane } from "@/components/ArchivePane";
+import { ChatHeader, type CoreView } from "@/components/ChatHeader";
 import { ChatLog } from "@/components/ChatLog";
 import { Composer, type ComposerPrefill } from "@/components/Composer";
+import { ConnectPane } from "@/components/ConnectPane";
+import { DecompressionCabin } from "@/components/DecompressionCabin";
 import { DeskPet } from "@/components/DeskPet";
-import { EmbedPane } from "@/components/EmbedAdmin";
-import { JwAccountPane } from "@/components/JwAccountPane";
-import { KnowledgePane } from "@/components/KnowledgePane";
 import { SelectionAsk } from "@/components/SelectionAsk";
 import { SessionList } from "@/components/SessionList";
 import { ArrowDownIcon } from "@/components/SketchIcons";
 import { SuggestedQuestions } from "@/components/SuggestedQuestions";
 import { TodayCard } from "@/components/TodayCard";
 import { useToast } from "@/components/Toast";
-import { type ToolTab, ToolDrawer } from "@/components/ToolDrawer";
-import { UsagePane } from "@/components/UsagePane";
-import { WorkspacePane } from "@/components/WorkspaceAdmin";
-import { PET_LOOK_EVENT } from "@/hooks/useDeskPet";
+import { PET_COMPANION_EVENT, PET_LOOK_EVENT } from "@/hooks/useDeskPet";
 import { useLessonReminders } from "@/hooks/useLessonReminders";
 import { useStickToBottom } from "@/hooks/useStickToBottom";
 import { useToday } from "@/hooks/useToday";
-import { type TicketCategory, createTicket, fetchWorkspace } from "@/lib/api";
+import { useChat } from "@/hooks/useChat";
+import {
+  type CabinState,
+  type CompanionEffect,
+  type TicketCategory,
+  type WellnessDashboard,
+  createTicket,
+  errorDetail,
+  fetchWellnessDashboard,
+  fetchWorkspace,
+  patchWellnessCabin,
+  toggleWellnessTodo,
+} from "@/lib/api";
 import { useAuth } from "@/lib/auth/context";
 import { canManageKnowledge } from "@/lib/auth/session";
 import { isFallbackAnswer } from "@/lib/friendly-error";
 import { useReminderSettings } from "@/lib/reminder-settings";
 import { speakText, useSpeechSettings } from "@/lib/speech-settings";
-import { useChat } from "@/hooks/useChat";
 
-const DEFAULT_ASSISTANT_NAME = "校园助手";
+const DEFAULT_ASSISTANT_NAME = "校园伴侣";
 
-/** 「就这段再问」：选中的文字变成引用块，后面空一行给学生接着写 */
 function quoteBlock(text: string): string {
   return `${text
     .split("\n")
@@ -52,16 +51,19 @@ export default function ChatPage() {
   const isStaff = canManageKnowledge(user?.role);
   const isAdmin = user?.role === "ADMIN";
   const [speech] = useSpeechSettings();
-  const { notice, success } = useToast();
+  const { notice, success, error: toastError } = useToast();
   const { state: today, reload: reloadToday } = useToday();
   const [reminder, setReminder] = useReminderSettings();
-  // 提醒挂在页面上而不是卡片上：开始聊天后卡片会收起，该提醒的课还是要提醒
   useLessonReminders(today.status === "ready" ? today.card : null, reminder, notice);
-  const [drawer, setDrawer] = useState<{ tab: ToolTab; open: boolean; n: number }>({ tab: "service", open: false, n: 0 });
+
+  const [view, setView] = useState<CoreView>("chat");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [assistantName, setAssistantName] = useState<string | null>(null);
   const [visionOn, setVisionOn] = useState(false);
   const [prefill, setPrefill] = useState<ComposerPrefill>({ text: "", n: 0 });
+  const [wellness, setWellness] = useState<WellnessDashboard | null>(null);
+  const [wellnessLoading, setWellnessLoading] = useState(false);
+  const [nightOverride, setNightOverride] = useState<boolean | null>(null);
 
   const loadWorkspace = useCallback(() => {
     fetchWorkspace()
@@ -69,9 +71,111 @@ export default function ChatPage() {
         setAssistantName(workspace.assistant_name || DEFAULT_ASSISTANT_NAME);
         setVisionOn(workspace.vision === true);
       })
-      .catch(() => setAssistantName((name) => name ?? DEFAULT_ASSISTANT_NAME));
+      .catch(() => setAssistantName((n) => n ?? DEFAULT_ASSISTANT_NAME));
   }, []);
   useEffect(loadWorkspace, [loadWorkspace]);
+
+  const reloadWellness = useCallback(async () => {
+    setWellnessLoading(true);
+    try {
+      const data = await fetchWellnessDashboard(14);
+      setWellness(data);
+    } catch {
+      // 访客或离线时静默降级
+    } finally {
+      setWellnessLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    fetchWellnessDashboard(14)
+      .then((data) => {
+        if (!cancelled) setWellness(data);
+      })
+      .catch(() => {
+        // 访客或离线时静默降级
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
+  // 同步企微免登链接带入的 ?view=archive / connect 参数
+  useEffect(() => {
+    const param = new URLSearchParams(window.location.search).get("view");
+    if (param === "archive" || param === "connect" || param === "chat") {
+      queueMicrotask(() => setView(param));
+    }
+  }, []);
+
+  const nightMode = nightOverride ?? wellness?.cabin.night_mode ?? false;
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-night", nightMode ? "true" : "false");
+    return () => {
+      document.documentElement.removeAttribute("data-night");
+    };
+  }, [nightMode]);
+
+  const handleCompanionEffect = useCallback(
+    (effect: CompanionEffect) => {
+      if (effect.pet_mood) {
+        let bubbleText = effect.note;
+        if (!bubbleText && effect.kind === "todos_added" && effect.count) {
+          bubbleText = `帮你在减压清单拆好了 ${effect.count} 个小步～`;
+        }
+        window.dispatchEvent(
+          new CustomEvent(PET_COMPANION_EVENT, {
+            detail: { mood: effect.pet_mood, text: bubbleText },
+          }),
+        );
+      }
+      if (typeof effect.night_mode === "boolean") {
+        setNightOverride(effect.night_mode);
+      }
+      if (effect.kind === "cabin_updated") {
+        setWellness((prev) =>
+          prev
+            ? {
+                ...prev,
+                cabin: {
+                  ...prev.cabin,
+                  ambient_sound: effect.ambient_sound ?? prev.cabin.ambient_sound,
+                  breathing_mode: effect.breathing_mode ?? prev.cabin.breathing_mode,
+                  focus_minutes: effect.focus_minutes ?? prev.cabin.focus_minutes,
+                  night_mode: effect.night_mode ?? prev.cabin.night_mode,
+                  pet_mood: effect.pet_mood ?? prev.cabin.pet_mood,
+                  note: effect.note ?? prev.cabin.note,
+                },
+              }
+            : prev,
+        );
+      }
+      if (effect.kind && effect.kind !== "listening") {
+        void reloadWellness();
+      }
+    },
+    [reloadWellness],
+  );
+
+  const handleUpdateCabin = useCallback(
+    async (patch: Partial<CabinState>) => {
+      if (typeof patch.night_mode === "boolean") {
+        setNightOverride(patch.night_mode);
+      }
+      setWellness((prev) => (prev ? { ...prev, cabin: { ...prev.cabin, ...patch } } : prev));
+      try {
+        const next = await patchWellnessCabin(patch);
+        setWellness((prev) => (prev ? { ...prev, cabin: next } : prev));
+      } catch (err) {
+        toastError(errorDetail(err));
+      }
+    },
+    [toastError],
+  );
+
   const name = assistantName ?? "";
 
   const speak = useCallback(
@@ -81,32 +185,31 @@ export default function ChatPage() {
     [speech],
   );
 
-  const chat = useChat(speak);
+  const chat = useChat(speak, { onCompanion: handleCompanionEffect });
   const { messages, pending, progress, error, restoring, busy, threadId } = chat;
   const last = messages.at(-1);
   const answerFailed = last?.role === "assistant" && isFallbackAnswer(last.content);
   const lastQuestion = messages.findLast((message) => message.role === "user")?.content;
 
   const scrollRef = useRef<HTMLElement>(null);
-  const { atBottom, unseen, scrollToBottom } = useStickToBottom(scrollRef, `${messages.length}:${pending.length}:${progress?.phase}`);
+  const { atBottom, unseen, scrollToBottom } = useStickToBottom(
+    scrollRef,
+    `${messages.length}:${pending.length}:${progress?.phase}`,
+  );
 
-  const openTool = useCallback((tab: ToolTab) => setDrawer((d) => ({ tab, open: true, n: d.open ? d.n : d.n + 1 })), []);
-  const closeTool = useCallback(() => {
-    setDrawer((d) => ({ ...d, open: false }));
-    // 刚在「教务账号」里绑定、换绑或解绑了：卡片跟着换
-    if (drawer.tab === "jw") reloadToday();
-  }, [drawer.tab, reloadToday]);
-  const openService = useCallback(() => openTool("service"), [openTool]);
   const closeHistory = useCallback(() => setHistoryOpen(false), []);
 
   function handleSend(text: string, images?: string[]) {
     void chat.send(text, { images });
-    // 等新提问画到纸上，再让桌宠转头看它
     requestAnimationFrame(() =>
       requestAnimationFrame(() => {
         const asked = document.querySelectorAll("[data-role=user]");
         const rect = asked[asked.length - 1]?.getBoundingClientRect();
-        if (rect) window.dispatchEvent(new CustomEvent(PET_LOOK_EVENT, { detail: { x: rect.right - 40, y: rect.top + rect.height / 2 } }));
+        if (rect) {
+          window.dispatchEvent(
+            new CustomEvent(PET_LOOK_EVENT, { detail: { x: rect.right - 40, y: rect.top + rect.height / 2 } }),
+          );
+        }
       }),
     );
   }
@@ -114,6 +217,7 @@ export default function ChatPage() {
   function handleNewSession() {
     window.speechSynthesis?.cancel();
     setHistoryOpen(false);
+    setView("chat");
     void chat.startNewSession();
   }
 
@@ -125,6 +229,7 @@ export default function ChatPage() {
   function handleOpenSession(tid: string) {
     window.speechSynthesis?.cancel();
     setHistoryOpen(false);
+    setView("chat");
     void chat.openSession(tid);
   }
 
@@ -151,97 +256,275 @@ export default function ChatPage() {
       message_id: info.messageId,
       context_summary,
     });
-    success("已提交人工工单，可在右侧「求助工单」查看处理进度");
+    success("已转达给校方/学长老师跟进，回复后会第一时间通过企微推送给你");
   }
 
-  const tabs: ToolTab[] = ["service", "memory", "jw", ...(jwOn ? (["calendar", "plan", "review"] as const) : []), "study", "tickets", "push", ...(isStaff ? (["knowledge"] as const) : []), ...(isAdmin ? (["usage", "workspace", "embeds"] as const) : [])];
-  const noteProps = { canDebug: isStaff, canConfigure: isAdmin, onOpenService: openService };
+  const pendingTodos = (wellness?.todos ?? []).filter((t) => t.status === "pending");
+  const cabin = wellness?.cabin ?? {
+    ambient_sound: "none" as const,
+    breathing_mode: "none" as const,
+    focus_minutes: 25,
+    night_mode: nightMode,
+    pet_mood: "normal" as const,
+    note: "",
+    updated_at: "",
+  };
+  const showCompactCabin = cabin.ambient_sound !== "none" || cabin.breathing_mode !== "none";
+  const noteProps = { canDebug: isStaff, canConfigure: isAdmin, onOpenService: () => setView("connect") };
 
   return (
-    <div className="h-dvh lg:py-4">
-      <div className="sketch-lg relative mx-auto flex h-full max-w-[48rem] flex-col bg-paper">
-        <ChatHeader
-          assistantName={name}
-          user={user}
-          isStaff={isStaff}
-          threadId={threadId}
-          onNewSession={handleNewSession}
-          onOpenHistory={handleOpenHistory}
-          onOpenTools={() => openTool(drawer.tab)}
-          onLogout={handleLogout}
-        />
+    <div className="flex h-dvh flex-col lg:px-4 lg:py-4">
+      <div className="mx-auto flex h-full w-full max-w-[74rem] gap-4">
+        {/* 主容器：手机竖屏全屏铺满，桌面端主纸页居中/偏左配合右侧驾驶舱 */}
+        <div className="sketch-lg relative flex h-full min-w-0 flex-1 flex-col bg-paper">
+          <ChatHeader
+            assistantName={name}
+            user={user}
+            isStaff={isStaff}
+            threadId={threadId}
+            activeView={view}
+            pendingTodoCount={pendingTodos.length}
+            nightMode={nightMode}
+            onChangeView={setView}
+            onToggleNightMode={() => void handleUpdateCabin({ night_mode: !nightMode })}
+            onNewSession={handleNewSession}
+            onOpenHistory={handleOpenHistory}
+            onLogout={handleLogout}
+          />
 
-        <main ref={scrollRef} className="relative flex-1 overflow-y-auto">
-          <div className="mx-auto flex max-w-[45rem] flex-col gap-7 px-5 pt-8 pb-36 sm:px-8 lg:pb-10">
-            {restoring ? (
-              <p className="text-center text-muted">正在翻到上次那一页…</p>
-            ) : (
-              <>
-                {messages.length === 0 && (
-                  <div className="rise-in space-y-6">
-                    <div>
-                      <h1 className="font-display text-[2rem] leading-tight sm:text-[2.5rem]">嗨，我是{name}</h1>
-                      <p className="mt-2 text-muted">规章、资助、考试和校园生活，直接问我就好。回答下面会附上出处。</p>
+          {view === "chat" && (
+            <>
+              <main ref={scrollRef} className="relative flex-1 overflow-y-auto">
+                <div className="mx-auto flex max-w-[45rem] flex-col gap-6 px-4 pt-6 pb-28 sm:px-8 md:pb-10">
+                  {showCompactCabin && (
+                    <div className="lg:hidden">
+                      <DecompressionCabin cabin={cabin} compact onUpdate={(p) => void handleUpdateCabin(p)} />
                     </div>
-                    <TodayCard
-                      state={today}
-                      reminder={reminder}
-                      onReminderChange={setReminder}
-                      onRetry={reloadToday}
-                      onBind={() => openTool("jw")}
-                      onCalendar={() => openTool("calendar")}
+                  )}
+
+                  {restoring ? (
+                    <p className="text-center text-muted">正在翻到上次那一页…</p>
+                  ) : (
+                    <>
+                      {messages.length === 0 && (
+                        <div className="rise-in space-y-5">
+                          <div>
+                            <h1 className="font-display text-[1.85rem] leading-tight sm:text-[2.35rem]">
+                              嗨，我是{name}
+                            </h1>
+                            <p className="mt-1.5 text-sm text-muted sm:text-base">
+                              懂你课表与情绪的校园伴侣：心烦失眠时聊两句、顺手通过 MCP 帮你拆微待办或开雨声减压；查课查校规也没问题。
+                            </p>
+                          </div>
+                          <TodayCard
+                            state={today}
+                            reminder={reminder}
+                            onReminderChange={setReminder}
+                            onRetry={reloadToday}
+                            onBind={() => setView("connect")}
+                            onCalendar={() => setView("connect")}
+                          />
+                          <SuggestedQuestions disabled={busy || !threadId} onAsk={handleSend} />
+                        </div>
+                      )}
+                      <ChatLog
+                        messages={messages}
+                        pending={pending}
+                        progress={progress}
+                        error={error}
+                        busy={busy}
+                        assistantName={name}
+                        showDebug={isStaff}
+                        noteProps={noteProps}
+                        onRegenerate={chat.regenerate}
+                        onEdit={chat.editLast}
+                        onRate={chat.rate}
+                        onEscalate={handleEscalate}
+                        onAsk={handleSend}
+                      />
+                    </>
+                  )}
+                </div>
+              </main>
+
+              {!atBottom && (
+                <button
+                  type="button"
+                  onClick={scrollToBottom}
+                  aria-label="回到最新"
+                  className="btn btn-icon pop-in absolute right-4 bottom-32 z-10 rounded-full shadow-[2px_3px_0_rgba(27,18,20,0.12)] sm:right-8 md:bottom-24"
+                >
+                  <ArrowDownIcon size={18} />
+                  {unseen && (
+                    <span
+                      className="absolute -top-0.5 -right-0.5 size-2.5 rounded-full border border-ink bg-pink"
+                      aria-hidden="true"
                     />
-                    <SuggestedQuestions disabled={busy || !threadId} onAsk={handleSend} />
-                  </div>
-                )}
-                <ChatLog
-                  messages={messages}
-                  pending={pending}
-                  progress={progress}
-                  error={error}
-                  busy={busy}
-                  assistantName={name}
-                  showDebug={isStaff}
-                  noteProps={noteProps}
-                  onRegenerate={chat.regenerate}
-                  onEdit={chat.editLast}
-                  onRate={chat.rate}
-                  onEscalate={handleEscalate}
-                  onAsk={handleSend}
+                  )}
+                </button>
+              )}
+
+              <div className="border-t-2 border-ink px-3 py-2.5 sm:px-6 md:py-3">
+                <div className="mx-auto max-w-[45rem]">
+                  <Composer
+                    disabled={restoring || !threadId}
+                    busy={busy}
+                    onSend={handleSend}
+                    onStop={chat.stop}
+                    prefill={prefill}
+                    lastQuestion={lastQuestion}
+                    allowImages={visionOn}
+                  />
+                </div>
+              </div>
+            </>
+          )}
+
+          {view === "archive" && (
+            <main className="flex-1 overflow-y-auto px-4 pt-5 pb-20 sm:px-8 md:pb-8">
+              <div className="mx-auto max-w-[48rem]">
+                <ArchivePane
+                  dashboard={wellness}
+                  loading={wellnessLoading}
+                  jwOn={jwOn}
+                  onRefresh={reloadWellness}
+                  onUpdateCabin={(p) => void handleUpdateCabin(p)}
+                  onAskInChat={(q) => {
+                    setView("chat");
+                    setPrefill((p) => ({ text: q, n: p.n + 1 }));
+                  }}
                 />
-              </>
-            )}
-          </div>
-        </main>
+              </div>
+            </main>
+          )}
 
-        {!atBottom && (
-          <button
-            type="button"
-            onClick={scrollToBottom}
-            aria-label="回到最新"
-            className="btn btn-icon pop-in absolute right-5 bottom-24 z-10 rounded-full shadow-[2px_3px_0_rgba(27,18,20,0.12)] sm:right-8"
+          {view === "connect" && (
+            <main className="flex-1 overflow-y-auto px-4 pt-5 pb-20 sm:px-8 md:pb-8">
+              <div className="mx-auto max-w-[48rem]">
+                <ConnectPane
+                  jwOn={jwOn}
+                  isStaff={isStaff}
+                  isAdmin={isAdmin}
+                  onJwUpdated={reloadToday}
+                  onWorkspaceSaved={loadWorkspace}
+                />
+              </div>
+            </main>
+          )}
+
+          {/* 移动端底部单手导航栏 */}
+          <nav
+            aria-label="移动端主导航"
+            className="grid grid-cols-3 border-t-2 border-ink bg-paper pb-[env(safe-area-inset-bottom)] md:hidden"
           >
-            <ArrowDownIcon size={18} />
-            {unseen && <span className="absolute -top-0.5 -right-0.5 size-2.5 rounded-full border border-ink bg-pink" aria-hidden="true" />}
-          </button>
-        )}
-
-        <div className="border-t-2 border-ink px-4 py-3 sm:px-8">
-          <div className="mx-auto max-w-[45rem]">
-            <Composer
-              disabled={restoring || !threadId}
-              busy={busy}
-              onSend={handleSend}
-              onStop={chat.stop}
-              prefill={prefill}
-              lastQuestion={lastQuestion}
-              allowImages={visionOn}
-            />
-          </div>
+            {([
+              ["chat", "💬 对话", 0],
+              ["archive", "🌿 情绪记忆", pendingTodos.length],
+              ["connect", "🔗 连接", 0],
+            ] as [CoreView, string, number][]).map(([id, label, badge]) => {
+              const active = view === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setView(id)}
+                  className={`flex items-center justify-center gap-1 py-2.5 font-display text-sm ${
+                    active ? "bg-skin text-ink font-semibold" : "text-muted"
+                  }`}
+                >
+                  <span>{label}</span>
+                  {badge > 0 && (
+                    <span className="rounded-full bg-pink px-1.5 text-[0.65rem] text-ink tabular-nums">
+                      {badge}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </nav>
         </div>
+
+        {/* 桌面答辩驾驶舱：直观呈现知情共情记忆 + MCP 拆解待办 + 减压舱状态 */}
+        {view === "chat" && (
+          <aside className="hidden w-80 shrink-0 flex-col gap-3 overflow-y-auto lg:flex">
+            <div className="sketch bg-paper p-3.5 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="font-display text-base">🔌 MCP 工具生态</span>
+                <span className="rounded-full bg-flower/25 px-2 py-0.5 text-xs">
+                  {wellness?.mcp.tools.length ?? 6} 个工具就绪
+                </span>
+              </div>
+              <p className="text-xs text-muted">
+                标准 stdio MCP Host：可在陪伴倾诉中动态调用微待办拆解、情绪轨迹手账与减压舱工具。
+              </p>
+            </div>
+
+            <DecompressionCabin cabin={cabin} compact onUpdate={(p) => void handleUpdateCabin(p)} />
+
+            <div className="sketch bg-paper p-3.5 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="font-display text-base">✅ 当前微待办 ({pendingTodos.length})</span>
+                <button type="button" onClick={() => setView("archive")} className="link-ink text-xs">
+                  全部 / 曲线
+                </button>
+              </div>
+              {pendingTodos.length === 0 ? (
+                <p className="text-xs text-muted">
+                  暂无待办。发一句焦虑吐槽给助手，看看它怎么通过 MCP 帮你切分小步～
+                </p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {pendingTodos.slice(0, 4).map((todo) => (
+                    <li key={todo.id} className="flex items-start gap-2 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={false}
+                        onChange={() => {
+                          void toggleWellnessTodo(todo.id, true).then(() => {
+                            window.dispatchEvent(
+                              new CustomEvent(PET_COMPANION_EVENT, {
+                                detail: { mood: "cheering", text: `打卡「${todo.title.slice(0, 10)}」!` },
+                              }),
+                            );
+                            void reloadWellness();
+                          });
+                        }}
+                        className="mt-0.5 size-3.5 shrink-0 accent-pink"
+                      />
+                      <span className="min-w-0 flex-1 leading-snug">
+                        {todo.title}
+                        <span className="ml-1 text-muted">({todo.est_minutes}m)</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            {wellness?.avg_energy != null && (
+              <div className="sketch bg-paper p-3.5 space-y-1">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-display text-sm">🌤️ 近期情绪能量均值</span>
+                  <strong className="text-sm tabular-nums">{wellness.avg_energy} / 10</strong>
+                </div>
+                {wellness.journals[0] && (
+                  <p className="text-xs text-muted line-clamp-2">
+                    最近「{wellness.journals[0].mood}」：{wellness.journals[0].summary}
+                  </p>
+                )}
+              </div>
+            )}
+          </aside>
+        )}
       </div>
 
-      <SelectionAsk containerRef={scrollRef} onAsk={(text) => setPrefill((p) => ({ text: quoteBlock(text), n: p.n + 1 }))} />
+      <SelectionAsk
+        containerRef={scrollRef}
+        onAsk={(text) => {
+          setView("chat");
+          setPrefill((p) => ({ text: quoteBlock(text), n: p.n + 1 }));
+        }}
+      />
 
       <SessionList
         open={historyOpen}
@@ -254,39 +537,11 @@ export default function ChatPage() {
         onDelete={chat.removeSession}
       />
 
-      <ToolDrawer tabs={tabs} tab={drawer.tab} open={drawer.open} onOpen={openTool} onClose={closeTool}>
-        <div key={`${drawer.tab}-${drawer.n}`}>
-          {drawer.tab === "service" && <ServicePane isAdmin={isAdmin} />}
-          {drawer.tab === "memory" && <MemoryPane />}
-          {drawer.tab === "jw" && <JwAccountPane />}
-          {drawer.tab === "calendar" && <CalendarPane />}
-          {drawer.tab === "plan" && (
-            <AcademicSandboxPane
-              onAsk={(question) => {
-                closeTool();
-                setPrefill((p) => ({ text: question, n: p.n + 1 }));
-              }}
-            />
-          )}
-          {drawer.tab === "review" && <TermReviewPane />}
-          {drawer.tab === "study" && (
-            <StudySpacePane
-              jwOn={jwOn}
-              onAsk={(question) => {
-                closeTool();
-                setPrefill((p) => ({ text: question, n: p.n + 1 }));
-              }}
-            />
-          )}
-          {drawer.tab === "tickets" && <TicketsPane isStaff={isStaff} />}
-          {drawer.tab === "push" && <ImPushPane />}
-          {drawer.tab === "knowledge" && isStaff && <KnowledgePane />}
-          {drawer.tab === "usage" && isAdmin && <UsagePane />}
-          {drawer.tab === "workspace" && isAdmin && <WorkspacePane onSaved={loadWorkspace} />}
-          {drawer.tab === "embeds" && isAdmin && <EmbedPane />}
-        </div>
-      </ToolDrawer>
-      <DeskPet thinking={busy} failed={Boolean(error) || answerFailed} onOpenSettings={openService} />
+      <DeskPet
+        thinking={busy}
+        failed={Boolean(error) || answerFailed}
+        onOpenSettings={() => setView("connect")}
+      />
     </div>
   );
 }

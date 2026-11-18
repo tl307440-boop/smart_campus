@@ -47,6 +47,7 @@ _JW_WORDS = (
 )
 _NEWS_WORDS = ("通知", "公告", "新闻", "讲座", "活动安排", "附件", "名单", "公示")
 _STUDY_WORDS = ("课件", "ppt", "讲义", "伴学", "考点", "闪卡", "个人笔记", "我的笔记", "课程资料", "复习提纲", "模拟题")
+_WELLNESS_WORDS = ("微待办", "拆解任务", "拆解待办", "减压舱", "白噪音", "呼吸练习", "情绪手账", "心情轨迹")
 _TIMELY_WORDS = (
     "今年", "明年", "去年", "最新", "现在", "目前", "最近", "几号", "还有多久", "多少钱", "价格", "排名", "排行", "天气",
 )
@@ -76,7 +77,19 @@ class ToolContext:
     tables: list[dict[str, Any]] = field(default_factory=list)
     # 查完之后值得顺着问的下一句，前端画成点一下就问的小按钮
     follow_ups: list[str] = field(default_factory=list)
+    # MCP / 陪伴工具产生的实时交互副作用（如开启白噪音、新增微待办、桌宠表情）
+    companion_effects: list[dict[str, Any]] = field(default_factory=list)
+    on_companion: Callable[[dict[str, Any]], None] | None = None
+    # 知情共情模式下静默查课表/考试时只看文本上下文，不向聊天气泡强塞大表格
+    suppress_tables: bool = False
     _campus_id: str = ""
+
+    def emit_companion(self, effect: dict[str, Any]) -> None:
+        if not effect:
+            return
+        self.companion_effects.append(effect)
+        if self.on_companion is not None:
+            self.on_companion(effect)
 
     def suggest(self, *questions: str) -> None:
         for question in questions:
@@ -84,6 +97,8 @@ class ToolContext:
                 self.follow_ups.append(question)
 
     def cite(self, title: str, url: str = "", snippet: str = "") -> None:
+        if self.suppress_tables:
+            return
         if any(s.get("url") == url and url for s in self.sources):
             return
         self.sources.append({
@@ -93,6 +108,8 @@ class ToolContext:
 
     def table(self, title: str, columns: list[tuple[str, str]], rows: list[dict[str, Any]]) -> str:
         """登记一张表，返回给模型的提示语。columns 是 (字段名, 表头) 的列表；整列都空的不要。"""
+        if self.suppress_tables:
+            return "共情陪伴模式下无需向用户直接展示表格，请将相关信息自然融进温柔的安慰或建议中。"
         cells = [{key: "" if row.get(key) is None else str(row.get(key)) for key, _ in columns} for row in rows[:TABLE_MAX_ROWS]]
         kept = [(key, label) for key, label in columns if any(cell[key] for cell in cells)]
         self.tables.append({
@@ -737,6 +754,52 @@ _STUDY_TOOL = Tool(
 )
 
 
+def _mcp_tools_enabled() -> bool:
+    if os.getenv("MCP_ENABLED", "true").strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    # 隔离离线单元测试对默认工具集的断言；MCP 单测显式开启或打桩
+    return not os.getenv("PYTEST_CURRENT_TEST")
+
+
+def _run_mcp_tool(tool_name: str, ctx: ToolContext, args: dict[str, Any]) -> Any:
+    import mcp_client
+
+    data = mcp_client.manager.call_tool(
+        tool_name, args, tenant_id=ctx.tenant_id, user_id=ctx.user_id
+    )
+    if isinstance(data, dict):
+        effect = data.get("ui_effect")
+        if isinstance(effect, dict):
+            ctx.emit_companion({"source": "mcp", "tool": tool_name, **effect})
+    return data
+
+
+def _mcp_tools() -> list[Tool]:
+    if not _mcp_tools_enabled():
+        return []
+    try:
+        import mcp_client
+
+        discovered = mcp_client.manager.list_tools()
+    except Exception as exc:
+        logger.warning(f"[MCP] 读取 MCP 工具失败，本轮跳过: {exc}")
+        return []
+
+    wrapped: list[Tool] = []
+    for item in discovered:
+        tool_name = item.name
+        wrapped.append(
+            Tool(
+                name=tool_name,
+                label=f"MCP·{item.title}",
+                description=item.description or item.title,
+                parameters=item.llm_schema,
+                run=lambda ctx, args, _name=tool_name: _run_mcp_tool(_name, ctx, args),
+            )
+        )
+    return wrapped
+
+
 def available_tools(tenant_id: str, user_id: str, settings: WorkspaceSettings) -> list[Tool]:
     school = school_ai(tenant_id)
     tools = [_KNOWLEDGE_TOOL]
@@ -750,6 +813,23 @@ def available_tools(tenant_id: str, user_id: str, settings: WorkspaceSettings) -
         tools += _MAP_TOOLS
     if search_key(tenant_id) and not settings.query_only:
         tools.append(_SEARCH_TOOL)
+    if user_id:
+        tools += _mcp_tools()
+    return tools
+
+
+def companion_tools(tenant_id: str, user_id: str, settings: WorkspaceSettings) -> list[Tool]:
+    """知情共情陪伴专用工具集：静默教务只读上下文 + 知识库 + 生活减压 MCP 工具。"""
+    if not user_id:
+        return []
+    school = school_ai(tenant_id)
+    tools: list[Tool] = [_KNOWLEDGE_TOOL]
+    if _study_space_enabled():
+        tools.append(_STUDY_TOOL)
+    if school.jw_mode in ("demo", "zhengfang"):
+        # 陪伴只读今天/近期课表与考试，了解学生处境
+        tools += [t for t in _JW_TOOLS if t.name in {"jw_timetable", "jw_exams"}]
+    tools += _mcp_tools()
     return tools
 
 
@@ -767,6 +847,10 @@ def needs_tools(question: str, tool_names: set[str]) -> bool:
     if "jw_grades" in tool_names and any(word in question for word in _JW_WORDS):
         return True
     if "study_course_materials" in tool_names and any(word in question.lower() for word in _STUDY_WORDS):
+        return True
+    if ("decompose_stress_to_todos" in tool_names or "activate_decompression_cabin" in tool_names) and any(
+        word in question for word in _WELLNESS_WORDS
+    ):
         return True
     if "school_news" in tool_names and any(word in question for word in _NEWS_WORDS):
         return True
@@ -809,7 +893,7 @@ def read_audit(tenant_id: str, limit: int = AUDIT_KEEP) -> list[dict[str, Any]]:
 
 def tool_labels() -> dict[str, str]:
     """工具名 → 给人看的名字，使用情况页用。"""
-    tools = [*_JW_TOOLS, *_NEWS_TOOLS, _SEARCH_TOOL, *_MAP_TOOLS, _KNOWLEDGE_TOOL, _STUDY_TOOL]
+    tools = [*_JW_TOOLS, *_NEWS_TOOLS, _SEARCH_TOOL, *_MAP_TOOLS, _KNOWLEDGE_TOOL, _STUDY_TOOL, *_mcp_tools()]
     return {tool.name: tool.label for tool in tools}
 
 
@@ -938,12 +1022,16 @@ def run(
     question: str,
     emit: Callable[[str], None],
     on_tool: Callable[[dict[str, Any]], None],
+    *,
+    tools: list[Tool] | None = None,
+    custom_system_prompt: str | None = None,
 ) -> str:
     """跑完整个工具循环，返回最终回答全文（中途已经边生成边 emit 出去）。"""
-    tools = available_tools(ctx.tenant_id, ctx.user_id, ctx.settings)
-    by_name = {t.name: t for t in tools}
-    specs = [t.spec() for t in tools]
-    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt(ctx, tools)}, *history, {"role": "user", "content": question}]
+    resolved_tools = tools if tools is not None else available_tools(ctx.tenant_id, ctx.user_id, ctx.settings)
+    by_name = {t.name: t for t in resolved_tools}
+    specs = [t.spec() for t in resolved_tools]
+    sys_prompt = custom_system_prompt if custom_system_prompt is not None else system_prompt(ctx, resolved_tools)
+    messages: list[dict[str, Any]] = [{"role": "system", "content": sys_prompt}, *history, {"role": "user", "content": question}]
     parts: list[str] = []
 
     def say(text: str) -> None:

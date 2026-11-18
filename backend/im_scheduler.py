@@ -290,8 +290,56 @@ def _within_digest_window(now: datetime, hhmm: str) -> bool:
     return abs(now_min - target_min) <= DIGEST_WINDOW_MINUTES
 
 
-def run_once(now: datetime | None = None, *, force_digest: bool = False) -> dict[str, int]:
-    """执行一轮主动推送检查（早报 + 出分提醒），可在 CLI/测试/后台协程复用。"""
+def _within_quiet_care_hours(now: datetime) -> bool:
+    """主动情绪回访只在白天/晚间清醒时段（08:00-22:00）推送，深夜不打扰休息。"""
+    return 8 <= now.hour < 22
+
+
+def process_companion_followups(
+    bindings: list[im_gateway.ImBinding],
+    now: datetime,
+    *,
+    force: bool = False,
+) -> int:
+    """派发到期的跨天情绪关心回访，附带免密直达手机端链接。"""
+    if not force and not _within_quiet_care_hours(now):
+        return 0
+    try:
+        import auth
+        import wellness_store
+
+        due = wellness_store.claim_due_followups(now=now)
+    except Exception as exc:
+        logger.debug(f"[Scheduler] 读取待回访情绪手账跳过: {exc}")
+        return 0
+    if not due:
+        return 0
+
+    by_user: dict[tuple[str, str], list[im_gateway.ImBinding]] = {}
+    for b in bindings:
+        if b.companion_followup:
+            by_user.setdefault((b.tenant_id, b.user_id), []).append(b)
+
+    sent = 0
+    for item in due:
+        targets = by_user.get((item["tenant_id"], item["user_id"]), [])
+        if not targets:
+            continue
+        note = item.get("followup_note") or item.get("summary") or "之前聊起让你牵挂的那件事"
+        magic = auth.build_magic_url(item["tenant_id"], item["user_id"], next_path="/?view=archive")
+        message = (
+            f"🌿 **挂念你一下**：之前聊到「{note}」，今天感觉怎么样了？\n"
+            "忙完记得先歇一口气，随时回我一句怎么都行。\n\n"
+            f"[打开手机减压舱 / 记下此刻心情]({magic})"
+        )
+        for b in targets:
+            if im_gateway.send_im_message(b.tenant_id, b.platform, b.external_id, message):
+                sent += 1
+    return sent
+
+
+def run_once(now: datetime | None = None, *, force_digest: bool = False, force_followup: bool = False) -> dict[str, int]:
+    """执行一轮主动推送检查（早报 + 出分提醒 + 情绪跨天回访），可在 CLI/测试/后台协程复用。"""
     current = now or datetime.now()
     today = current.date()
     digests_sent = 0
@@ -333,7 +381,11 @@ def run_once(now: datetime | None = None, *, force_digest: bool = False) -> dict
                 if alert and im_gateway.send_im_message(b.tenant_id, b.platform, b.external_id, alert):
                     grade_alerts_sent += 1
 
-    return {"digests_sent": digests_sent, "grade_alerts_sent": grade_alerts_sent}
+    followups_sent = process_companion_followups(bindings, current, force=force_followup)
+    summary = {"digests_sent": digests_sent, "grade_alerts_sent": grade_alerts_sent}
+    if followups_sent or force_followup:
+        summary["followups_sent"] = followups_sent
+    return summary
 
 
 class ImScheduler:

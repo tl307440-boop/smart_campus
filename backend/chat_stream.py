@@ -35,6 +35,7 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]], finish: Finish | No
     tables: list[dict[str, Any]] = []
     follow_ups: list[str] = []
     tool_events: list[dict[str, Any]] = []
+    companion_effects: list[dict[str, Any]] = []
     generating_announced = False
 
     for mode, chunk in events:
@@ -43,6 +44,11 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]], finish: Finish | No
             if isinstance(tool, dict):
                 tool_events.append(tool)
                 yield sse("tool", tool)
+                continue
+            companion = chunk.get("companion") if isinstance(chunk, dict) else None
+            if isinstance(companion, dict):
+                companion_effects.append(companion)
+                yield sse("companion", companion)
                 continue
             delta = chunk.get("delta") if isinstance(chunk, dict) else None
             if not delta:
@@ -77,6 +83,8 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]], finish: Finish | No
                     sources = patch["sources"]
                 tables = patch.get("tables") or []
                 follow_ups = patch.get("follow_ups") or []
+                if patch.get("companion_effects"):
+                    companion_effects = list(patch["companion_effects"])
             elif node == "emotion":
                 emotion = patch.get("emotion_data")
             # 求助卡片：高危关键词在 generate 给出，情绪分析判出高风险时在 finalize 补上
@@ -93,6 +101,8 @@ def sse_from_graph_stream(events: Iterable[tuple[str, Any]], finish: Finish | No
         "tables": tables,
         "follow_ups": follow_ups,
     }
+    if companion_effects:
+        done["companion"] = companion_effects
     if finish is not None:
         done.update(finish(done, tool_events) or {})
     yield sse("done", done)

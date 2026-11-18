@@ -84,6 +84,7 @@ class BindingCursor:
             item["ticketAlert"],
             item["newsKeywords"],
             item["lastGradeHash"],
+            item.get("companionFollowup", True),
             item["createdAt"],
             item["updatedAt"],
         )
@@ -124,6 +125,7 @@ class BindingCursor:
                 "ticketAlert": True,
                 "newsKeywords": "",
                 "lastGradeHash": "",
+                "companionFollowup": True,
                 "createdAt": now,
                 "updatedAt": now,
             }
@@ -166,7 +168,7 @@ class BindingCursor:
             # 按 SET 字段顺序回写
             vals = list(params[:-3])
             idx = 0
-            for field in ('"morningDigest" = %s', '"digestTime" = %s', '"gradeAlert" = %s', '"ticketAlert" = %s', '"newsKeywords" = %s'):
+            for field in ('"morningDigest" = %s', '"digestTime" = %s', '"gradeAlert" = %s', '"ticketAlert" = %s', '"companionFollowup" = %s', '"newsKeywords" = %s'):
                 if field in compact:
                     key = field.split('"')[1]
                     item[key] = vals[idx]
