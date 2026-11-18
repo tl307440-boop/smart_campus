@@ -1,23 +1,32 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { HistoryIcon, NewPageIcon, PouchIcon } from "@/components/SketchIcons";
+import { HistoryIcon, NewPageIcon } from "@/components/SketchIcons";
 import type { AuthUser } from "@/lib/auth/session";
+
+export type CoreView = "chat" | "archive" | "connect";
 
 interface Props {
   assistantName: string;
   user: AuthUser | null;
-  /** 老师/管理员：账户菜单里显示会话编号，方便对日志 */
   isStaff: boolean;
   threadId: string | null;
+  activeView: CoreView;
+  pendingTodoCount?: number;
+  nightMode: boolean;
+  onChangeView: (view: CoreView) => void;
+  onToggleNightMode: () => void;
   onNewSession: () => void;
-  /** 没有会话列表（嵌入挂件、没配数据库）时不传，按钮不显示 */
   onOpenHistory?: () => void;
-  onOpenTools: () => void;
   onLogout: () => void;
 }
 
-function AccountMenu({ user, isStaff, threadId, onLogout }: Pick<Props, "user" | "isStaff" | "threadId" | "onLogout">) {
+function AccountMenu({
+  user,
+  isStaff,
+  threadId,
+  onLogout,
+}: Pick<Props, "user" | "isStaff" | "threadId" | "onLogout">) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -69,27 +78,80 @@ function AccountMenu({ user, isStaff, threadId, onLogout }: Pick<Props, "user" |
   );
 }
 
-/** 纸页页头：助手名 + 学校，右边是新的一页、工具（窄屏）和账户菜单。 */
-export function ChatHeader({ assistantName, user, onNewSession, onOpenHistory, onOpenTools, ...menu }: Props) {
+/** 精简 3 视图页头：窄屏专注主对话，桌面端内置 3 核心切换与深夜树洞按钮 */
+export function ChatHeader({
+  assistantName,
+  user,
+  activeView,
+  pendingTodoCount = 0,
+  nightMode,
+  onChangeView,
+  onToggleNightMode,
+  onNewSession,
+  onOpenHistory,
+  ...menu
+}: Props) {
+  const navItems: { id: CoreView; label: string; badge?: number }[] = [
+    { id: "chat", label: "伴侣对话" },
+    { id: "archive", label: "情绪与记忆", badge: pendingTodoCount || undefined },
+    { id: "connect", label: "连接设置" },
+  ];
+
   return (
-    <header className="flex items-center gap-2 border-b-2 border-ink px-4 py-2.5 sm:px-6">
+    <header className="flex items-center gap-2 border-b-2 border-ink px-3 py-2.5 sm:px-5">
       {onOpenHistory && (
-        <button type="button" onClick={onOpenHistory} className="btn btn-icon btn-sm" aria-label="历史对话" title="历史对话">
+        <button
+          type="button"
+          onClick={onOpenHistory}
+          className="btn btn-icon btn-sm"
+          aria-label="历史对话"
+          title="历史对话"
+        >
           <HistoryIcon size={18} />
         </button>
       )}
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0 flex-1 md:flex-none md:pr-2">
         <p className="truncate font-display text-xl leading-tight sm:text-2xl">{assistantName}</p>
-        {user && <p className="truncate text-[0.8125rem] text-muted">{user.tenantName} · 智悦校园</p>}
+        {user && <p className="truncate text-[0.75rem] text-muted">{user.tenantName} · 智悦伴侣</p>}
       </div>
-      <button type="button" onClick={onNewSession} className="btn btn-sm" aria-label="新的一页">
-        <NewPageIcon size={18} />
-        <span className="hidden sm:inline">新的一页</span>
+
+      {/* 桌面端 3 核心视图切换 */}
+      <nav aria-label="核心视图" className="hidden flex-1 items-center justify-center gap-1.5 md:flex">
+        {navItems.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => onChangeView(item.id)}
+            className={`btn btn-sm ${activeView === item.id ? "btn-primary" : ""}`}
+          >
+            <span>{item.label}</span>
+            {item.badge ? (
+              <span className="rounded-full bg-ink px-1.5 py-0.2 text-[0.7rem] text-paper tabular-nums">
+                {item.badge}
+              </span>
+            ) : null}
+          </button>
+        ))}
+      </nav>
+
+      <button
+        type="button"
+        onClick={onToggleNightMode}
+        className="btn btn-sm"
+        aria-label={nightMode ? "切回日间纸面" : "进入深夜树洞模式"}
+        title={nightMode ? "切回日间纸面" : "进入深夜树洞模式"}
+      >
+        <span>{nightMode ? "☀️" : "🌙"}</span>
+        <span className="hidden sm:inline">{nightMode ? "日间" : "树洞"}</span>
       </button>
-      <button type="button" onClick={onOpenTools} className="btn btn-sm lg:hidden" aria-label="工具">
-        <PouchIcon size={18} />
-        <span className="hidden sm:inline">工具</span>
-      </button>
+
+      {activeView === "chat" && (
+        <button type="button" onClick={onNewSession} className="btn btn-sm" aria-label="新的一页">
+          <NewPageIcon size={18} />
+          <span className="hidden sm:inline">新的一页</span>
+        </button>
+      )}
+
       <AccountMenu user={user} {...menu} />
     </header>
   );

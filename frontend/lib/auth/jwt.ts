@@ -82,6 +82,32 @@ export async function verifyAccessToken(token: string): Promise<AccessTokenClaim
   }
 }
 
+export interface MagicTokenClaims {
+  sub: string;
+  tid: string;
+}
+
+export async function verifyMagicToken(token: string): Promise<MagicTokenClaims | null> {
+  try {
+    const { payload } = await jwtVerify(token, getSecret(), {
+      issuer: JWT_ISSUER,
+      algorithms: [JWT_ALGORITHM],
+    });
+    if (
+      payload.purpose === "magic_link" &&
+      typeof payload.sub === "string" &&
+      payload.sub &&
+      typeof payload.tid === "string" &&
+      payload.tid
+    ) {
+      return { sub: payload.sub, tid: payload.tid };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function isAccessTokenClaims(value: unknown): value is AccessTokenClaims {
   if (typeof value !== "object" || value === null) return false;
   const claims = value as Record<string, unknown>;

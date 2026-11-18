@@ -52,3 +52,6 @@ opentelemetry-sdk>=1.22.0
 
 # --- 7. 交叉编码器重排序（BGE Reranker；未安装时自动退回向量 Top-K）---
 sentence-transformers>=3.0.0
+
+# --- 8. Model Context Protocol（MCP Server / Client）---
+mcp>=1.20.0

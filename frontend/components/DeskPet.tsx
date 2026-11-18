@@ -223,8 +223,12 @@ function DeskPetInner({ thinking, failed = false, onOpenSettings }: Props) {
 
 const subscribe = () => () => {};
 
-/** 桌宠：眼睛跟着鼠标转，闲置会睡着；单击戳一戳、摸头、拖动，双击打开设置抽屉。 */
+/** 桌宠：眼睛跟着鼠标转，闲置会睡着；单击戳一戳、摸头、拖动，双击打开设置抽屉。窄屏隐藏以免遮挡手机单手聊天。 */
 export function DeskPet(props: Props) {
   const mounted = useSyncExternalStore(subscribe, () => true, () => false);
-  return mounted ? <DeskPetInner {...props} /> : null;
+  return mounted ? (
+    <div className="hidden md:block">
+      <DeskPetInner {...props} />
+    </div>
+  ) : null;
 }

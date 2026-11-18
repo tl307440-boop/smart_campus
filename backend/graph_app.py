@@ -140,6 +140,9 @@ class GraphState(TypedDict):
     # ---- 本轮工具查完后建议接着问的话（agent.ToolContext.suggest），只给前端当快捷按钮，不入库 ----
     follow_ups: list[str]
 
+    # ---- MCP / 陪伴工具产生的交互副作用（如开启减压舱/写入微待办）----
+    companion_effects: list[dict[str, Any]]
+
     # ---- 本会话更早轮次的滚动摘要（chat_history），每轮由 api 从库里读出来放进输入 ----
     summary: str
 
@@ -620,17 +623,90 @@ def generate_node(state: GraphState) -> dict:
     return out
 
 
+def _knowledge_searcher(tenant_id: str, settings: WorkspaceSettings):
+    def search(query: str) -> tuple[str, list[dict[str, Any]]]:
+        _prepare_index(tenant_id)
+        vdb = get_vector_db(tenant_id)
+        if vdb is None or not query:
+            return "", []
+        chunks = vdb.search_chunks(
+            query, tenant_id, top_k=settings.top_k, min_score=settings.similarity_threshold or None
+        )
+        return vdb.format_context(chunks), _chunk_sources(chunks)
+
+    return search
+
+
+def _safe_stream_writer():
+    try:
+        return get_stream_writer()
+    except RuntimeError:
+        return lambda _: None
+
+
 def _comfort_answer(state: GraphState, question: str, settings: WorkspaceSettings, memories: list[str], crisis: bool) -> dict:
-    """倾诉与高危两种情况：用陪伴提示词带上历史多轮回应。高危时一定附求助卡片，模型不可用也给固定回复。"""
+    """倾诉与高危两种情况：高危立即直出安全卡片；普通倾诉在登录且可用工具存在时走「知情共情」Agent。"""
     emit = _delta_emitter()
+    writer = _safe_stream_writer()
+    tenant_id = state.get("tenant_id") or GLOBAL_TENANT
+    user_id = state.get("user_id") or ""
     contact = settings.counseling_contact
     card = comfort.safety_card(contact) if crisis else None
     endpoint = None if get_deepseek().use_mock else _chat_endpoint(state)
     final_answer = ""
+    effects: list[dict[str, Any]] = []
+
     if get_deepseek().use_mock and not crisis:
         final_answer = f"【{settings.assistant_name}】（模拟回复）听起来你最近不太好受，愿意和我多说说吗？"
         emit(final_answer)
-    if endpoint is not None:
+    elif endpoint is not None and not crisis and user_id:
+        ctools = agent.companion_tools(tenant_id, user_id, settings)
+        if len(ctools) > 1:
+            import wellness_store
+
+            writer({"companion": {"source": "comfort", "pet_mood": "listening"}})
+            companion_ctx = wellness_store.build_companion_context(tenant_id, user_id)
+            sys_prompt = (
+                comfort.comfort_companion_prompt(
+                    settings.assistant_name,
+                    school_contact=contact,
+                    companion_context=companion_ctx,
+                    tool_names={t.name for t in ctools},
+                )
+                + prompt_extras(settings.persona, memories)
+            )
+            spoken: list[str] = []
+
+            def say(text: str) -> None:
+                spoken.append(text)
+                emit(text)
+
+            ctx = agent.ToolContext(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                settings=settings,
+                search_knowledge=_knowledge_searcher(tenant_id, settings),
+                extras=prompt_extras(settings.persona, memories),
+                on_companion=lambda eff: writer({"companion": eff}),
+                suppress_tables=True,
+            )
+            try:
+                final_answer = agent.run(
+                    ctx,
+                    endpoint,
+                    prompt_history(state),
+                    question,
+                    say,
+                    lambda event: writer({"tool": event}),
+                    tools=ctools,
+                    custom_system_prompt=sys_prompt,
+                )
+                effects = list(ctx.companion_effects)
+            except Exception as e:
+                logger.error(f"[知情陪伴]（{endpoint.label}）失败: {scrub(str(e), endpoint)}")
+                final_answer = "".join(spoken) if spoken else ""
+
+    if not final_answer.strip() and endpoint is not None:
         system_prompt = comfort.comfort_prompt(settings.assistant_name, crisis, contact) + prompt_extras(settings.persona, memories)
         api_messages = (
             [{"role": "system", "content": system_prompt}]
@@ -652,13 +728,16 @@ def _comfort_answer(state: GraphState, question: str, settings: WorkspaceSetting
         emit(final_answer)
     logger.info(f"[生成节点] {'危机' if crisis else '倾诉'}陪伴完成，长度: {len(final_answer)} 字")
     updated_messages = _append_turn_messages(state, question, final_answer, safety=card)
-    return {"final_answer": final_answer, "messages": updated_messages, "safety": card}
+    out: dict[str, Any] = {"final_answer": final_answer, "messages": updated_messages, "safety": card}
+    if effects:
+        out["companion_effects"] = effects
+    return out
 
 
 def _agent_answer(state: GraphState, question: str, settings: WorkspaceSettings, memories: list[str]) -> dict:
-    """工具问答：模型自己决定查教务、通知、地图还是知识库。工具进度以 {"tool": ...} 推给前端。"""
+    """工具问答：模型自己决定查教务、通知、地图、知识库还是减压 MCP。"""
     emit = _delta_emitter()
-    writer = get_stream_writer()
+    writer = _safe_stream_writer()
     tenant_id = state.get("tenant_id") or GLOBAL_TENANT
     endpoint = _chat_endpoint(state)
     spoken: list[str] = []
@@ -667,20 +746,12 @@ def _agent_answer(state: GraphState, question: str, settings: WorkspaceSettings,
         spoken.append(text)
         emit(text)
 
-    def search(query: str) -> tuple[str, list[dict[str, Any]]]:
-        _prepare_index(tenant_id)
-        vdb = get_vector_db(tenant_id)
-        if vdb is None or not query:
-            return "", []
-        chunks = vdb.search_chunks(
-            query, tenant_id, top_k=settings.top_k, min_score=settings.similarity_threshold or None
-        )
-        return vdb.format_context(chunks), _chunk_sources(chunks)
-
     ctx = agent.ToolContext(
         tenant_id=tenant_id, user_id=state.get("user_id") or "", settings=settings,
-        search_knowledge=search, extras=prompt_extras(settings.persona, memories),
+        search_knowledge=_knowledge_searcher(tenant_id, settings),
+        extras=prompt_extras(settings.persona, memories),
         refusal=_refusal(settings) if settings.query_only else "",
+        on_companion=lambda eff: writer({"companion": eff}),
     )
     if endpoint is None:
         final_answer = NOT_CONFIGURED
@@ -703,7 +774,7 @@ def _agent_answer(state: GraphState, question: str, settings: WorkspaceSettings,
     updated_messages = _append_turn_messages(state, question, final_answer, sources=ctx.sources, tables=ctx.tables)
     return {
         "final_answer": final_answer, "messages": updated_messages, "sources": ctx.sources,
-        "tables": ctx.tables, "follow_ups": ctx.follow_ups,
+        "tables": ctx.tables, "follow_ups": ctx.follow_ups, "companion_effects": ctx.companion_effects,
     }
 
 
@@ -888,15 +959,57 @@ def _store_auto_memories(state: GraphState, facts: Any) -> None:
         logger.warning(f"[记忆] 自动写入失败: {e}")
 
 
+def _record_auto_mood(state: GraphState, emotion_data: dict[str, Any]) -> None:
+    """将脱敏的情绪能量波动自动沉淀进心情轨迹（若本轮 Agent 已经调用 write_mood_journal 则跳过重复记）。"""
+    user_id = state.get("user_id") or ""
+    if not user_id:
+        return
+    effects = state.get("companion_effects") or []
+    if any(isinstance(e, dict) and e.get("tool") == "write_mood_journal" for e in effects):
+        return
+
+    mood = str(emotion_data.get("core_emotion") or "").strip()
+    stressor = str(emotion_data.get("stress_source") or emotion_data.get("stressor") or "").strip()
+    summary = str(emotion_data.get("journal_summary") or "").strip()
+    followup_note = str(emotion_data.get("followup_note") or "").strip()
+    try:
+        energy = int(emotion_data.get("energy") or 5)
+    except (TypeError, ValueError):
+        energy = 5
+
+    is_comfort = state.get("intent") == "COMFORT"
+    if not (is_comfort or summary or followup_note or (energy <= 4 and mood)):
+        return
+
+    try:
+        import wellness_store
+
+        wellness_store.add_mood_journal(
+            state.get("tenant_id") or GLOBAL_TENANT,
+            user_id,
+            mood=mood or "倾诉",
+            energy=energy,
+            stressor=stressor or "日常",
+            summary=summary or f"聊起近期感受（{mood or '情绪波动'}）",
+            source="auto_chat",
+            followup_hours=18 if followup_note else None,
+            followup_note=followup_note,
+        )
+    except Exception as exc:
+        logger.warning(f"[Wellness] 自动记录情绪轨迹失败: {exc}")
+
+
 def finalize_node(state: GraphState) -> dict:
     """
     【收尾节点】- 等生成与情感两条分支都完成后，把情绪挂到本轮 assistant 消息上，
-    便于 Redis → UI 完整恢复。
+    便于 Redis → UI 完整恢复，并按需记录脱敏情绪轨迹。
     """
     emotion_data = state.get("emotion_data")
     messages = list(state.get("messages", []))
     if not emotion_data or not messages or messages[-1].get("role") != "assistant":
         return {}
+
+    _record_auto_mood(state, emotion_data)
 
     last = dict(messages[-1])
     last["emotion"] = emotion_data

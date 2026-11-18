@@ -46,6 +46,14 @@ export const PET_HEIGHT = Math.round((PET_WIDTH * PET_VIEWBOX.h) / PET_VIEWBOX.w
 /** 让桌宠看向页面上某一点：window.dispatchEvent(new CustomEvent(PET_LOOK_EVENT, { detail: { x, y } })) */
 export const PET_LOOK_EVENT = "deskpet:look";
 
+/** 让桌宠根据陪伴对话 / MCP 减压事件做出实时表情反馈 */
+export const PET_COMPANION_EVENT = "deskpet:companion";
+
+export interface PetCompanionDetail {
+  mood?: "normal" | "listening" | "cheering" | "night_care" | "relaxed";
+  text?: string;
+}
+
 const POSITION_KEY = "zhiyue.deskpet.position";
 const HINT_KEY = "zhiyue.deskpet.hinted";
 const EDGE = 8;
@@ -176,6 +184,23 @@ function usePetMood(thinking: boolean, failed: boolean) {
       react("petted", 1700);
       burst("heart", 3);
       if (Math.random() < 0.6) say(pick(PET_LINES));
+    },
+    companion: (cmood?: string, text?: string) => {
+      wake();
+      if (cmood === "cheering") {
+        react("happy", 2200);
+        burst("flower", 6);
+        say(text || "搞定啦，一步步来就很棒～", 3200);
+      } else if (cmood === "night_care" || cmood === "relaxed") {
+        react("petted", 2600);
+        burst("heart", 4);
+        say(text || "深夜啦，放慢呼吸歇一会儿吧～", 3400);
+      } else if (cmood === "listening") {
+        react("petted", 1800);
+        say(text || "我在认真听呢…", 2800);
+      } else if (text) {
+        say(text, 2800);
+      }
     },
     land: () => setBounce((b) => ({ kind: "land", n: b.n + 1 })),
   };
@@ -510,6 +535,21 @@ export function useDeskPet({ thinking, failed, onOpenSettings }: {
       poke();
     }
   };
+
+  const actionsRef = useRef(actions);
+  useEffect(() => {
+    actionsRef.current = actions;
+  });
+
+  useEffect(() => {
+    const onCompanion = (ev: Event) => {
+      const detail = (ev as CustomEvent<PetCompanionDetail>).detail;
+      if (!detail) return;
+      actionsRef.current.companion(detail.mood, detail.text);
+    };
+    window.addEventListener(PET_COMPANION_EVENT, onCompanion);
+    return () => window.removeEventListener(PET_COMPANION_EVENT, onCompanion);
+  }, []);
 
   const handlers = {
     onPointerDown: (e: ReactPointerEvent<HTMLDivElement>) => {

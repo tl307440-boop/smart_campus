@@ -42,6 +42,9 @@ model Tenant {
   studyMaterials StudyMaterial[]
   studyCards     StudyCard[]
   imBindings     ImBinding[]
+  companionTodos CompanionTodo[]
+  moodJournals   MoodJournal[]
+  companionStates CompanionState[]
 
   @@map("tenants")
 }
@@ -181,6 +184,9 @@ model User {
   studyMaterials StudyMaterial[]
   studyCards     StudyCard[]
   imBindings     ImBinding[]
+  companionTodos CompanionTodo[]
+  moodJournals   MoodJournal[]
+  companionStates CompanionState[]
 
   /// 学号只在同一学校内唯一
   @@unique([tenantId, studentNo])
@@ -457,14 +463,15 @@ model ImBinding {
   platform      String
   externalId    String
   displayName   String   @default("")
-  morningDigest Boolean  @default(true)
-  digestTime    String   @default("07:30")
-  gradeAlert    Boolean  @default(true)
-  ticketAlert   Boolean  @default(true)
-  newsKeywords  String   @default("")
-  lastGradeHash String   @default("")
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @default(now())
+  morningDigest     Boolean  @default(true)
+  digestTime        String   @default("07:30")
+  gradeAlert        Boolean  @default(true)
+  ticketAlert       Boolean  @default(true)
+  companionFollowup Boolean  @default(true)
+  newsKeywords      String   @default("")
+  lastGradeHash     String   @default("")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @default(now())
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -472,4 +479,70 @@ model ImBinding {
   @@unique([tenantId, platform, externalId])
   @@index([tenantId, userId])
   @@map("im_bindings")
+}
+
+/// 压力拆解微待办：通过 MCP 工具由焦虑倾诉自动拆解或手动添加，降低启动门槛
+model CompanionTodo {
+  id          String    @id
+  tenantId    String
+  userId      String
+  title       String
+  detail      String    @default("")
+  estMinutes  Int       @default(20)
+  priority    String    @default("medium")
+  dueLabel    String    @default("")
+  source      String    @default("mcp_decompose")
+  status      String    @default("pending")
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId, status, createdAt(sort: Desc)])
+  @@map("companion_todos")
+}
+
+/// 脱敏情绪轨迹手账与跨天主动回访队列（由 wellness_store / MCP 读写）
+model MoodJournal {
+  id           String    @id
+  tenantId     String
+  userId       String
+  mood         String
+  energy       Int       @default(5)
+  stressor     String    @default("日常")
+  summary      String
+  source       String    @default("mcp_journal")
+  followupAt   DateTime?
+  followupNote String    @default("")
+  followupSent Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId, createdAt(sort: Desc)])
+  @@index([followupSent, followupAt])
+  @@map("mood_journals")
+}
+
+/// 减压伴学舱实时状态：白噪音、呼吸节律、番茄钟与桌宠情绪同步
+model CompanionState {
+  id            String   @id
+  tenantId      String
+  userId        String
+  ambientSound  String   @default("none")
+  breathingMode String   @default("none")
+  focusMinutes  Int      @default(25)
+  nightMode     Boolean  @default(false)
+  petMood       String   @default("normal")
+  note          String   @default("")
+  updatedAt     DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId])
+  @@map("companion_states")
 }

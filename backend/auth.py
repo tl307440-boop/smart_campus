@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from typing import Annotated
+from urllib.parse import quote
 
 import jwt
 from env_config import load_backend_env
@@ -161,6 +163,49 @@ def scoped_thread_id(user: CurrentUser, thread_id: str) -> str:
     thread_id 由浏览器生成，不加前缀的话，拿到别人的 id 就能读到别人的对话历史。
     """
     return f"{user.tenant_id}:{user.id}:{thread_id}"
+
+
+MAGIC_TOKEN_TTL_SECONDS = 900
+
+
+def public_web_origin() -> str:
+    """获取可从手机企微/微信直接打开的网页根地址。"""
+    explicit = os.getenv("PUBLIC_WEB_ORIGIN", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    origins = os.getenv("FRONTEND_ORIGINS", "http://localhost:3000").split(",")
+    for item in origins:
+        cleaned = item.strip().rstrip("/")
+        if cleaned:
+            return cleaned
+    return "http://localhost:3000"
+
+
+def create_magic_token(tenant_id: str, user_id: str, *, ttl_seconds: int = MAGIC_TOKEN_TTL_SECONDS) -> str:
+    """签发短期一次性免登跳转令牌（purpose='magic_link'），供企微直达手机端 H5/PWA。"""
+    now = int(time.time())
+    payload = {
+        "iss": JWT_ISSUER,
+        "sub": user_id,
+        "tid": tenant_id,
+        "purpose": "magic_link",
+        "iat": now,
+        "exp": now + max(60, int(ttl_seconds)),
+    }
+    return jwt.encode(payload, jwt_secret(), algorithm=JWT_ALGORITHM)
+
+
+def build_magic_url(
+    tenant_id: str,
+    user_id: str,
+    *,
+    next_path: str = "/?view=archive",
+    ttl_seconds: int = MAGIC_TOKEN_TTL_SECONDS,
+) -> str:
+    """构造带免登令牌的移动端直达链接（不把长效访问 JWT 暴露在 URL 中）。"""
+    safe_next = next_path if next_path.startswith("/") and not next_path.startswith("//") else "/"
+    token = create_magic_token(tenant_id, user_id, ttl_seconds=ttl_seconds)
+    return f"{public_web_origin()}/magic?t={quote(token, safe='')}&next={quote(safe_next, safe='')}"
 
 
 CurrentUserDep = Annotated[CurrentUser, Depends(current_user)]

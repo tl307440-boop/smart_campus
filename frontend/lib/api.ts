@@ -168,6 +168,21 @@ export interface DocumentInfo {
   source: DocumentSource;
 }
 
+export interface CompanionEffect {
+  source?: string;
+  tool?: string;
+  kind?: "todos_added" | "todo_completed" | "journal_saved" | "cabin_updated" | string;
+  pet_mood?: "normal" | "listening" | "cheering" | "night_care" | "relaxed";
+  ambient_sound?: AmbientSound;
+  breathing_mode?: BreathingMode;
+  focus_minutes?: number;
+  night_mode?: boolean;
+  count?: number;
+  energy?: number;
+  mood?: string;
+  note?: string;
+}
+
 export interface ChatDone {
   answer: string;
   intent: string;
@@ -175,6 +190,7 @@ export interface ChatDone {
   sources: ChatSource[];
   tables: ChatTable[];
   follow_ups?: string[];
+  companion?: CompanionEffect[];
   emotion: EmotionData | null;
   safety: SafetyCardData | null;
   /** 这一轮入库后那条回答的编号；没入库（访客、库连不上）时没有 */
@@ -192,6 +208,7 @@ export interface ChatStatus {
 export interface ChatHandlers {
   onStatus?: (status: ChatStatus) => void;
   onTool?: (event: ChatToolEvent) => void;
+  onCompanion?: (effect: CompanionEffect) => void;
   onDelta?: (text: string) => void;
   onDone?: (result: ChatDone) => void;
   onError?: (message: string) => void;
@@ -596,6 +613,9 @@ function dispatchFrame(frame: string, handlers: ChatHandlers) {
       break;
     case "tool":
       handlers.onTool?.(payload as ChatToolEvent);
+      break;
+    case "companion":
+      handlers.onCompanion?.(payload as CompanionEffect);
       break;
     case "done":
       handlers.onDone?.(payload as ChatDone);
@@ -1026,6 +1046,7 @@ export interface ImBinding {
   digest_time: string;
   grade_alert: boolean;
   ticket_alert: boolean;
+  companion_followup?: boolean;
   news_keywords: string;
 }
 
@@ -1050,6 +1071,7 @@ export function updateImBinding(
     digest_time: string;
     grade_alert: boolean;
     ticket_alert: boolean;
+    companion_followup: boolean;
     news_keywords: string;
   }>,
 ): Promise<ImBinding> {
@@ -1067,5 +1089,129 @@ export function fetchDigestPreview(keywords = "", day?: string): Promise<{ date:
   const qs = params.toString();
   return request<{ date: string; content: string }>(`/api/im/digest-preview${qs ? `?${qs}` : ""}`, {
     cache: "no-store",
+  });
+}
+
+export function createMobileMagicLink(nextPath = "/?view=archive"): Promise<{ url: string; expires_in: number }> {
+  return request<{ url: string; expires_in: number }>(
+    `/api/im/magic-link?next_path=${encodeURIComponent(nextPath)}`,
+    { method: "POST" },
+  );
+}
+
+// ---------------- 情感陪伴减压舱、微待办与 MCP 状态 ----------------
+
+export type AmbientSound = "none" | "rain" | "library" | "night_fire" | "waves";
+export type BreathingMode = "none" | "4-7-8" | "box";
+export type CompanionPetMood = "normal" | "listening" | "cheering" | "night_care" | "relaxed";
+
+export interface CompanionTodo {
+  id: string;
+  title: string;
+  detail: string;
+  est_minutes: number;
+  priority: "high" | "medium" | "low";
+  due_label: string;
+  source: string;
+  status: "pending" | "done";
+  completed_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MoodJournal {
+  id: string;
+  mood: string;
+  energy: number;
+  stressor: string;
+  summary: string;
+  source: string;
+  followup_at: string;
+  followup_note: string;
+  followup_sent: boolean;
+  created_at: string;
+}
+
+export interface CabinState {
+  ambient_sound: AmbientSound;
+  breathing_mode: BreathingMode;
+  focus_minutes: number;
+  night_mode: boolean;
+  pet_mood: CompanionPetMood;
+  note: string;
+  updated_at: string;
+}
+
+export interface McpStatus {
+  enabled: boolean;
+  servers: {
+    name: string;
+    connected: boolean;
+    transport: string;
+    tool_count?: number;
+    error?: string;
+  }[];
+  tools: {
+    server: string;
+    name: string;
+    title: string;
+    description: string;
+  }[];
+}
+
+export interface WellnessDashboard {
+  todos: CompanionTodo[];
+  journals: MoodJournal[];
+  avg_energy: number | null;
+  cabin: CabinState;
+  mcp: McpStatus;
+}
+
+export function fetchWellnessDashboard(days = 14): Promise<WellnessDashboard> {
+  return request<WellnessDashboard>(`/api/wellness/dashboard?days=${days}`, { cache: "no-store" });
+}
+
+export function createWellnessTodo(input: {
+  title: string;
+  detail?: string;
+  est_minutes?: number;
+  priority?: "high" | "medium" | "low";
+  due_label?: string;
+}): Promise<CompanionTodo> {
+  return jsonPost<CompanionTodo>("/api/wellness/todos", input);
+}
+
+export function toggleWellnessTodo(todoId: string, done?: boolean): Promise<CompanionTodo> {
+  return request<CompanionTodo>(`/api/wellness/todos/${encodeURIComponent(todoId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ done }),
+  });
+}
+
+export function deleteWellnessTodo(todoId: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/wellness/todos/${encodeURIComponent(todoId)}`, { method: "DELETE" });
+}
+
+export function createWellnessJournal(input: {
+  mood: string;
+  energy: number;
+  stressor?: string;
+  summary: string;
+  followup_hours?: number;
+  followup_note?: string;
+}): Promise<MoodJournal> {
+  return jsonPost<MoodJournal>("/api/wellness/journals", input);
+}
+
+export function deleteWellnessJournal(journalId: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/wellness/journals/${encodeURIComponent(journalId)}`, { method: "DELETE" });
+}
+
+export function patchWellnessCabin(patch: Partial<CabinState>): Promise<CabinState> {
+  return request<CabinState>("/api/wellness/cabin", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
   });
 }
