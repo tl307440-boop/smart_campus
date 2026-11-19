@@ -6,9 +6,11 @@ import { CalendarPane } from "@/components/CalendarPane";
 import { ImPushPane } from "@/components/ImPushPane";
 import { JwAccountPane } from "@/components/JwAccountPane";
 import { KnowledgePane } from "@/components/KnowledgePane";
+import { TicketsPane } from "@/components/TicketsPane";
+import { UsagePane } from "@/components/UsagePane";
 import { WorkspacePane } from "@/components/WorkspaceAdmin";
 
-type ConnectSubTab = "im" | "jw" | "service" | "admin";
+type ConnectSubTab = "im" | "jw" | "tickets" | "service" | "admin";
 
 interface Props {
   jwOn: boolean;
@@ -24,6 +26,7 @@ export function ConnectPane({ jwOn, isStaff, isAdmin, onJwUpdated, onWorkspaceSa
   const tabs: { id: ConnectSubTab; label: string }[] = [
     { id: "im", label: "企微 / 手机端" },
     { id: "jw", label: "教务与日历" },
+    { id: "tickets", label: isStaff ? "人工工单管理" : "人工求助工单" },
     { id: "service", label: "AI 服务" },
     ...((isStaff || isAdmin) ? [{ id: "admin" as const, label: "校方后台" }] : []),
   ];
@@ -65,14 +68,19 @@ export function ConnectPane({ jwOn, isStaff, isAdmin, onJwUpdated, onWorkspaceSa
         </div>
       )}
 
+      {subTab === "tickets" && <TicketsPane isStaff={isStaff} />}
+
       {subTab === "service" && <ServicePane isAdmin={isAdmin} />}
 
       {subTab === "admin" && (isStaff || isAdmin) && (
         <div className="space-y-8">
           {isStaff && <KnowledgePane />}
           {isAdmin && (
-            <div className={isStaff ? "border-t-2 border-dashed border-rule pt-6" : ""}>
+            <div className={isStaff ? "border-t-2 border-dashed border-rule pt-6 space-y-8" : "space-y-8"}>
               <WorkspacePane onSaved={onWorkspaceSaved} />
+              <div className="border-t-2 border-dashed border-rule pt-6">
+                <UsagePane />
+              </div>
             </div>
           )}
         </div>
